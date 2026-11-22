@@ -300,6 +300,14 @@ fn a_session_that_cannot_open_fails_at_once_with_the_reason() {
 }
 
 /// Opens a Session to `fixture`, its key already known.
+/// Waits up to 5 s for `wakes` to reach `count`.
+fn wait_for_wakes(wakes: &AtomicUsize, count: usize) {
+    let start = std::time::Instant::now();
+    while wakes.load(Ordering::SeqCst) < count && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn opened(ssh: &Ssh, fixture: &Fixture) -> sshexplorer::ssh::Opened {
     let (_dir, path) = known_hosts(&format!("{}\n", fixture.known_hosts_line()));
     let opening = ssh.open(target(fixture), path);
@@ -332,7 +340,11 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
         woken.fetch_add(1, Ordering::SeqCst);
     });
     let opened = opened(&ssh, &fixture);
+    // Each event's wake follows it from the SSH thread: let the password prompt's and
+    // the Opened event's land first, or a late one would count as the answer's.
+    wait_for_wakes(&wakes, 2);
     let before = wakes.load(Ordering::SeqCst);
+    assert_eq!(before, 2, "one wake per event so far");
 
     let request = opened.session.list("/srv".to_string());
     let listing = request
@@ -340,12 +352,10 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
         .expect("the listing arrives")
         .expect("the listing succeeds");
     // The wake follows the answer from the SSH thread, so it may land a moment later.
-    let start = std::time::Instant::now();
-    while wakes.load(Ordering::SeqCst) <= before && start.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(
-        wakes.load(Ordering::SeqCst) > before,
+    wait_for_wakes(&wakes, before + 1);
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        before + 1,
         "the answer wakes the frame"
     );
     assert_eq!(listing.path, "/srv");

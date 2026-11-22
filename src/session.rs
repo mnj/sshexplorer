@@ -844,12 +844,14 @@ impl Session {
         let (mut now_clicked, mut stop) = (false, false);
         ui.horizontal(|ui| {
             ui.add(widgets::warning_message(&headline));
+            // The buttons come before the status, whose width changes as it counts down,
+            // so they stay where they are.
             match &status {
                 Some(status) => {
-                    let t = ui.tokens();
-                    ui.label(t.ty.body.rich(status.as_str()).color(t.color.text.muted));
                     now_clicked = ui.add(widgets::button("Reconnect now").flat()).clicked();
                     stop = ui.add(widgets::button("Stop").flat()).clicked();
+                    let t = ui.tokens();
+                    ui.label(t.ty.body.rich(status.as_str()).color(t.color.text.muted));
                 }
                 None => {
                     now_clicked = ui
