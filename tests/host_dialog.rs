@@ -299,6 +299,12 @@ fn enter_opens_a_saved_host_in_its_initial_remote_folder_under_its_display_name(
     until(&mut harness, "the Session tab", |h| {
         tab_label_for(h, "Fixture")
     });
+    // Tree view opens on the Initial remote folder; Folder view lists it.
+    until(&mut harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "docs").is_some()
+    });
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Num2);
+    harness.run_ok();
     until(&mut harness, "the listing", |h| {
         h.query_by_label("plan.txt").is_some()
     });
@@ -355,7 +361,10 @@ fn tabs_follow_the_tab_bar_edge_and_ctrl_tab_cycles_sessions() {
     // On the left edge the tabs are stacked down the left of the listing.
     let first = harness.get_by_role_and_label(Role::Tab, "Fixture").rect();
     let second = harness.get_by_role_and_label(Role::Tab, "Second").rect();
-    let listing = harness.get_by_label("notes.txt").rect();
+    until(&mut harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
+    let listing = harness.get_by_role_and_label(Role::Row, "tester").rect();
     assert!(second.top() >= first.bottom() - 1.0, "{first:?} {second:?}");
     assert!(first.right() <= listing.left(), "{first:?} {listing:?}");
 
