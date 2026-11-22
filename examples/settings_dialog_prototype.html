@@ -1,0 +1,451 @@
+<!doctype html>
+<!--
+  PROTOTYPE. Throwaway. Not the app.
+
+  Question (sshexplorer map ticket #15): How is the Settings dialog arranged, and how does
+  the operator reach it?
+
+  Three variants, switchable via ?variant=A|B|C and the floating bar (or ← →):
+    A  Matches the Host dialog: modal, page list left, fields right.
+    B  One scrolling page: modal, a "Find a setting" field, every section stacked.
+    C  Side panel: not modal, takes Preview's place, so live changes show on the listing.
+
+  All three: opened by the toolbar gear and Ctrl+, ; every change applies at once (no
+  OK/Apply), so the only exit is Close / Escape. The key-binding capture differs per variant.
+  Behind the dialog is a mock Session window so Theme, Accent, UI scale, Density, fonts,
+  icons, hidden entries and the tab-bar edge visibly change.
+
+  Open: double-click this file (or xdg-open examples/settings_dialog_prototype.html).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings Dialog Prototype</title>
+<style>
+:root{
+  --paper0:#f0eee6;--paper1:#faf9f5;--paper2:#fdfcfa;--well:#ffffff;
+  --ink:#1f1e1c;--ink-soft:#59574f;--line:#dedbd0;--line-strong:#c4c0b3;
+  --fill:rgba(31,30,28,.07);--hover:rgba(31,30,28,.055);--press:rgba(31,30,28,.11);
+  --scrim:rgba(0,0,0,.35);--red:#a8231b;--red-tint:rgba(200,55,45,.13);--amber:#7a5200;--amber-tint:rgba(217,154,0,.2);
+  --shadow:0 12px 40px rgba(0,0,0,.12);--shadow-pop:0 6px 24px rgba(0,0,0,.1);
+  --primary-bg:#1f1e1c;--primary-ink:#faf9f5;
+  --accent:#1f5fbf;--accent-text:#1b55ad;--accent-tint:rgba(31,95,191,.14);
+  --row:30px;--pad:8px;--ui:Inter,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;
+  --dir:#b07a10;--txt:#79766e;--src:#228a51;--md:#347dbc;--img:#7b4fc0;--pdf:#b3261e;--arc:#ac6921;
+}
+:root[data-theme=dark]{
+  --paper0:#1f1e1d;--paper1:#262624;--paper2:#2c2b29;--well:#1a1918;
+  --ink:#f3f1ea;--ink-soft:#c2c0b7;--line:#3b3a37;--line-strong:#55534e;
+  --fill:rgba(243,241,234,.08);--hover:rgba(243,241,234,.07);--press:rgba(243,241,234,.13);
+  --scrim:rgba(0,0,0,.55);--red:#f5998c;--red-tint:rgba(229,83,74,.2);--amber:#e5b04a;--amber-tint:rgba(229,165,48,.16);
+  --shadow:0 12px 40px rgba(0,0,0,.47);--shadow-pop:0 6px 24px rgba(0,0,0,.4);
+  --primary-bg:#f3f1ea;--primary-ink:#1f1e1d;
+  --dir:#e5b04a;--txt:#96918a;--src:#2fb36b;--md:#3d8fd6;--img:#a985e8;--pdf:#ef6a5a;--arc:#e08a2e;
+}
+:root[data-density=compact]{--row:26px;--pad:6px}
+:root[data-animate=off] *{transition:none!important}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--paper0);color:var(--ink);font:13px/1.4 var(--ui);overflow:hidden}
+button,input,select{font:inherit;color:inherit}
+.mono{font-family:var(--mono)}
+.muted{color:var(--ink-soft)}
+#app{height:100vh;display:flex;flex-direction:column}
+/* ---------- mock Session window ---------- */
+.shell{flex:1;display:flex;min-height:0}
+.shell.top{flex-direction:column}.shell.bottom{flex-direction:column-reverse}
+.shell.left{flex-direction:row}.shell.right{flex-direction:row-reverse}
+.tabs{display:flex;gap:2px;padding:6px;background:var(--paper0);border-color:var(--line)}
+.shell.top .tabs{border-bottom:1px solid var(--line)}.shell.bottom .tabs{border-top:1px solid var(--line)}
+.shell.left .tabs,.shell.right .tabs{flex-direction:column;width:150px}
+.shell.left .tabs{border-right:1px solid var(--line)}.shell.right .tabs{border-left:1px solid var(--line)}
+.tab{padding:0 12px;height:var(--row);display:flex;align-items:center;gap:6px;border-radius:7px;color:var(--ink-soft);cursor:default}
+.tab.on{background:var(--paper1);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.tab.on::before{content:"";width:6px;height:6px;border-radius:3px;background:var(--accent)}
+.session{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.toolbar{display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--paper1);border-bottom:1px solid var(--line)}
+.path{flex:1;height:var(--row);display:flex;align-items:center;padding:0 10px;background:var(--well);border:1px solid var(--line);border-radius:7px;font-family:var(--mono);font-size:12px}
+.btn{height:var(--row);padding:0 12px;border:1px solid var(--line);background:var(--paper2);border-radius:7px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;transition:background .12s}
+.btn:hover{background:var(--hover)}.btn:active{background:var(--press)}
+.btn.primary{background:var(--primary-bg);color:var(--primary-ink);border-color:transparent}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.icon{width:var(--row);padding:0;justify-content:center}
+.btn.on{background:var(--accent-tint);color:var(--accent-text);border-color:transparent}
+.btn:focus-visible,.field:focus-visible,.kchip:focus-visible,.navitem:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.kbd{font-family:var(--mono);font-size:11px;padding:1px 5px;border:1px solid var(--line);border-radius:4px;color:var(--ink-soft);background:var(--paper2)}
+.body{flex:1;display:flex;min-height:0}
+.listing{flex:1;overflow:auto;background:var(--paper1);padding:4px}
+.cols{display:grid;grid-template-columns:1fr 80px 130px 100px;gap:8px;padding:0 10px;height:26px;align-items:center;color:var(--ink-soft);font-size:12px;border-bottom:1px solid var(--line)}
+.row{display:grid;grid-template-columns:1fr 80px 130px 100px;gap:8px;padding:0 10px;height:var(--row);align-items:center;border-radius:6px}
+.row.focus{background:var(--accent-tint);box-shadow:inset 0 0 0 1px var(--accent)}
+.row .n{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
+.row .c{font-family:var(--mono);font-size:12px;color:var(--ink-soft)}
+.ico{width:14px;height:14px;border-radius:3px;flex:none}
+:root[data-icons=off] .ico{display:none}
+.preview{width:300px;border-left:1px solid var(--line);background:var(--paper1);display:flex;flex-direction:column}
+.preview h4{margin:0;padding:10px 12px;border-bottom:1px solid var(--line);font-weight:600}
+.preview pre{margin:0;padding:12px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;color:var(--ink);flex:1;overflow:auto}
+.status{height:24px;display:flex;align-items:center;padding:0 10px;gap:16px;font-size:12px;color:var(--ink-soft);border-top:1px solid var(--line);background:var(--paper0)}
+/* ---------- dialogs ---------- */
+.scrim{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;z-index:10}
+.dialog{background:var(--paper2);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden;max-height:calc(100vh - 40px)}
+.dhead{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.dhead h2{font-size:15px;margin:0;font-weight:600;flex:1}
+.dfoot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--line);background:var(--paper1)}
+.spacer{flex:1}
+.nav{width:180px;border-right:1px solid var(--line);padding:8px;background:var(--paper1);overflow:auto}
+.navitem{display:flex;align-items:center;height:var(--row);padding:0 10px;border-radius:7px;cursor:pointer;color:var(--ink-soft);border:0;background:none;width:100%;text-align:left}
+.navitem:hover{background:var(--hover)}
+.navitem.on{background:var(--accent-tint);color:var(--accent-text);font-weight:500}
+.page{flex:1;overflow:auto;padding:16px 20px}
+.page h3,.sec h3{margin:0 0 10px;font-size:13px;font-weight:600}
+.sec{padding:14px 0;border-bottom:1px solid var(--line)}
+.sec:last-child{border-bottom:0}
+.form{display:grid;grid-template-columns:170px 1fr;gap:8px 16px;align-items:center}
+.form .lab{color:var(--ink-soft)}
+.form .note{grid-column:2;font-size:12px;color:var(--ink-soft);margin-top:-4px}
+.form .warn{grid-column:2;font-size:12px;color:var(--amber);background:var(--amber-tint);padding:4px 8px;border-radius:6px;margin-top:-2px}
+.field{height:var(--row);border:1px solid var(--line);background:var(--well);border-radius:7px;padding:0 10px;min-width:0}
+select.field{padding-right:4px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--well);flex-wrap:wrap}
+.seg button{height:calc(var(--row) - 2px);padding:0 12px;border:0;background:none;cursor:pointer;border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--accent-tint);color:var(--accent-text);font-weight:500}
+.sw{position:relative;width:28px;height:16px;border-radius:8px;background:var(--line-strong);border:0;cursor:pointer;flex:none;transition:background .12s}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:6px;background:#fff;transition:left .12s}
+.sw.on{background:var(--accent)}.sw.on::after{left:14px}
+.swrow{display:flex;align-items:center;gap:10px}
+.swatches{display:flex;gap:6px;flex-wrap:wrap}
+.swatch{width:22px;height:22px;border-radius:11px;border:2px solid transparent;cursor:pointer;padding:0}
+.swatch.on{box-shadow:0 0 0 2px var(--paper2),0 0 0 4px var(--ink)}
+.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+/* key table */
+.keys{width:100%;border-collapse:collapse}
+.keys td{height:var(--row);padding:0 8px;border-bottom:1px solid var(--line)}
+.keys td.grp{font-weight:600;padding-top:12px;color:var(--ink-soft);font-size:12px}
+.keys tr.changed td:first-child::after{content:" •";color:var(--accent-text)}
+.kchip{font-family:var(--mono);font-size:12px;min-width:90px;height:calc(var(--row) - 6px);padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--paper1);cursor:pointer}
+.kchip:hover{background:var(--hover)}
+.kchip.rec{border-color:var(--accent);background:var(--accent-tint);color:var(--accent-text);animation:pulse 1s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 3px var(--accent-tint)}}
+.conflict{color:var(--red);background:var(--red-tint);padding:3px 8px;border-radius:6px;font-size:12px}
+.hl{background:var(--amber-tint);border-radius:3px}
+.empty{padding:30px;text-align:center;color:var(--ink-soft)}
+/* variant C panel */
+.panel{width:380px;border-left:1px solid var(--line);background:var(--paper2);display:flex;flex-direction:column;min-height:0}
+.panel .dhead{padding:10px 12px}
+.panel .page{padding:4px 14px 14px}
+.panel .form{grid-template-columns:120px 1fr}
+.acc{border-bottom:1px solid var(--line)}
+.acc>button{width:100%;display:flex;align-items:center;gap:8px;height:34px;border:0;background:none;cursor:pointer;font-weight:600;padding:0}
+.acc>button::before{content:"▸";color:var(--ink-soft);transition:transform .12s;display:inline-block}
+.acc.open>button::before{transform:rotate(90deg)}
+.acc>div{padding:2px 0 12px;display:none}.acc.open>div{display:block}
+/* capture popover (B) */
+.cap{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.15)}
+.cap .dialog{width:380px}
+.capkeys{font-family:var(--mono);font-size:20px;text-align:center;padding:22px 10px;border:1px dashed var(--line-strong);border-radius:10px;margin:14px 16px;background:var(--well);min-height:72px}
+/* floating switcher (prototype chrome, not the design) */
+#switcher{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:100;display:flex;align-items:center;gap:4px;background:#111;color:#fff;border-radius:999px;padding:4px;box-shadow:0 6px 24px rgba(0,0,0,.4);font:12px/1 system-ui,sans-serif}
+#switcher button{background:#333;color:#fff;border:0;border-radius:999px;width:28px;height:28px;cursor:pointer;font-size:14px}
+#switcher span{padding:0 12px;white-space:nowrap}
+.protonote{position:fixed;top:8px;right:8px;z-index:100;background:#111;color:#ffd54a;font:11px/1.3 system-ui;padding:4px 8px;border-radius:6px}
+</style>
+</head>
+<body>
+<div class="protonote">PROTOTYPE · settings dialog · ticket #15</div>
+<div id="app"></div>
+<div id="overlay"></div>
+<div id="switcher">
+  <button id="prev" title="Previous variant (←)">‹</button>
+  <span id="vlabel"></span>
+  <button id="next" title="Next variant (→)">›</button>
+</div>
+<script>
+// ---------------- state ----------------
+const ACCENTS={Graphite:["#5b5a55","#4a4944","#b9b7ae"],Blue:["#1f5fbf","#1b55ad","#8fbaf8"],Teal:["#0f7c80","#0b6d70","#6fcdd0"],
+  Green:["#26734a","#1f6139","#7cc792"],Violet:["#6a48c2","#5b3bb0","#b9a2f3"],Orange:["#c0571b","#a64a14","#f2a26b"],Pink:["#c2336f","#a82a5f","#f28cb6"]};
+const DEFAULT_KEYS={
+  "Browsing":[["Download","Ctrl+S"],["Toggle hidden entries","Ctrl+H"],["Tree view","Ctrl+1"],["Folder view","Ctrl+2"],["Parent directory","Backspace"],["Toggle Focused entry in Selection","Ctrl+Space"],["Select all","Ctrl+A"]],
+  "Search":[["Focus search field","Ctrl+F"]],
+  "Sessions":[["Next Session","Ctrl+Tab"],["Previous Session","Ctrl+Shift+Tab"],["Close Session","Ctrl+W"],["Open Host dialog","Ctrl+O"],["Open Settings","Ctrl+,"]],
+  "Appearance":[["Zoom in","Ctrl+="],["Zoom out","Ctrl+-"],["Reset zoom","Ctrl+0"]],
+};
+const DEFAULTS={theme:"Follow system",accent:"Blue",scale:100,density:"Comfortable",uiFont:"Inter",monoFont:"JetBrains Mono",
+  icons:true,animate:"Follow system",tabEdge:"Top",hidden:false,matchCap:1000,followLinks:false,previewCap:10,autoplay:false,
+  scratch:"In memory",scratchDir:"",keepMtime:true,keepExec:true,useSshConfig:true};
+const S={...DEFAULTS,keys:clone(DEFAULT_KEYS)};
+function clone(o){return JSON.parse(JSON.stringify(o))}
+const BUNDLED_UI=["Inter"],BUNDLED_MONO=["JetBrains Mono"];
+const INSTALLED_UI=["Inter","Cantarell","Noto Sans","Ubuntu","Fira Sans (not installed)"];
+const INSTALLED_MONO=["JetBrains Mono","Fira Code","Hack","DejaVu Sans Mono","Iosevka (not installed)"];
+let settingsOpen=true, capture=null /* {group,idx} */, pageA="Appearance", filterB="", openC=new Set(["Appearance"]);
+let variant=new URLSearchParams(location.search).get("variant")||"A";
+const VARIANTS={A:"Matches Host dialog",B:"One scrolling page",C:"Side panel, not modal"};
+
+// ---------------- apply to the mock window ----------------
+function applyLook(){
+  const r=document.documentElement;
+  const sysDark=matchMedia("(prefers-color-scheme: dark)").matches;
+  const dark=S.theme==="Dark"||(S.theme==="Follow system"&&sysDark);
+  r.dataset.theme=dark?"dark":"light";
+  r.dataset.density=S.density.toLowerCase();
+  r.dataset.icons=S.icons?"on":"off";
+  r.dataset.animate=S.animate==="Off"?"off":"on";
+  const a=ACCENTS[S.accent];
+  r.style.setProperty("--accent",dark&&S.accent!=="Graphite"?a[0]:a[0]);
+  r.style.setProperty("--accent-text",dark?a[2]:a[1]);
+  r.style.setProperty("--accent-tint",hexA(a[0],dark?.24:.14));
+  const ui=S.uiFont.includes("not installed")?"Inter":S.uiFont, mono=S.monoFont.includes("not installed")?"JetBrains Mono":S.monoFont;
+  r.style.setProperty("--ui",`"${ui}",Inter,system-ui,sans-serif`);
+  r.style.setProperty("--mono",`"${mono}","JetBrains Mono",ui-monospace,monospace`);
+  document.getElementById("app").style.zoom=S.scale/100;
+  document.getElementById("overlay").style.zoom=S.scale/100;
+}
+function hexA(h,a){const n=parseInt(h.slice(1),16);return `rgba(${n>>16},${n>>8&255},${n&255},${a})`}
+
+const FILES=[["▾ etc","dir","—","2026-11-20 09:12","drwxr-xr-x",0],["  ▸ nginx","dir","—","2026-11-18 14:40","drwxr-xr-x",1],
+ ["  ▸ .ssh","dir","—","2026-10-02 08:00","drwx------",1,true],["  hosts","txt","412 B","2026-09-30 11:02","-rw-r--r--",1],
+ ["  .profile","txt","807 B","2026-06-11 10:20","-rw-r--r--",1,true],["  deploy.sh","src","2.1 KiB","2026-11-21 17:33","-rwxr-xr-x",1],
+ ["  README.md","md","4.6 KiB","2026-11-19 12:00","-rw-r--r--",1],["  logo.png","img","38 KiB","2026-08-03 09:45","-rw-r--r--",1],
+ ["  manual.pdf","pdf","1.2 MiB","2026-07-14 16:10","-rw-r--r--",1],["  backup.tar.gz","arc","88 MiB","2026-11-01 02:00","-rw-r-----",1]];
+
+function renderApp(){
+  const edge=S.tabEdge.toLowerCase();
+  const rows=FILES.filter(f=>S.hidden||!f[6]).map((f,i)=>`<div class="row ${f[0].includes("deploy")?"focus":""}">
+    <div class="n">${f[0].match(/^ */)[0].replace(/ /g,"&nbsp;&nbsp;")}<span class="ico" style="background:var(--${f[1]})"></span>${f[0].trim()}</div>
+    <div class="c">${f[2]}</div><div class="c">${f[3]}</div><div class="c">${f[4]}</div></div>`).join("");
+  const panelC=variant==="C"&&settingsOpen;
+  document.getElementById("app").innerHTML=`
+  <div class="shell ${edge}">
+    <div class="tabs"><div class="tab on">web-01</div><div class="tab">nas.lan</div><div class="tab">deploy@10.0.4.7:2222</div></div>
+    <div class="session">
+      <div class="toolbar">
+        <button class="btn on" title="Tree view (Ctrl+1)">Tree</button><button class="btn" title="Folder view (Ctrl+2)">Folder</button>
+        <div class="path">/etc</div>
+        <button class="btn" title="Search (Ctrl+F)">⌕ Search</button>
+        <button class="btn" title="Download (Ctrl+S)">↓ Download</button>
+        <button class="btn" title="Open Host dialog (Ctrl+O)">Hosts</button>
+        <button class="btn icon ${settingsOpen?"on":""}" id="gear" title="Settings (${keyOf("Open Settings")})">⚙</button>
+      </div>
+      <div class="body">
+        <div class="listing"><div class="cols"><div>Name</div><div>Size</div><div>Modified</div><div>Permissions</div></div>${rows}</div>
+        ${panelC?`<div class="panel" id="panelC"></div>`:`<div class="preview"><h4>deploy.sh</h4>
+          <div class="status" style="border:0;background:none;padding:6px 12px;height:auto">2.1 KiB · -rwxr-xr-x · 2026-11-21 17:33</div>
+          <pre>#!/bin/sh
+set -eu
+rsync -a ./dist/ /srv/www/
+systemctl reload nginx
+echo "deployed $(date)"</pre></div>`}
+      </div>
+      <div class="status"><span>web-01 · Readonly</span><span>10 entries</span><span>${S.hidden?"Hidden entries shown":"Hidden entries off"}</span></div>
+    </div>
+  </div>`;
+  document.getElementById("gear").onclick=()=>{settingsOpen=!settingsOpen;render()};
+}
+function keyOf(action){for(const g in S.keys)for(const k of S.keys[g])if(k[0]===action)return k[1];return ""}
+
+// ---------------- controls (shared helpers; layout differs per variant) ----------------
+function seg(key,opts){return `<div class="seg">${opts.map(o=>`<button class="${S[key]==o?"on":""}" data-set="${key}" data-val="${o}">${o}</button>`).join("")}</div>`}
+function sw(key,label){return `<div class="swrow"><button class="sw ${S[key]?"on":""}" data-toggle="${key}" aria-label="${label}"></button><span>${label}</span></div>`}
+function sel(key,opts){return `<select class="field" data-sel="${key}">${opts.map(o=>`<option ${S[key]==o?"selected":""}>${o}</option>`).join("")}</select>`}
+function num(key,suffix,min,max,step){return `<div class="inline"><input class="field mono" style="width:110px" type="number" min="${min}" max="${max}" step="${step||1}" value="${S[key]}" data-num="${key}"><span class="muted">${suffix}</span></div>`}
+function fontWarn(key){const v=S[key];return v.includes("not installed")?`<div class="warn">“${v.replace(" (not installed)","")}” is not installed. Using the bundled ${key==="uiFont"?"Inter":"JetBrains Mono"}.</div>`:""}
+
+// Each section: [title, [[label, controlHTML, note?], ...]]  (the content is the same in every variant)
+function sections(){return [
+ ["Appearance",[
+   ["Theme",seg("theme",["Follow system","Dark","Light"])],
+   ["Accent",`<div class="swatches">${Object.keys(ACCENTS).map(k=>`<button class="swatch ${S.accent==k?"on":""}" title="${k}" data-set="accent" data-val="${k}" style="background:${ACCENTS[k][0]}"></button>`).join("")}<span class="muted" style="margin-left:6px">${S.accent}</span></div>`],
+   ["UI scale",`<div class="inline">${sel("scale",[75,100,125,150,175,200])}<span class="muted">%  ·  <span class="kbd">${keyOf("Zoom in")}</span> <span class="kbd">${keyOf("Zoom out")}</span> <span class="kbd">${keyOf("Reset zoom")}</span></span></div>`],
+   ["Density",seg("density",["Comfortable","Compact"])],
+   ["UI font",sel("uiFont",INSTALLED_UI)+fontWarn("uiFont").replace('class="warn"','class="warn" style="margin-top:6px"')],
+   ["Monospace font",sel("monoFont",INSTALLED_MONO)+fontWarn("monoFont").replace('class="warn"','class="warn" style="margin-top:6px"'),"Preview text and source, Size and Permissions columns."],
+   ["Icons",sw("icons","Show icons")],
+   ["Animate",seg("animate",["Follow system","On","Off"])],
+ ]],
+ ["Window",[
+   ["Tab bar edge",seg("tabEdge",["Top","Left","Right","Bottom"])],
+ ]],
+ ["Browsing",[
+   ["Hidden entries",sw("hidden","Show hidden entries"),`Applies to every Session. ${keyOf("Toggle hidden entries")} toggles it.`],
+ ]],
+ ["Search",[
+   ["Match cap",num("matchCap","matches",1,100000,100),"Search stops by itself after this many Matches."],
+   ["Symlinks",sw("followLinks","Follow symlinked directories"),"Shared with Download."],
+ ]],
+ ["Preview",[
+   ["Size cap",num("previewCap","MiB",1,1024),"Text past the cap is cut. Audio and video stream whatever their size."],
+   ["Autoplay",sw("autoplay","Autoplay audio and video")],
+   ["Scratch folder",seg("scratch",["In memory","System temp directory","Chosen directory"])+
+     (S.scratch==="Chosen directory"?`<div class="inline" style="margin-top:6px"><input class="field mono" style="flex:1" placeholder="Choose a directory…" value="${S.scratchDir}"><button class="btn">Browse…</button></div>`:""),
+     "Where Preview keeps fetched bytes. Nothing outlives the Preview."],
+ ]],
+ ["Download",[
+   ["Modification time",sw("keepMtime","Keep modification time")],
+   ["Executable bit",sw("keepExec","Keep executable bit"),"No effect on Windows."],
+   ["Symlinks",sw("followLinks","Follow symlinked directories"),"Shared with Search."],
+ ]],
+ ["Connections",[
+   ["OpenSSH config",sw("useSshConfig","Use ~/.ssh/config"),"Read each time a Session opens. Open Sessions don't change."],
+ ]],
+];}
+function formHTML(rows,hl){return `<div class="form">${rows.map(([l,c,n])=>`<div class="lab">${mark(l,hl)}</div><div>${c}</div>${n?`<div class="note">${mark(n,hl)}</div>`:""}`).join("")}</div>`}
+function mark(s,q){if(!q)return s;const i=s.toLowerCase().indexOf(q.toLowerCase());return i<0?s:s.slice(0,i)+`<span class="hl">${s.slice(i,i+q.length)}</span>`+s.slice(i+q.length)}
+function sectionDefaults(title){
+  const map={Appearance:["theme","accent","scale","density","uiFont","monoFont","icons","animate"],Window:["tabEdge"],Browsing:["hidden"],
+    Search:["matchCap","followLinks"],Preview:["previewCap","autoplay","scratch","scratchDir"],Download:["keepMtime","keepExec","followLinks"],Connections:["useSshConfig"]};
+  (map[title]||[]).forEach(k=>S[k]=DEFAULTS[k]);
+}
+
+// ---------------- key table ----------------
+function keysTable(q,mode){
+  let html=`<table class="keys">`;
+  for(const g in S.keys){
+    const items=S.keys[g].map((k,i)=>[k,i]).filter(([k])=>!q||k[0].toLowerCase().includes(q.toLowerCase())||k[1].toLowerCase().includes(q.toLowerCase()));
+    if(!items.length)continue;
+    html+=`<tr><td colspan="3" class="grp">${g}</td></tr>`;
+    for(const [[a,b],i] of items){
+      const def=DEFAULT_KEYS[g][i][1], rec=capture&&capture.group===g&&capture.idx===i&&mode!=="popover";
+      const label=rec?(capture.live||"Press keys…"):b;
+      html+=`<tr class="${b!==def?"changed":""}"><td>${mark(a,q)}</td>
+        <td style="width:150px"><button class="kchip ${rec?"rec":""}" data-cap="${g}|${i}">${label}</button></td>
+        <td style="width:120px;text-align:right">${b!==def?`<button class="btn ghost" data-reset1="${g}|${i}" title="Back to ${def}">Reset</button>`:""}</td></tr>`;
+      if(rec)html+=`<tr><td colspan="3" style="border:0;height:auto;padding:2px 8px 8px">${capture.conflict?`<span class="conflict">${capture.conflict}</span>`:`<span class="muted" style="font-size:12px">${mode==="confirm"?"Press the new keys, then Enter to keep them. Escape cancels.":"Press the new keys. Escape cancels."}</span>`}</td></tr>`;
+    }
+  }
+  return html+`</table>`;
+}
+function resetAllKeys(){S.keys=clone(DEFAULT_KEYS)}
+
+// ---------------- variant A: matches Host dialog ----------------
+function renderA(){
+  const secs=sections(); const pages=[...secs.map(s=>s[0]),"Keys"];
+  let content;
+  if(pageA==="Keys") content=`<h3>Keys</h3><p class="muted" style="margin:-4px 0 10px">Click a key, then press the new combination. Cmd replaces Ctrl on macOS.</p>${keysTable("", "inline")}`;
+  else {const s=secs.find(s=>s[0]===pageA); content=`<h3>${s[0]}</h3>${formHTML(s[1])}`;}
+  return `<div class="scrim" data-close="1"><div class="dialog" style="width:820px;height:560px">
+    <div class="dhead"><h2>Settings</h2><span class="muted">Changes apply at once</span><button class="btn icon ghost" data-close="1" title="Close (Escape)">✕</button></div>
+    <div style="display:flex;flex:1;min-height:0">
+      <div class="nav">${pages.map(p=>`<button class="navitem ${p===pageA?"on":""}" data-page="${p}">${p}</button>`).join("")}</div>
+      <div class="page">${content}</div>
+    </div>
+    <div class="dfoot"><button class="btn" data-resetpage="${pageA}">${pageA==="Keys"?"Reset all keys":"Reset "+pageA+" to defaults"}</button><div class="spacer"></div><button class="btn primary" data-close="1">Close</button></div>
+  </div></div>`;
+}
+// ---------------- variant B: one scrolling page ----------------
+function renderB(){
+  const q=filterB.trim();
+  const secs=sections().map(([t,rows])=>[t,rows.filter(r=>!q||(t+" "+r[0]+" "+(r[2]||"")+" "+r[1].replace(/<[^>]+>/g," ")).toLowerCase().includes(q.toLowerCase()))]).filter(s=>s[1].length);
+  const keyHit=!q||"keys key bindings shortcuts".includes(q.toLowerCase())||Object.values(S.keys).flat().some(k=>(k[0]+" "+k[1]).toLowerCase().includes(q.toLowerCase()));
+  const kq="keys key bindings shortcuts".includes(q.toLowerCase())?"":q;
+  const body=secs.map(([t,rows])=>`<div class="sec"><div style="display:flex;align-items:center"><h3 style="flex:1">${mark(t,q)}</h3><button class="btn ghost" data-resetpage="${t}">Reset</button></div>${formHTML(rows,q)}</div>`).join("")
+    +(keyHit?`<div class="sec"><div style="display:flex;align-items:center"><h3 style="flex:1">Keys</h3><button class="btn ghost" data-resetpage="Keys">Reset all</button></div><p class="muted" style="margin:-4px 0 6px">Click a key to change it. Find a setting also matches actions and keys, e.g. “ctrl+s”.</p>${keysTable(kq,"popover")}</div>`:"");
+  return `<div class="scrim" data-close="1"><div class="dialog" style="width:640px;height:calc(100vh - 60px)">
+    <div class="dhead"><h2>Settings</h2><input class="field" id="filterB" style="width:260px" placeholder="Find a setting  (Ctrl+F)" value="${filterB}"><button class="btn icon ghost" data-close="1" title="Close (Escape)">✕</button></div>
+    <div class="page" style="padding-top:0">${body||`<div class="empty">No setting matches “${q}”.</div>`}</div>
+    <div class="dfoot"><span class="muted">Changes apply at once.</span><div class="spacer"></div><button class="btn primary" data-close="1">Close</button></div>
+  </div></div>${capture?popover():""}`;
+}
+function popover(){
+  const [a,cur]=S.keys[capture.group][capture.idx];
+  return `<div class="cap"><div class="dialog">
+    <div class="dhead"><h2>${a}</h2></div>
+    <div class="muted" style="padding:12px 16px 0">Now <span class="kbd">${cur}</span>. Press the new combination.</div>
+    <div class="capkeys">${capture.live||'<span class="muted" style="font-size:13px">Waiting for keys…</span>'}</div>
+    <div style="padding:0 16px 12px;min-height:26px">${capture.conflict?`<span class="conflict">${capture.conflict}</span>`:""}</div>
+    <div class="dfoot"><button class="btn" data-capdefault="1">Use default (${DEFAULT_KEYS[capture.group][capture.idx][1]})</button><div class="spacer"></div><button class="btn" data-capcancel="1">Cancel</button><button class="btn primary" data-capset="1" ${!capture.live||capture.conflict?"disabled style='opacity:.4'":""}>Set</button></div>
+  </div></div>`;
+}
+// ---------------- variant C: side panel ----------------
+function renderC(){
+  const secs=sections();
+  const accs=[...secs.map(([t,rows])=>[t,formHTML(rows)]),["Keys",`<p class="muted" style="margin:0 0 6px;font-size:12px">Click a key, press the new combination, Enter keeps it.</p>${keysTable("","confirm")}<div style="margin-top:8px"><button class="btn" data-resetpage="Keys">Reset all keys</button></div>`]];
+  return `<div class="dhead"><h2>Settings</h2><button class="btn icon ghost" data-close="1" title="Close (Escape)">✕</button></div>
+   <div class="page">${accs.map(([t,h])=>`<div class="acc ${openC.has(t)?"open":""}"><button data-acc="${t}">${t}</button><div>${h}${t!=="Keys"?`<div style="margin-top:8px"><button class="btn ghost" data-resetpage="${t}">Reset ${t}</button></div>`:""}</div></div>`).join("")}</div>
+   <div class="status" style="background:var(--paper1)">Changes apply at once · the listing stays usable</div>`;
+}
+
+// ---------------- render + events ----------------
+function render(){
+  applyLook(); renderApp();
+  const ov=document.getElementById("overlay");
+  ov.innerHTML="";
+  if(settingsOpen){
+    if(variant==="A")ov.innerHTML=renderA();
+    if(variant==="B")ov.innerHTML=renderB();
+    if(variant==="C")document.getElementById("panelC").innerHTML=renderC();
+  }
+  document.getElementById("vlabel").textContent=`${variant} (${VARIANTS[variant]})`;
+  const f=document.getElementById("filterB"); if(f&&document.activeElement!==f&&window._refocusB){f.focus();f.setSelectionRange(f.value.length,f.value.length)}
+}
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-set],[data-toggle],[data-close],[data-page],[data-resetpage],[data-cap],[data-reset1],[data-acc],[data-capcancel],[data-capset],[data-capdefault]");
+  if(!t)return;
+  const d=t.dataset;
+  if(d.close!==undefined){if(e.target!==t)return; if(capture)return; settingsOpen=false;}
+  else if(d.set){S[d.set]=isNaN(+d.val)?d.val:+d.val}
+  else if(d.toggle){S[d.toggle]=!S[d.toggle]}
+  else if(d.page){pageA=d.page;capture=null}
+  else if(d.resetpage){d.resetpage==="Keys"?resetAllKeys():sectionDefaults(d.resetpage)}
+  else if(d.cap){const [g,i]=d.cap.split("|");capture={group:g,idx:+i,live:"",conflict:""}}
+  else if(d.reset1){const [g,i]=d.reset1.split("|");S.keys[g][+i][1]=DEFAULT_KEYS[g][+i][1]}
+  else if(d.acc){openC.has(d.acc)?openC.delete(d.acc):openC.add(d.acc)}
+  else if(d.capcancel!==undefined){capture=null}
+  else if(d.capdefault!==undefined){S.keys[capture.group][capture.idx][1]=DEFAULT_KEYS[capture.group][capture.idx][1];capture=null}
+  else if(d.capset!==undefined){if(capture.live&&!capture.conflict){S.keys[capture.group][capture.idx][1]=capture.live;capture=null}}
+  render();
+});
+document.addEventListener("change",e=>{
+  const t=e.target;
+  if(t.dataset.sel){S[t.dataset.sel]=isNaN(+t.value)?t.value:+t.value;render()}
+  if(t.dataset.num){S[t.dataset.num]=Math.max(+t.min,Math.min(+t.max,+t.value||+t.min));render()}
+});
+document.addEventListener("input",e=>{if(e.target.id==="filterB"){filterB=e.target.value;window._refocusB=true;render()}});
+
+function combo(e){
+  const k=e.key; if(["Control","Shift","Alt","Meta"].includes(k))return null;
+  const parts=[];if(e.ctrlKey||e.metaKey)parts.push("Ctrl");if(e.altKey)parts.push("Alt");if(e.shiftKey&&k.length>1||e.shiftKey&&/[a-z]/i.test(k))parts.push("Shift");
+  let name=k===" "?"Space":k.length===1?k.toUpperCase():k;
+  if(name==="ArrowUp")name="Up";if(name==="ArrowDown")name="Down";if(name==="ArrowLeft")name="Left";if(name==="ArrowRight")name="Right";
+  parts.push(name);return parts.join("+");
+}
+function holder(c){for(const g in S.keys)S.keys[g].forEach((k,i)=>{});for(const g in S.keys)for(let i=0;i<S.keys[g].length;i++){if(S.keys[g][i][1]===c&&!(g===capture.group&&i===capture.idx))return S.keys[g][i][0]}return null}
+
+document.addEventListener("keydown",e=>{
+  if(capture){
+    e.preventDefault();
+    if(e.key==="Escape"){capture=null;render();return}
+    const mode=variant==="B"?"popover":variant==="C"?"confirm":"inline";
+    if(mode!=="inline"&&e.key==="Enter"&&!e.ctrlKey&&!e.altKey&&capture.live){
+      if(!capture.conflict){S.keys[capture.group][capture.idx][1]=capture.live;capture=null}
+      render();return;
+    }
+    const c=combo(e); if(!c)return;
+    const h=holder(c);
+    capture.live=c; capture.conflict=h?`${c} is already bound to “${h}”. Change that one first.`:"";
+    if(mode==="inline"&&!h){S.keys[capture.group][capture.idx][1]=c;capture=null}
+    render();return;
+  }
+  const inField=e.target.matches("input,textarea,select,[contenteditable]");
+  if(combo(e)===keyOf("Open Settings")){e.preventDefault();settingsOpen=!settingsOpen;render();return}
+  if(combo(e)===keyOf("Toggle hidden entries")){e.preventDefault();S.hidden=!S.hidden;render();return}
+  const zi=combo(e);
+  if(zi===keyOf("Zoom in")||zi==="Ctrl++"){e.preventDefault();S.scale=Math.min(200,S.scale+25);render();return}
+  if(zi===keyOf("Zoom out")){e.preventDefault();S.scale=Math.max(75,S.scale-25);render();return}
+  if(zi===keyOf("Reset zoom")){e.preventDefault();S.scale=100;render();return}
+  if(variant==="B"&&settingsOpen&&e.ctrlKey&&e.key.toLowerCase()==="f"){e.preventDefault();document.getElementById("filterB").focus();return}
+  if(e.key==="Escape"&&settingsOpen){settingsOpen=false;render();return}
+  if(inField)return;
+  if(e.key==="ArrowLeft"||e.key==="ArrowRight"){cycle(e.key==="ArrowRight"?1:-1)}
+});
+function cycle(d){const ks=Object.keys(VARIANTS);variant=ks[(ks.indexOf(variant)+d+ks.length)%ks.length];capture=null;settingsOpen=true;
+  const u=new URL(location);u.searchParams.set("variant",variant);history.replaceState(null,"",u);render()}
+document.getElementById("prev").onclick=()=>cycle(-1);
+document.getElementById("next").onclick=()=>cycle(1);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",render);
+render();
+</script>
+</body>
+</html>
