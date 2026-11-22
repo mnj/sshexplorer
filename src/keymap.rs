@@ -97,11 +97,13 @@ pub enum Action {
     PreviousSession,
     /// Opens the Host dialog.
     HostDialog,
+    /// Downloads the Selection into the Session's Local folder.
+    Download,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 31] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -124,6 +126,7 @@ impl Action {
         Action::TreeView,
         Action::FolderView,
         Action::Sort,
+        Action::Download,
         Action::NextSession,
         Action::PreviousSession,
         Action::CloseSession,
@@ -164,7 +167,8 @@ impl Action {
             | Action::SelectAll
             | Action::ShowHidden
             | Action::Refresh
-            | Action::Sort => Area::Browsing,
+            | Action::Sort
+            | Action::Download => Area::Browsing,
         }
     }
 
@@ -201,6 +205,7 @@ impl Action {
             Action::NextSession => "Next Session",
             Action::PreviousSession => "Previous Session",
             Action::HostDialog => "Host dialog",
+            Action::Download => "Download",
         }
     }
 
@@ -244,6 +249,7 @@ impl Action {
             Action::NextSession => Binding::new(cmd, Key::Tab),
             Action::PreviousSession => Binding::new(shift_cmd, Key::Tab),
             Action::HostDialog => Binding::new(cmd, Key::O),
+            Action::Download => Binding::new(cmd, Key::S),
         })
     }
 }

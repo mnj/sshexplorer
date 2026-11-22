@@ -298,6 +298,37 @@ pub struct Session {
 }
 
 impl Session {
+    /// The connection's SFTP side, for work that runs on the SSH runtime, such as a
+    /// Download. Start that work with [`Session::spawn`].
+    pub fn remote(&self) -> Remote {
+        Remote {
+            sftp: self.sftp.clone(),
+        }
+    }
+
+    /// Runs `work` on the SSH runtime.
+    pub fn spawn(&self, work: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(work);
+    }
+
+    /// The function that wakes the frame thread.
+    pub fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.wake.clone()
+    }
+
+    /// Starts reading up to `len` bytes of the file at the absolute `path`, from byte
+    /// `offset`. Fewer arrive only when the file ends first. The answer wakes the frame.
+    pub fn read(&self, path: String, offset: u64, len: usize) -> Request<Vec<u8>> {
+        let (sender, answer) = mpsc::channel();
+        let remote = self.remote();
+        let wake = self.wake.clone();
+        self.runtime.spawn(async move {
+            let _ = sender.send(remote.read(path, offset, len).await);
+            wake();
+        });
+        Request { answer }
+    }
+
     /// Starts listing the directory at the absolute `path`. A symlinked directory is
     /// followed. The answer arrives on the returned request, and wakes the frame.
     pub fn list(&self, path: String) -> Request<Listing> {
@@ -310,6 +341,73 @@ impl Session {
             wake();
         });
         Request { answer }
+    }
+}
+
+/// A Session's SFTP connection, to use from tasks on the SSH runtime. Each failure is
+/// the reason as the operator reads it: "No such file", "Permission denied", or the
+/// host's own words.
+#[derive(Clone)]
+pub struct Remote {
+    sftp: Arc<SftpSession>,
+}
+
+/// A remote file open for reading.
+pub type RemoteFile = russh_sftp::client::fs::File;
+
+impl Remote {
+    /// The entries of the directory at the absolute `path`, as [`Session::list`] gives them.
+    pub async fn list(&self, path: String) -> Result<Listing, String> {
+        list(&self.sftp, path)
+            .await
+            .map_err(|e| operator_reason(&e))
+    }
+
+    /// The absolute path with every symlink resolved.
+    pub async fn canonicalize(&self, path: String) -> Result<String, String> {
+        self.sftp
+            .canonicalize(path)
+            .await
+            .map_err(|e| operator_reason(&e))
+    }
+
+    /// Opens the file at `path` for reading.
+    pub async fn open(&self, path: String) -> Result<RemoteFile, String> {
+        self.sftp.open(path).await.map_err(|e| operator_reason(&e))
+    }
+
+    /// Up to `len` bytes of the file at `path` from `offset`.
+    pub async fn read(&self, path: String, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        let mut file = self.open(path).await?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        let mut data = Vec::with_capacity(len.min(1 << 20));
+        (&mut file)
+            .take(len as u64)
+            .read_to_end(&mut data)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(data)
+    }
+}
+
+/// An SFTP failure as a Download's Details say it: "No such file", "Permission denied",
+/// or the host's own words.
+fn operator_reason(error: &russh_sftp::client::error::Error) -> String {
+    use russh_sftp::client::error::Error;
+    use russh_sftp::protocol::StatusCode;
+    match error {
+        Error::Status(status) => match status.status_code {
+            StatusCode::NoSuchFile => "No such file".to_owned(),
+            StatusCode::PermissionDenied => "Permission denied".to_owned(),
+            _ if !status.error_message.is_empty() => status.error_message.clone(),
+            code => code.to_string(),
+        },
+        other => other.to_string(),
     }
 }
 

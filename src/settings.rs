@@ -31,6 +31,39 @@ pub struct AppSettings {
     pub browsing: Browsing,
     #[serde(deserialize_with = "lenient")]
     pub connections: Connections,
+    #[serde(deserialize_with = "lenient")]
+    pub search: Search,
+    #[serde(deserialize_with = "lenient")]
+    pub download: Download,
+}
+
+/// The Search page. Its Follow symlinked directories is shared with Download.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Search {
+    /// "Follow symlinked directories", for Search and Download alike. Off by default.
+    #[serde(deserialize_with = "lenient")]
+    pub follow_links: bool,
+}
+
+/// The Download page. It also shows [`Search::follow_links`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Download {
+    #[serde(deserialize_with = "lenient_true")]
+    pub keep_modified: bool,
+    /// No effect on Windows.
+    #[serde(deserialize_with = "lenient_true")]
+    pub keep_executable: bool,
+}
+
+impl Default for Download {
+    fn default() -> Self {
+        Download {
+            keep_modified: true,
+            keep_executable: true,
+        }
+    }
 }
 
 /// The Browsing page.
