@@ -175,6 +175,33 @@ struct Login<'a> {
     used: Held,
 }
 
+/// A signer that signs nothing: being asked to sign means the host accepts the key.
+struct Probe;
+
+enum Probed {
+    Accepted,
+    Lost,
+}
+
+impl From<russh::SendError> for Probed {
+    fn from(_: russh::SendError) -> Probed {
+        Probed::Lost
+    }
+}
+
+impl russh::Signer for Probe {
+    type Error = Probed;
+
+    async fn auth_sign(
+        &mut self,
+        _key: &AgentIdentity,
+        _hash_alg: Option<HashAlg>,
+        _to_sign: Vec<u8>,
+    ) -> Result<Vec<u8>, Probed> {
+        Err(Probed::Accepted)
+    }
+}
+
 /// A key file read from disk, and its public key when that is known without unlocking.
 struct KeyFile {
     path: PathBuf,
@@ -237,6 +264,14 @@ impl Login<'_> {
                 continue;
             }
             if !files {
+                continue;
+            }
+            // Ask the host about a locked key before asking the operator to unlock it.
+            if is_locked(&file.text)
+                && let Some(public) = &file.public
+                && !self.would_accept(&user, public).await?
+            {
+                tried.push(public.clone());
                 continue;
             }
             let (key, passphrase) = match self.unlock(&file).await? {
@@ -311,6 +346,24 @@ impl Login<'_> {
             .ok()
             .flatten()
             .flatten()
+    }
+
+    /// Whether the host would take a signature from `public`: it is offered without one,
+    /// and the host's asking for the signature means yes. Nothing is signed.
+    async fn would_accept(&mut self, user: &str, public: &PublicKey) -> Result<bool, Failure> {
+        if !self.offers(MethodKind::PublicKey) {
+            return Ok(false);
+        }
+        let hash = self.rsa_hash(public).await;
+        match self
+            .handle
+            .authenticate_publickey_with(user, public.clone(), hash, &mut Probe)
+            .await
+        {
+            Err(Probed::Accepted) => Ok(true),
+            Err(Probed::Lost) => Err(lost(russh::Error::SendError)),
+            Ok(result) => Ok(self.accepted(result)),
+        }
     }
 
     async fn offer_key(&mut self, user: &str, key: PrivateKey) -> Result<bool, Failure> {

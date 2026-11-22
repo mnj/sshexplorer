@@ -221,6 +221,25 @@ fn automatic_falls_back_from_a_refused_key_to_the_password() {
     assert_eq!(attempts.last().unwrap(), "password");
 }
 
+#[test]
+fn a_locked_key_the_host_refuses_is_never_unlocked() {
+    let mut accepts = keys(&["openssh_ecdsa"]);
+    accepts.password = true;
+    let mut setup = setup(accepts, AuthMethod::Automatic);
+    // Its public half is in the clear, so the host is asked about it first.
+    setup.options.key_files = vec![key_path("openssh_ed25519_locked")];
+    let ssh = ssh();
+    let opening = setup.open(&ssh);
+    let Event::Password(prompt) = next(&opening) else {
+        panic!("expected the password prompt, not the passphrase's");
+    };
+    prompt.enter(fixture::PASSWORD.into());
+    expect_opened(&opening);
+    let attempts = setup.fixture.attempts();
+    assert!(attempts[0].starts_with("publickey "), "{attempts:?}");
+    assert_eq!(attempts.last().unwrap(), "password");
+}
+
 #[cfg(unix)]
 #[test]
 fn automatic_uses_the_agent_for_a_locked_key_file_it_holds() {

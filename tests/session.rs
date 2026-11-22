@@ -510,13 +510,24 @@ fn a_large_directory_draws_only_the_rows_in_view_and_the_keys_reach_every_row() 
 
     press(&mut harness, egui::Key::End);
     assert_eq!(selected_rows(&harness), ["f2000"]);
-    assert!(harness.query_by_role_and_label(Role::Row, "f0001").is_none());
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Row, "f0001")
+            .is_none()
+    );
     press(&mut harness, egui::Key::PageUp);
     let page = selected_rows(&harness);
     assert_eq!(page.len(), 1);
-    assert!(page[0].as_str() < "f2000" && page[0].as_str() > "f1900", "{page:?}");
+    assert!(
+        page[0].as_str() < "f2000" && page[0].as_str() > "f1900",
+        "{page:?}"
+    );
     // Home focuses `.`, which is never selected.
     press(&mut harness, egui::Key::Home);
     assert!(harness.query_by_role_and_label(Role::Row, ".").is_some());
-    assert!(harness.query_by_role_and_label(Role::Row, "f2000").is_none());
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Row, "f2000")
+            .is_none()
+    );
 }

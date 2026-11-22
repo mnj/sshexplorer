@@ -451,5 +451,8 @@ fn owner_and_group_names_come_from_the_ls_style_line() {
     // A host that sends no such line: the ids are shown instead.
     assert_eq!(owner_and_group(""), None);
     assert_eq!(owner_and_group("notes.txt"), None);
-    assert_eq!(owner_and_group("-rw-r--r-- x alice staff 1 Jan 1 00:00 a"), None);
+    assert_eq!(
+        owner_and_group("-rw-r--r-- x alice staff 1 Jan 1 00:00 a"),
+        None
+    );
 }
