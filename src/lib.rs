@@ -14,6 +14,7 @@
 //!   binding; [`binding_editor`] is Settings → Keys, where the operator rebinds them.
 
 pub mod app;
+pub mod archive;
 pub mod binding_editor;
 pub mod connect;
 pub mod download;

@@ -223,3 +223,72 @@ fn a_focused_file_reloads_only_when_its_size_or_time_changes() {
     assert!(p.focus(Some(file("a.txt", 9, 2)), 6.0));
     assert!(p.due(7.0, MIB).is_some());
 }
+
+/// A zip holding `a.txt` ("hello").
+fn small_zip() -> Vec<u8> {
+    use std::io::Write as _;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("a.txt", options).unwrap();
+    writer.write_all(b"hello").unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+#[test]
+fn an_archive_arrives_as_its_listing() {
+    let bytes = small_zip();
+    let mut p = Preview::default();
+    p.focus(Some(file("bundle.zip", bytes.len() as u64, 1)), 0.0);
+    assert!(matches!(p.shown().unwrap().body, Body::Loading));
+    let fetch = p.due(1.0, MIB).expect("a zip is fetched");
+    p.arrive(fetch.id, Ok(bytes), &Place::Memory);
+    let Body::Archive(listing) = &p.shown().unwrap().body else {
+        panic!("a zip shows its listing");
+    };
+    assert_eq!(listing.members.len(), 1);
+    assert_eq!(listing.members[0].path, "a.txt");
+    assert_eq!(listing.members[0].size, 5);
+}
+
+#[test]
+fn an_archive_without_an_archive_name_is_listed_by_its_signature() {
+    let bytes = small_zip();
+    let mut p = Preview::default();
+    p.focus(Some(file("download", bytes.len() as u64, 1)), 0.0);
+    let fetch = p.due(1.0, MIB).unwrap();
+    p.arrive(fetch.id, Ok(bytes), &Place::Memory);
+    let shown = p.shown().unwrap();
+    assert_eq!(shown.kind, Kind::Archive);
+    assert!(matches!(shown.body, Body::Archive(_)));
+}
+
+#[test]
+fn an_archive_over_the_cap_is_not_fetched_and_says_how_large_it_is() {
+    let mut p = Preview::default();
+    p.focus(Some(file("huge.tar.gz", 2_469_606_195, 1)), 0.0);
+    assert_eq!(p.due(1.0, 10 * MIB), None);
+    let Body::TooLarge(line) = &p.shown().unwrap().body else {
+        panic!("too large to preview");
+    };
+    assert_eq!(line, "Too large to preview (2.3 GiB)");
+    assert_eq!(p.wait(1.0), None);
+}
+
+#[test]
+fn a_corrupt_archive_shows_one_failure_line_and_others_are_unsupported() {
+    let bad = b"PK\x03\x04 not really".to_vec();
+    let mut p = Preview::default();
+    p.focus(Some(file("bad.zip", bad.len() as u64, 1)), 0.0);
+    let fetch = p.due(1.0, MIB).unwrap();
+    p.arrive(fetch.id, Ok(bad), &Place::Memory);
+    let Body::Failed(line) = &p.shown().unwrap().body else {
+        panic!("a failure line");
+    };
+    assert_eq!(line, "Cannot preview: corrupt archive");
+
+    // 7z is an archive Preview does not read: nothing is fetched.
+    p.focus(Some(file("photos.7z", 100, 1)), 2.0);
+    assert!(matches!(p.shown().unwrap().body, Body::Unsupported));
+    assert_eq!(p.due(3.0, MIB), None);
+}
