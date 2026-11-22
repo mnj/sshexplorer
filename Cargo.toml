@@ -64,6 +64,9 @@ jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-sys
 zip = { version = "9.8.1", default-features = false }
 tar = "0.4.46"
 flate2 = "1.1.11"
+# PDF Preview (issue #36): hayro, pure Rust, so nothing to install or ship per platform
+# (pdfium-render needs a Pdfium shared library). Standard fonts and CMaps are embedded.
+hayro = "0.9.0"
 
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -126,14 +126,7 @@ impl<'a> ZoomView<'a> {
                 zoom.wheel(factor, fit, view, pointer, content);
             }
         }
-        super::context_menu(&response, |ui| {
-            for level in Level::choices() {
-                let item = super::menu_item(level.label()).checked(zoom.level == level);
-                if ui.add(item).clicked() {
-                    zoom.set(level);
-                }
-            }
-        });
+        zoom_menu(&response, zoom);
         if response.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if response.hovered() && zoom.pans(content, view.size()) {
@@ -152,4 +145,38 @@ pub fn paint_texture(ui: &Ui, shown: &ZoomShown, texture: egui::TextureId) {
     let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     ui.painter_at(shown.clip)
         .image(texture, shown.content, uv, egui::Color32::WHITE);
+}
+
+/// The right-click menu on `response` with the zoom toolbar's choices.
+pub fn zoom_menu(response: &Response, zoom: &mut Zoom) {
+    super::context_menu(response, |ui| {
+        for level in Level::choices() {
+            let item = super::menu_item(level.label()).checked(zoom.level == level);
+            if ui.add(item).clicked() {
+                zoom.set(level);
+            }
+        }
+    });
+}
+
+/// Paints one PDF page at `rect`, clipped to `clip`: its rendered texture stretched to
+/// the page, or blank paper until it is rendered.
+pub fn paint_page(ui: &Ui, clip: Rect, rect: Rect, texture: Option<egui::TextureId>) {
+    let painter = ui.painter_at(clip);
+    match texture {
+        Some(texture) => {
+            let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(texture, rect, uv, egui::Color32::WHITE);
+        }
+        None => {
+            painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+        }
+    }
+    let t = ui.tokens();
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(t.stroke.hairline, t.color.stroke.hairline),
+        egui::StrokeKind::Outside,
+    );
 }
