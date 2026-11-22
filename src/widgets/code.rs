@@ -183,6 +183,44 @@ fn row_min(t: &crate::theme::Tokens) -> f32 {
     t.ty.body.line * 4.0
 }
 
+/// Body text in the muted colour: a status, a placeholder or a path beside a control.
+pub fn muted(text: impl Into<String>) -> Muted {
+    Muted { text: text.into() }
+}
+
+#[must_use = "add it with ui.add"]
+pub struct Muted {
+    text: String,
+}
+
+impl Widget for Muted {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let t = ui.tokens();
+        ui.label(t.ty.body.rich(self.text).color(t.color.text.muted))
+    }
+}
+
+/// The spinner and a muted line beside it, as "Loading preview…" shows while a load
+/// runs.
+pub fn loading_line(text: impl Into<String>) -> LoadingLine {
+    LoadingLine { text: text.into() }
+}
+
+#[must_use = "add it with ui.add"]
+pub struct LoadingLine {
+    text: String,
+}
+
+impl Widget for LoadingLine {
+    fn ui(self, ui: &mut Ui) -> Response {
+        ui.horizontal(|ui| {
+            ui.add(spinner());
+            ui.add(muted(self.text));
+        })
+        .response
+    }
+}
+
 /// The busy spinner, in the muted text colour at the body line's height.
 pub fn spinner() -> Spinner {
     Spinner

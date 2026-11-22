@@ -235,6 +235,16 @@ fn small_zip() -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
+/// Polls `p` until an archive arriving in it is listed, off the caller's thread.
+fn listed(p: &mut Preview) {
+    let start = std::time::Instant::now();
+    while matches!(p.shown().unwrap().body, Body::Loading) {
+        assert!(start.elapsed().as_secs() < 10, "the listing never came");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        p.poll();
+    }
+}
+
 #[test]
 fn an_archive_arrives_as_its_listing() {
     let bytes = small_zip();
@@ -243,6 +253,11 @@ fn an_archive_arrives_as_its_listing() {
     assert!(matches!(p.shown().unwrap().body, Body::Loading));
     let fetch = p.due(1.0, MIB).expect("a zip is fetched");
     p.arrive(fetch.id, Ok(bytes), &Place::Memory);
+    // Listed on a thread of its own: the frame goes on meanwhile, and wakes to look.
+    assert!(matches!(p.shown().unwrap().body, Body::Loading));
+    assert!(p.wait(1.0).is_some());
+    listed(&mut p);
+    assert_eq!(p.wait(1.0), None);
     let Body::Archive(listing) = &p.shown().unwrap().body else {
         panic!("a zip shows its listing");
     };
@@ -258,6 +273,7 @@ fn an_archive_without_an_archive_name_is_listed_by_its_signature() {
     p.focus(Some(file("download", bytes.len() as u64, 1)), 0.0);
     let fetch = p.due(1.0, MIB).unwrap();
     p.arrive(fetch.id, Ok(bytes), &Place::Memory);
+    listed(&mut p);
     let shown = p.shown().unwrap();
     assert_eq!(shown.kind, Kind::Archive);
     assert!(matches!(shown.body, Body::Archive(_)));
@@ -282,6 +298,7 @@ fn a_corrupt_archive_shows_one_failure_line_and_others_are_unsupported() {
     p.focus(Some(file("bad.zip", bad.len() as u64, 1)), 0.0);
     let fetch = p.due(1.0, MIB).unwrap();
     p.arrive(fetch.id, Ok(bad), &Place::Memory);
+    listed(&mut p);
     let Body::Failed(line) = &p.shown().unwrap().body else {
         panic!("a failure line");
     };

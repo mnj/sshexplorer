@@ -66,7 +66,10 @@ pub use button::{
 pub use check::{
     Checkbox, MARK, Radio, SWITCH_KNOB, SWITCH_TRACK, Switch, checkbox, radio, switch,
 };
-pub use code::{CodeLine, CodeView, DetailValue, Spinner, code_view, detail_value, spinner};
+pub use code::{
+    CodeLine, CodeView, DetailValue, LoadingLine, Muted, Spinner, code_view, detail_value,
+    loading_line, muted, spinner,
+};
 pub use dialog::{Shown, Window, button_row, dialog_frame, scrim, title_row, window, window_frame};
 pub use dropdown::{
     Choice, ChoiceRow, Dropdown, FilterDropdown, Picked, choice, choice_value, dropdown,
@@ -88,7 +91,9 @@ pub use menu::{
 pub use pages::{PAGE_HEIGHT, PAGE_LIST_WIDTH, PAGE_WIDTH, PagesDialog, PagesShown, pages_dialog};
 pub use paint::{State, drew_focus};
 pub use range::{PROGRESS_RAIL, Progress, SLIDER_KNOB, SLIDER_RAIL, Slider, progress, slider};
-pub use row::{Row, RowResponse, Selection, TREE_INDENT, list_row, rows, tree_row};
+pub use row::{
+    Highlight, Row, RowResponse, TREE_INDENT, TreeLead, list_row, rows, tree_lead, tree_row,
+};
 pub use section::{Section, SectionHeader, SectionResponse, section, section_header};
 pub use segmented::{Segmented, segmented};
 pub use splitter::splitter;

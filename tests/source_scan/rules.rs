@@ -96,6 +96,7 @@ pub fn scan(text: &str, stock_widgets: &[StockWidget]) -> Scan {
     named_colours(&source, &mut found);
     hex_literals(&source, &mut found);
     literal_sizes(&source, &mut found);
+    literal_consts(&source, &mut found);
     for widget in stock_widgets {
         for at in occurrences(&source.code, widget.pattern) {
             let pattern = format!(
@@ -239,6 +240,41 @@ fn literal_sizes(source: &Source, found: &mut Vec<Finding>) {
                 found.push(Finding {
                     line: line_of(code, at),
                     pattern: (*pattern).to_owned(),
+                });
+            }
+        }
+    }
+}
+
+/// The types a `const` or `static` holding a size has: egui's points are `f32`.
+const SIZE_TYPES: &[&str] = &["f32", "Vec2", "egui::Vec2"];
+
+/// `const NAME: f32 = 8.0;` and the like: a size given a name is still a literal size.
+/// Other numeric types (`f64` seconds, `usize` counts) are not sizes.
+fn literal_consts(source: &Source, found: &mut Vec<Finding>) {
+    let code = &source.code;
+    for keyword in ["const ", "static "] {
+        for at in occurrences(code, keyword) {
+            let rest = &code[at + keyword.len()..];
+            let Some((name, rest)) = rest.split_once(':') else {
+                continue;
+            };
+            if name.trim().is_empty() || !name.trim().bytes().all(is_ident) {
+                continue;
+            }
+            let Some((ty, rest)) = rest.split_once('=') else {
+                continue;
+            };
+            if !SIZE_TYPES.contains(&ty.trim()) {
+                continue;
+            }
+            let Some(value) = rest.split(';').next() else {
+                continue;
+            };
+            if has_literal(value) {
+                found.push(Finding {
+                    line: line_of(code, at),
+                    pattern: "literal size in a `const` or `static`".to_owned(),
                 });
             }
         }

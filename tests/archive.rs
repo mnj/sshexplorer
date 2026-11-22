@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Write as _};
 
-use sshexplorer::archive::{self, Listing, Member, Stamp};
+use sshexplorer::archive::{self, Limits, Listing, Member, Stamp};
 
 /// A zip holding `files`, each `(path, contents)`; a path ending in `/` is a directory.
 fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
@@ -172,4 +172,46 @@ fn a_damaged_archive_is_a_failure_not_a_listing() {
             .is_err()
     );
     assert_eq!(archive::CORRUPT, "Cannot preview: corrupt archive");
+}
+
+fn paths(listing: &Listing) -> Vec<&str> {
+    listing.members.iter().map(|m| m.path.as_str()).collect()
+}
+
+#[test]
+fn a_listing_stops_at_the_member_limit_and_says_it_is_partial() {
+    let files: Vec<(String, Vec<u8>)> = (0..5).map(|i| (format!("f{i}"), vec![b'x'])).collect();
+    let files: Vec<(&str, &[u8])> = files.iter().map(|(p, c)| (p.as_str(), &c[..])).collect();
+    let limits = Limits {
+        members: 3,
+        unpacked: u64::MAX,
+    };
+    for bytes in [tar(&files, 0), zip(&files)] {
+        let listing = archive::list_within("a", &bytes, limits).unwrap().unwrap();
+        assert_eq!(paths(&listing), ["f0", "f1", "f2"]);
+        assert!(listing.partial);
+    }
+    let whole = listed("a.tar", &tar(&files, 0));
+    assert_eq!(whole.members.len(), 5);
+    assert!(!whole.partial);
+}
+
+#[test]
+fn a_tar_gz_that_unpacks_past_the_limit_lists_what_came_before() {
+    // A small download that unpacks to far more: the second member is 4 MiB of zeros.
+    let zeros = vec![0u8; 4 << 20];
+    let bytes = gzip(&tar(
+        &[("first", b"1"), ("bomb", &zeros), ("after", b"2")],
+        0,
+    ));
+    assert!(bytes.len() < 64 << 10);
+    let limits = Limits {
+        members: usize::MAX,
+        unpacked: 1 << 20,
+    };
+    let listing = archive::list_within("a.tar.gz", &bytes, limits)
+        .unwrap()
+        .expect("stopping at the limit is not damage");
+    assert_eq!(paths(&listing), ["first", "bomb"]);
+    assert!(listing.partial);
 }

@@ -28,7 +28,8 @@
 //!   under `root()`, so the host's own `find` does the walking.
 //!   [`Fixture::refuse_search`] refuses every exec request, and [`Fixture::hold_search`]
 //!   keeps each Search running after `find` has printed everything, until it is killed.
-//! - **Limits.** SFTP semantics are the fixture's own (no `longname`; `stat` follows
+//! - **Limits.** SFTP semantics are the fixture's own (`longname` names [`OWNER`] and
+//!   [`GROUP`] for every entry; `stat` follows
 //!   links, while `lstat` and `readdir` describe a link itself, as OpenSSH does). For
 //!   real OpenSSH behaviour, run an unprivileged `sshd` on a high port (public key only)
 //!   or a podman container behind `#[ignore]`; see the implementer notes.
@@ -59,6 +60,10 @@ use tokio::sync::Mutex;
 pub const ACCOUNT: &str = "tester";
 pub const PASSWORD: &str = "open sesame";
 pub const HOME: &str = "/home/tester";
+/// The owner and group every entry's `ls -l` line (readdir's longname) names, as
+/// OpenSSH's server writes them; the attributes carry only the numeric ids.
+pub const OWNER: &str = "tester";
+pub const GROUP: &str = "testers";
 /// What the home directory holds at the start: two directories and two files.
 pub const HOME_ENTRIES: &[&str] = &["docs", "notes.txt", "photos", "readme.md"];
 
@@ -812,7 +817,10 @@ impl russh_sftp::server::Handler for SftpHandler {
             // As OpenSSH does, a link is described by itself, not its target.
             let metadata = std::fs::symlink_metadata(entry.path()).map_err(status)?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            files.push(File::new(name, FileAttributes::from(&metadata)));
+            let mut attrs = FileAttributes::from(&metadata);
+            attrs.user = Some(OWNER.to_owned());
+            attrs.group = Some(GROUP.to_owned());
+            files.push(File::new(name, attrs));
         }
         self.next += 1;
         let handle = format!("dir{}", self.next);

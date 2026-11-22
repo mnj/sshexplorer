@@ -171,7 +171,7 @@ fn a_file_without_a_known_extension_that_is_a_pdf_shows_as_one() {
 }
 
 fn three() -> Layout {
-    Layout::new(&[[612.0, 792.0], [842.0, 595.0], [612.0, 792.0]])
+    Layout::new(&[[612.0, 792.0], [842.0, 595.0], [612.0, 792.0]], 8.0)
 }
 
 fn view(top: f32, height: f32) -> Rect {
@@ -181,7 +181,6 @@ fn view(top: f32, height: f32) -> Rect {
 #[test]
 fn pages_stack_top_to_bottom_centred_with_a_gap() {
     let l = three();
-    assert_eq!(model::GAP, 8.0);
     assert_eq!(l.len(), 3);
     assert_eq!(l.size(), vec2(842.0, 792.0 + 8.0 + 595.0 + 8.0 + 792.0));
     assert_eq!(

@@ -16,6 +16,7 @@ fn main() -> eframe::Result {
     };
     let mut app = Store::platform()
         .map_or_else(App::default, App::with_store)
+        .operator_ssh()
         .credentials_at(Arc::new(credentials::OsStore))
         .audio_out(media::AudioOut::Device);
     // Preview files a crash left in the Scratch folder.

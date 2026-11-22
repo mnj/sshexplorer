@@ -57,15 +57,7 @@ fn paragraph(ui: &mut egui::Ui, text: &str) {
     ui.label(t.ty.body.rich(text).color(t.color.text.primary));
 }
 
-/// The local OS user name: the account when neither the Host nor the config names one.
-pub fn local_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_default()
-}
-
-/// The left column's width.
-const ENTRY_WIDTH: f32 = 180.0;
+pub use crate::hosts::local_user;
 
 /// The Authentication method choices, as the dropdown names them.
 const AUTH_METHODS: [(AuthMethod, &str); 4] = [
@@ -339,7 +331,7 @@ impl HostDialog {
             let t = ui.tokens();
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(ENTRY_WIDTH);
+                    ui.set_width(t.size.host_list);
                     widgets::rows(ui, |ui| {
                         for entry in Self::entries(hosts) {
                             let name = match entry {
@@ -348,13 +340,13 @@ impl HostDialog {
                                 Entry::UnsavedSession => "Unsaved Session",
                             };
                             let selection = if entry == self.entry {
-                                widgets::Selection::Live
+                                widgets::Highlight::Live
                             } else {
-                                widgets::Selection::None
+                                widgets::Highlight::None
                             };
                             let row = widgets::list_row(name)
                                 .selection(selection)
-                                .width(ENTRY_WIDTH)
+                                .width(t.size.host_list)
                                 .show(ui);
                             if row.response.clicked() {
                                 picked = Some(entry);

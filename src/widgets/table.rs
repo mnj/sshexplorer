@@ -32,7 +32,7 @@ use egui::{
 use super::glyph::{self, Glyph};
 use super::mark::{Status, status_mark};
 use super::paint::{self, State};
-use super::row::{Selection, ground};
+use super::row::{Highlight, ground};
 use crate::theme::{Text, Tokens, TokensExt as _};
 
 /// Between two columns of a table.
@@ -96,7 +96,7 @@ pub struct Sorted {
 /// How one row of a table is drawn.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RowLook {
-    pub selection: Selection,
+    pub selection: Highlight,
     /// Something dragged is over this row and would drop on it.
     pub drop_target: bool,
     /// Forces one state, for the gallery.
@@ -105,10 +105,28 @@ pub struct RowLook {
 
 impl RowLook {
     /// A row that shows `selection`.
-    pub fn selected(selection: Selection) -> RowLook {
+    pub fn selected(selection: Highlight) -> RowLook {
         RowLook {
             selection,
             ..RowLook::default()
+        }
+    }
+
+    /// A row of a list that can hold the keyboard: highlighted when `selected`, live
+    /// when the list holds the keyboard and the window is in front (`live`), and with
+    /// the focus ring when it is the list's focused row while the list holds the
+    /// keyboard (`ringed`).
+    pub fn of(selected: bool, live: bool, ringed: bool) -> RowLook {
+        let highlight = match (selected, live) {
+            (false, _) => Highlight::None,
+            (true, true) => Highlight::Live,
+            (true, false) => Highlight::Unfocused,
+        };
+        let look = RowLook::selected(highlight);
+        if ringed {
+            look.forced(State::Focus)
+        } else {
+            look
         }
     }
 
@@ -318,6 +336,44 @@ impl TableBody<'_> {
                 response
             })
             .inner
+    }
+
+    /// `count` rows of one row height each, of which only those in view are added: `add`
+    /// is called with the body and each such row's index, and adds it with
+    /// [`TableBody::row_with`] (or [`TableBody::row`]). The rows out of view take their
+    /// space, so the scroll bar is right. `reveal` scrolls that row into view, drawn or
+    /// not. Auto columns measure the rows in view.
+    pub fn rows(
+        &mut self,
+        count: usize,
+        reveal: Option<usize>,
+        mut add: impl FnMut(&mut TableBody<'_>, usize),
+    ) {
+        let height = self.t.row_height();
+        let top = self.ui.cursor().min.y;
+        let clip = self.ui.clip_rect();
+        let at = |y: f32| (((y - top) / height).max(0.0) as usize).min(count);
+        let first = at(clip.top()).saturating_sub(1);
+        let end = (at(clip.bottom()) + 1).min(count);
+        let width = self.width;
+        let left = self.ui.cursor().min.x;
+        let space = |rows: usize| vec2(width, rows as f32 * height);
+        if first > 0 {
+            self.ui.allocate_space(space(first));
+        }
+        let rows = self.rows;
+        for i in first..end {
+            self.rows = rows + i;
+            add(self, i);
+        }
+        self.rows = rows + count;
+        if end < count {
+            self.ui.allocate_space(space(count - end));
+        }
+        if let Some(i) = reveal.filter(|i| *i < first || *i >= end) {
+            let row = Rect::from_min_size(pos2(left, top + i as f32 * height), space(1));
+            self.ui.scroll_to_rect(row, None);
+        }
     }
 
     /// Lays out one row of cells at least `height` high; returns the row's rectangle.

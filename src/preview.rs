@@ -21,15 +21,19 @@ use crate::archive::{self, Listing};
 use crate::folder::size_text;
 use crate::kind::Kind;
 use crate::scratch::{Kept, Place};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use crate::source::{self, Highlighting};
 use crate::ssh::Entry;
 
 /// How long focus rests on a file before its fetch starts, in seconds.
 pub const DELAY: f64 = 0.2;
+/// How often, in seconds, the frame looks for an archive listing being made.
+const LISTING_POLL: f64 = 0.05;
 /// How many of the first bytes decide whether an unknown file is text.
 pub const SNIFF: usize = 8 * 1024;
+/// Beside the spinner while a preview loads.
+pub const LOADING: &str = "Loading preview…";
 /// The line for a file Preview cannot show.
 pub const UNSUPPORTED: &str = "No preview for this file type.";
 /// What a load cut short, or not started, by a dropped connection shows.
@@ -80,6 +84,18 @@ pub struct Shown {
     started: bool,
     /// The load was cut short, or never started, by a dropped connection.
     lost: bool,
+    /// An archive being listed on a thread of its own; the body stays Loading.
+    listing: Option<mpsc::Receiver<Body>>,
+}
+
+impl Shown {
+    /// What was showing cannot go on, as `line` says: a picture that would not decode,
+    /// or a stream whose reads failed. One the drop stopped ([`CONNECTION_LOST`]) loads
+    /// again on [`Preview::resume`].
+    pub fn fail(&mut self, line: String) {
+        self.lost = line == CONNECTION_LOST;
+        self.body = Body::Failed(line);
+    }
 }
 
 /// What shows under the details header.
@@ -314,6 +330,7 @@ impl Preview {
             fetch: None,
             started: false,
             lost: false,
+            listing: None,
         });
         true
     }
@@ -363,7 +380,8 @@ impl Preview {
         let Some(shown) = self.shown.as_mut() else {
             return;
         };
-        if matches!(shown.body, Body::Loading) {
+        // An archive being listed has all its bytes already.
+        if matches!(shown.body, Body::Loading) && shown.listing.is_none() {
             shown.body = Body::Failed(CONNECTION_LOST.to_owned());
             shown.fetch = None;
             shown.lost = true;
@@ -382,11 +400,33 @@ impl Preview {
         true
     }
 
-    /// How long until a fetch is due, for the frame to wake then.
+    /// How long until a fetch is due, or until an archive's listing is looked for
+    /// again, for the frame to wake then.
     pub fn wait(&self, now: f64) -> Option<f64> {
         let shown = self.shown.as_ref()?;
+        if shown.listing.is_some() {
+            return Some(LISTING_POLL);
+        }
         let waiting = !shown.started && matches!(shown.body, Body::Loading);
         waiting.then(|| (shown.since + DELAY - now).max(0.0))
+    }
+
+    /// Takes an archive's listing once its thread has made it. Whether the body changed.
+    pub fn poll(&mut self) -> bool {
+        let Some(shown) = self.shown.as_mut() else {
+            return false;
+        };
+        let Some(listing) = &shown.listing else {
+            return false;
+        };
+        let body = match listing.try_recv() {
+            Ok(body) => body,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => Body::Failed(archive::CORRUPT.to_owned()),
+        };
+        shown.listing = None;
+        shown.body = body;
+        true
     }
 
     /// Takes the answer to fetch `id`, keeping the bytes in `place`. An answer for a
@@ -444,14 +484,23 @@ impl Preview {
             return;
         }
         if shown.kind == Kind::Archive {
-            let listed = archive::list(&shown.focused.name, &bytes);
-            shown.body = match (total.filter(|_| capped), listed) {
+            if let Some(total) = total.filter(|_| capped) {
                 // Sniffed after a capped fetch: only part of it is here.
-                (Some(total), _) => Body::TooLarge(too_large(total)),
-                (None, None) => Body::Unsupported,
-                (None, Some(Ok(listing))) => Body::Archive(listing),
-                (None, Some(Err(_))) => Body::Failed(archive::CORRUPT.to_owned()),
-            };
+                shown.body = Body::TooLarge(too_large(total));
+                return;
+            }
+            // Unpacking may take a while: not on the frame's thread.
+            let (send, listing) = mpsc::channel();
+            let name = shown.focused.name.clone();
+            std::thread::spawn(move || {
+                let body = match archive::list(&name, &bytes) {
+                    None => Body::Unsupported,
+                    Some(Ok(listing)) => Body::Archive(listing),
+                    Some(Err(_)) => Body::Failed(archive::CORRUPT.to_owned()),
+                };
+                let _ = send.send(body);
+            });
+            shown.listing = Some(listing);
             return;
         }
         if !matches!(shown.kind, Kind::Text | Kind::Source | Kind::Markdown) {
@@ -585,12 +634,25 @@ pub fn failure_line(reason: &str) -> String {
     if reason == "No such file" {
         return "Cannot read: no longer exists".to_owned();
     }
+    format!("Cannot read: {}", in_line(reason))
+}
+
+/// The one line a file that was read but cannot be shown gives: "Cannot preview: <reason,
+/// first letter lowercased>". The fixed lines ([`crate::archive::CORRUPT`],
+/// [`crate::pdf::ENCRYPTED`], …) read the same way.
+pub fn cannot_preview(reason: &str) -> String {
+    format!("Cannot preview: {}", in_line(reason))
+}
+
+/// `reason` to follow a colon: its first letter lowercased, unless the first word is a
+/// name such as "GStreamer" or "PDF", whose second letter is a capital too.
+fn in_line(reason: &str) -> String {
     let mut chars = reason.chars();
-    let reason = match chars.next() {
-        Some(first) => first.to_lowercase().chain(chars).collect(),
-        None => String::new(),
-    };
-    format!("Cannot read: {reason}")
+    let name = reason.chars().nth(1).is_some_and(char::is_uppercase);
+    match chars.next() {
+        Some(first) if !name => first.to_lowercase().chain(chars).collect(),
+        _ => reason.to_owned(),
+    }
 }
 
 /// The header's name for a kind.

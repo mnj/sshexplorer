@@ -90,6 +90,19 @@ impl PreviewPanel {
         }
     }
 
+    /// New views for a new or reloaded preview: each file starts at Fit, unplayed.
+    fn fresh(&mut self) {
+        self.image = ImageView::default();
+        self.pdf = PdfView::default();
+        self.media = MediaView::default();
+        self.archive_rows = None;
+    }
+
+    /// The Session's tab is not shown: playback pauses.
+    pub fn hidden(&mut self) {
+        self.media.pause();
+    }
+
     pub fn has_focus(&self, ui: &egui::Ui) -> bool {
         ui.memory(|m| m.has_focus(self.id))
     }
@@ -98,17 +111,18 @@ impl PreviewPanel {
         let now = ui.input(|i| i.time);
         if self.preview.focus(frame.focused, now) {
             self.reading = None;
-            self.image = ImageView::default();
-            self.pdf = PdfView::default();
-            self.media = MediaView::default();
-            self.archive_rows = None;
+            self.fresh();
         }
         self.receive(&Place::of(&frame.settings.preview), frame.connection);
+        if self.preview.poll() {
+            self.archive_rows = None;
+        }
         if frame.disconnected {
             self.reading = None;
             self.preview.lost();
-        } else {
-            self.preview.resume(now);
+        } else if self.preview.resume(now) {
+            // What the drop stopped starts over, a player included.
+            self.fresh();
         }
         let cap = frame.settings.preview.size_cap_bytes();
         if let Some(fetch) = self.preview.due(now, cap) {
@@ -171,13 +185,10 @@ impl PreviewPanel {
         match &mut shown.body {
             Body::Header => {}
             Body::Loading => {
-                ui.horizontal(|ui| {
-                    ui.add(widgets::spinner());
-                    ui.label(t.ty.body.rich("Loading preview…").color(t.color.text.muted));
-                });
+                ui.add(widgets::loading_line(crate::preview::LOADING));
             }
             Body::Unsupported => {
-                ui.label(t.ty.body.rich(UNSUPPORTED).color(t.color.text.muted));
+                ui.add(widgets::muted(UNSUPPORTED));
             }
             Body::Failed(line) => {
                 ui.add(widgets::invalid_message(line.as_str()));
@@ -185,13 +196,13 @@ impl PreviewPanel {
             Body::Image(image) => {
                 let keys = frame.keys.then_some(frame.keymap);
                 if let Some(line) = self.image.ui(ui, &shown.focused.name, image, keys) {
-                    shown.body = Body::Failed(line);
+                    shown.fail(line);
                 }
             }
             Body::Pdf(pdf) => {
                 let keys = frame.keys.then_some(frame.keymap);
                 if let Some(line) = self.pdf.ui(ui, pdf, keys, scroll, self.id) {
-                    shown.body = Body::Failed(line);
+                    shown.fail(line);
                 }
                 self.page = self.pdf.rows();
             }
@@ -205,16 +216,19 @@ impl PreviewPanel {
                     toggle,
                 };
                 if let Some(line) = self.media.ui(ui, stream, media) {
-                    shown.body = Body::Failed(line);
+                    shown.fail(line);
                 }
             }
             Body::TooLarge(line) => {
                 ui.add(widgets::warning_message(line.as_str()));
-                ui.label(t.ty.body.rich(TOO_LARGE_HINT).color(t.color.text.muted));
+                ui.add(widgets::muted(TOO_LARGE_HINT));
             }
             Body::Archive(listing) => {
+                if listing.partial {
+                    ui.add(widgets::warning_message(crate::archive::PARTIAL));
+                }
                 if listing.members.is_empty() {
-                    ui.label(t.ty.body.rich(EMPTY_ARCHIVE).color(t.color.text.muted));
+                    ui.add(widgets::muted(EMPTY_ARCHIVE));
                 }
                 let rows = self
                     .archive_rows
@@ -405,11 +419,12 @@ fn details(
         if let Some(mode) = e.permissions {
             rows.push(("Permissions", permissions_text(mode)));
         }
-        if let Some(uid) = e.uid {
-            rows.push(("Owner", uid.to_string()));
+        // The names when the host gave them, else the ids.
+        if let Some(owner) = e.owner.clone().or_else(|| e.uid.map(|id| id.to_string())) {
+            rows.push(("Owner", owner));
         }
-        if let Some(gid) = e.gid {
-            rows.push(("Group", gid.to_string()));
+        if let Some(group) = e.group.clone().or_else(|| e.gid.map(|id| id.to_string())) {
+            rows.push(("Group", group));
         }
         if let Some(target) = &e.link {
             rows.push(("Link to", target.clone()));

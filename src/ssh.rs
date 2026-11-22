@@ -22,7 +22,7 @@ use russh::client::{self, DisconnectReason};
 use russh::keys::PublicKeyOrCertificate;
 use russh::keys::ssh_key::{Algorithm, PublicKey};
 use russh::{Disconnect, Preferred};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{RawSftpSession, SftpSession};
 use tokio::sync::oneshot;
 
 use crate::credentials::{self, Kind};
@@ -384,15 +384,52 @@ pub struct Entry {
     pub permissions: Option<u32>,
     /// The link's target as the host stores it, when the entry is a symlink.
     pub link: Option<String>,
-    /// The owner's and group's numeric ids. SFTP v3 sends no names.
+    /// The owner's and group's numeric ids.
     pub uid: Option<u32>,
     pub gid: Option<u32>,
+    /// The owner's and group's names, from the listing's `ls -l` line (SFTP v3's
+    /// attributes carry only the ids); `None` when the host sent no such line.
+    pub owner: Option<String>,
+    pub group: Option<String>,
+}
+
+/// The owner and group an `ls -l` style line names, as OpenSSH's SFTP server writes a
+/// directory listing's `longname`: `-rw-r--r--    1 alice    staff    1234 Jan  1 00:00 a`.
+/// `None` for a line that does not look like one.
+pub fn owner_and_group(longname: &str) -> Option<(String, String)> {
+    let mut fields = longname.split_whitespace();
+    let mode = fields.next()?;
+    let links = fields.next()?;
+    let looks_like_mode = mode.len() >= 10 && mode.is_char_boundary(10);
+    if !looks_like_mode || !links.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let owner = fields.next()?;
+    let group = fields.next()?;
+    // The size must follow, or the line was something else.
+    fields.next()?;
+    Some((owner.to_owned(), group.to_owned()))
+}
+
+/// A Session's SFTP: the files side, and a second channel kept for listings, which read
+/// each entry's `longname` (the files side drops it).
+pub(crate) struct Sftp {
+    files: SftpSession,
+    lister: RawSftpSession,
+}
+
+impl std::ops::Deref for Sftp {
+    type Target = SftpSession;
+
+    fn deref(&self) -> &SftpSession {
+        &self.files
+    }
 }
 
 /// An open Session's connection. Dropping it closes the connection.
 pub struct Session {
     handle: Arc<client::Handle<HostCheck>>,
-    sftp: Arc<SftpSession>,
+    sftp: Arc<Sftp>,
     runtime: tokio::runtime::Handle,
     wake: Wake,
     watch: Arc<Watch>,
@@ -558,7 +595,7 @@ async fn settle(handle: &client::Handle<HostCheck>, error: &russh_sftp::client::
 /// host's own words.
 #[derive(Clone)]
 pub struct Remote {
-    sftp: Arc<SftpSession>,
+    sftp: Arc<Sftp>,
     /// For commands, which run beside SFTP on the same connection.
     handle: Arc<client::Handle<HostCheck>>,
 }
@@ -908,15 +945,20 @@ async fn dial(
 
 async fn start_sftp(
     handle: &client::Handle<HostCheck>,
-) -> Result<SftpSession, Box<dyn std::error::Error>> {
+) -> Result<Sftp, Box<dyn std::error::Error>> {
     let channel = handle.channel_open_session().await?;
     channel.request_subsystem(true, "sftp").await?;
-    Ok(SftpSession::new(channel.into_stream()).await?)
+    let files = SftpSession::new(channel.into_stream()).await?;
+    let channel = handle.channel_open_session().await?;
+    channel.request_subsystem(true, "sftp").await?;
+    let lister = RawSftpSession::new(channel.into_stream());
+    lister.init().await?;
+    Ok(Sftp { files, lister })
 }
 
 /// Lists `folder`, absolute or relative to the home directory (empty: the home itself).
 async fn list_folder(
-    sftp: &SftpSession,
+    sftp: &Sftp,
     folder: &str,
 ) -> Result<Listing, russh_sftp::client::error::Error> {
     let folder = if folder.is_empty() { "." } else { folder };
@@ -940,14 +982,12 @@ fn reason(error: &russh_sftp::client::error::Error) -> String {
 
 /// The entries of the directory at `path`. A symlink is described by its target, which
 /// is looked up with `stat`; a link whose target cannot be read is not a directory.
-async fn list(
-    sftp: &SftpSession,
-    path: String,
-) -> Result<Listing, russh_sftp::client::error::Error> {
+async fn list(sftp: &Sftp, path: String) -> Result<Listing, russh_sftp::client::error::Error> {
     let mut entries = Vec::new();
-    for dir_entry in sftp.read_dir(path.clone()).await? {
-        let name = dir_entry.file_name();
-        let mut attrs = dir_entry.metadata();
+    for file in read_dir(&sftp.lister, &path).await? {
+        let name = file.filename;
+        let names = owner_and_group(&file.longname);
+        let mut attrs = file.attrs;
         let mut link = None;
         if attrs.is_symlink() {
             let at = crate::folder::join(&path, &name);
@@ -965,9 +1005,35 @@ async fn list(
             link,
             uid: attrs.uid,
             gid: attrs.gid,
+            owner: names.as_ref().map(|(owner, _)| owner.clone()),
+            group: names.map(|(_, group)| group),
         });
     }
     Ok(Listing { path, entries })
+}
+
+/// The directory at `path`'s entries as the host sends them, `.` and `..` left out.
+async fn read_dir(
+    lister: &RawSftpSession,
+    path: &str,
+) -> Result<Vec<russh_sftp::protocol::File>, russh_sftp::client::error::Error> {
+    use russh_sftp::client::error::Error;
+    use russh_sftp::protocol::StatusCode;
+    let handle = lister.opendir(path).await?.handle;
+    let mut files = Vec::new();
+    loop {
+        match lister.readdir(handle.clone()).await {
+            Ok(name) => files.extend(name.files),
+            Err(Error::Status(status)) if status.status_code == StatusCode::Eof => break,
+            Err(e) => {
+                let _ = lister.close(handle).await;
+                return Err(e);
+            }
+        }
+    }
+    lister.close(handle).await?;
+    files.retain(|f| f.filename != "." && f.filename != "..");
+    Ok(files)
 }
 
 /// The host-key algorithms to offer: those already recorded for the host first, then the

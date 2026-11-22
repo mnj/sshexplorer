@@ -120,11 +120,13 @@ pub struct App {
     /// The Appearance last put on the context, so a change is applied once.
     applied: Option<Appearance>,
     /// The `known_hosts` file host keys are checked against, and Trust appends to.
+    /// Empty (none) unless set: only [`App::operator_ssh`] names the operator's own.
     known_hosts: PathBuf,
-    /// The operator's OpenSSH config, read at each Session open while it is in use.
-    ssh_config: PathBuf,
-    /// The SSH agent when the config does not name one: `SSH_AUTH_SOCK`, or the OpenSSH
-    /// agent's pipe on Windows.
+    /// The OpenSSH config, read at each Session open while it is in use; none unless
+    /// set, so that only the app itself reads the operator's `~/.ssh/config`.
+    ssh_config: Option<PathBuf>,
+    /// The SSH agent when the config does not name one; none unless set. The app uses
+    /// `SSH_AUTH_SOCK`, or the OpenSSH agent's pipe on Windows.
     agent: Option<PathBuf>,
     /// The saved Hosts, in the Host dialog's order.
     hosts: Vec<Host>,
@@ -158,9 +160,11 @@ enum Closing {
     Quit,
 }
 
+/// An app that touches nothing of the operator's: no `known_hosts`, OpenSSH config or
+/// SSH agent (see [`App::operator_ssh`]), secrets in memory and no sound.
 impl Default for App {
     fn default() -> Self {
-        App::with_known_hosts(default_known_hosts())
+        App::with_known_hosts(PathBuf::new())
     }
 }
 
@@ -196,8 +200,8 @@ impl App {
             dialog: None,
             applied: None,
             known_hosts: path,
-            ssh_config: default_ssh_config(),
-            agent: ssh::default_agent(),
+            ssh_config: None,
+            agent: None,
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
@@ -267,16 +271,23 @@ impl App {
 
     /// The same app, reading the OpenSSH config at `path`.
     pub fn ssh_config_at(mut self, path: PathBuf) -> App {
-        self.ssh_config = path;
+        self.ssh_config = Some(path);
         self
+    }
+
+    /// The same app, using the operator's own `~/.ssh/known_hosts`, `~/.ssh/config` and
+    /// SSH agent. Only main.rs calls it, so that no test touches them.
+    pub fn operator_ssh(self) -> App {
+        self.known_hosts_at(default_known_hosts())
+            .ssh_config_at(default_ssh_config())
+            .agent_at(ssh::default_agent())
     }
 
     /// The OpenSSH config as the file holds it now; empty when it is not in use.
     fn read_ssh_config(&self) -> Config {
-        if self.settings.connections.use_ssh_config {
-            Config::read(&self.ssh_config, &home())
-        } else {
-            Config::default()
+        match &self.ssh_config {
+            Some(path) if self.settings.connections.use_ssh_config => Config::read(path, &home()),
+            _ => Config::default(),
         }
     }
 
@@ -339,7 +350,10 @@ impl App {
         // Every Session's Downloads go on, on screen or not.
         let now = ui.input(|i| i.time);
         let attempts = self.settings.connections.reconnect_attempts;
-        for session in &mut self.sessions {
+        for (i, session) in self.sessions.iter_mut().enumerate() {
+            if i != self.active {
+                session.hidden();
+            }
             session.poll(now);
             // Reconnecting goes on whether the Session is shown or not.
             if let Some(wait) = session.keep_connected(now, attempts) {
@@ -433,10 +447,8 @@ impl App {
                         ui.add(widgets::badge("Readonly"))
                             .tooltip("This Session cannot change the remote filesystem");
                     }
-                    let t = ui.tokens();
                     let folder = details.local_folder.display().to_string();
-                    ui.label(t.ty.body.rich(folder).color(t.color.text.muted))
-                        .tooltip("Local folder");
+                    ui.add(widgets::muted(folder)).tooltip("Local folder");
                     if let Some(note) = &details.note {
                         ui.add(widgets::warning_message(note));
                     }

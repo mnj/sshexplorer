@@ -227,6 +227,24 @@ fn a_literal_size_is_banned() {
 }
 
 #[test]
+fn a_constant_size_written_as_a_literal_is_banned() {
+    const PATTERN: &str = "literal size in a `const` or `static`";
+    assert_eq!(banned("const ENTRY_WIDTH: f32 = 180.0;"), [PATTERN]);
+    assert_eq!(banned("pub const GAP: f32 = 8.0;"), [PATTERN]);
+    assert_eq!(banned("pub(crate) static PAD: f32 = 4.0 * 2.0;"), [PATTERN]);
+    assert_eq!(
+        banned("const PAD: egui::Vec2 = egui::vec2(8.0, 0.0);"),
+        [PATTERN]
+    );
+    assert_eq!(banned("const PAD: Vec2 = Vec2::splat(4.0);"), [PATTERN]);
+    // Zero, a token's arithmetic, and numbers that are not sizes are allowed.
+    assert!(clean("const NONE: f32 = 0.0;"));
+    assert!(clean("const DELAY: f64 = 0.2;"));
+    assert!(clean("const KEEP: usize = 2;"));
+    assert!(clean("fn f() { let width: f32 = 180.0; }"));
+}
+
+#[test]
 fn a_literal_size_split_over_lines_is_caught_on_the_line_it_starts() {
     let source = "painter.line_segment(\n    [a, b],\n    Stroke::new(\n        1.5,\n        colour,\n    ),\n);";
     assert_eq!(

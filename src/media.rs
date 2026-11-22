@@ -120,7 +120,7 @@ impl Player {
                 }
                 // The first error is the cause; the rest follow from it.
                 MessageView::Error(error) if !matches!(self.phase, Phase::Failed(_)) => {
-                    self.phase = Phase::Failed(failure_line(&error.error()));
+                    self.phase = Phase::Failed(line_for(&error.error()));
                     self.playing = false;
                 }
                 _ => {}
@@ -263,7 +263,7 @@ impl Drop for Player {
 }
 
 /// A failure as Preview's one line.
-fn failure_line(error: &gst::glib::Error) -> String {
+fn line_for(error: &gst::glib::Error) -> String {
     if error.kind::<gst::ResourceError>().is_some() {
         return crate::preview::failure_line(error.message());
     }
@@ -284,7 +284,7 @@ fn failure_line(error: &gst::glib::Error) -> String {
     if unsupported {
         return UNSUPPORTED_FORMAT.to_owned();
     }
-    crate::image_view::failure_line(error.message())
+    crate::preview::cannot_preview(error.message())
 }
 
 /// The file as `appsrc` reads it: the reader and where it is.
@@ -303,8 +303,9 @@ fn build<R>(
 where
     R: Read + Seek + Send + 'static,
 {
-    let missing = |what: &str| format!("Cannot preview: GStreamer has no {what}");
-    gst::init().map_err(|e| format!("Cannot preview: GStreamer is not available ({e})"))?;
+    use crate::preview::cannot_preview;
+    let missing = |what: &str| cannot_preview(&format!("GStreamer has no {what}"));
+    gst::init().map_err(|e| cannot_preview(&format!("GStreamer is not available ({e})")))?;
     let playbin = gst::ElementFactory::make("playbin")
         .property("uri", "appsrc://")
         .build()
@@ -482,6 +483,9 @@ pub const CHUNK: usize = 256 * 1024;
 /// [`CHUNK`] from there, so seeking costs one round trip and nothing is read whole.
 /// The file opens on the first read and closes when the reader is dropped. Errors are
 /// the reason as the operator reads it ("No such file", "Permission denied").
+/// A read the connection's drop stopped.
+const LOST: &str = "connection lost";
+
 pub struct RangedReader {
     asks: tokio::sync::mpsc::UnboundedSender<(Ask, std::sync::mpsc::Sender<Answer>)>,
     at: u64,
@@ -512,6 +516,11 @@ impl RangedReader {
                     match remote.open(path.clone()).await {
                         Ok(opened) => file = Some(opened),
                         Err(e) => {
+                            let e = if remote.closed().await {
+                                LOST.to_owned()
+                            } else {
+                                e
+                            };
                             let _ = answer.send(match ask {
                                 Ask::Read { .. } => Answer::Data(Err(e)),
                                 Ask::Size => Answer::Size(Err(e)),
@@ -546,6 +555,17 @@ impl RangedReader {
                             .map_err(|e| e.to_string()),
                     ),
                 };
+                // A read the drop cut short reads as the connection lost, not as
+                // whatever russh says about its channel.
+                let reply = match reply {
+                    Answer::Data(Err(_)) if remote.closed().await => {
+                        Answer::Data(Err(LOST.to_owned()))
+                    }
+                    Answer::Size(Err(_)) if remote.closed().await => {
+                        Answer::Size(Err(LOST.to_owned()))
+                    }
+                    reply => reply,
+                };
                 let _ = answer.send(reply);
             }
         });
@@ -558,7 +578,7 @@ impl RangedReader {
 
     fn ask(&self, ask: Ask) -> std::io::Result<Answer> {
         let (answer, answered) = std::sync::mpsc::channel();
-        let gone = || std::io::Error::other("connection lost");
+        let gone = || std::io::Error::other(LOST);
         self.asks.send((ask, answer)).map_err(|_| gone())?;
         answered.recv().map_err(|_| gone())
     }

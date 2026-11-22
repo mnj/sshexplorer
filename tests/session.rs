@@ -489,3 +489,45 @@ fn a_port_out_of_range_disables_open_session() {
     );
     assert!(harness.query_by_role(Role::Tab).is_none());
 }
+
+#[test]
+fn a_large_directory_draws_only_the_rows_in_view_and_the_keys_reach_every_row() {
+    let fixture = Fixture::start();
+    let big = fixture.root().join("home/tester/docs");
+    for i in 1..=2000 {
+        std::fs::write(big.join(format!("f{i:04}")), "x").unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = browsing(&fixture, &dir);
+    harness.get_by_role_and_label(Role::Row, "docs").click();
+    harness.run_ok();
+    press(&mut harness, egui::Key::Enter);
+    until(&mut harness, "the large listing", |h| {
+        h.query_by_role_and_label(Role::Row, "f0001").is_some()
+    });
+    let drawn = harness.get_all_by_role(Role::Row).count();
+    assert!(drawn < 100, "{drawn} rows drawn of 2002");
+
+    press(&mut harness, egui::Key::End);
+    assert_eq!(selected_rows(&harness), ["f2000"]);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Row, "f0001")
+            .is_none()
+    );
+    press(&mut harness, egui::Key::PageUp);
+    let page = selected_rows(&harness);
+    assert_eq!(page.len(), 1);
+    assert!(
+        page[0].as_str() < "f2000" && page[0].as_str() > "f1900",
+        "{page:?}"
+    );
+    // Home focuses `.`, which is never selected.
+    press(&mut harness, egui::Key::Home);
+    assert!(harness.query_by_role_and_label(Role::Row, ".").is_some());
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Row, "f2000")
+            .is_none()
+    );
+}

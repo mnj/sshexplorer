@@ -7,7 +7,7 @@ use egui::{
 
 use super::glyph::{self, Glyph};
 use super::paint::{self, State};
-use super::row::{CHEVRON_PULL, Selection, TREE_INDENT, ground};
+use super::row::{CHEVRON_PULL, Highlight, TREE_INDENT, ground};
 use crate::theme::{TokensExt as _, motion};
 
 /// A section header: a row with a chevron, the title in the `title` style and a muted
@@ -72,7 +72,7 @@ impl Widget for SectionHeader {
             }
             let s = paint::seen(&response, self.state);
             ui.painter()
-                .add(ground(&t, rect, Selection::None, false, s));
+                .add(ground(&t, rect, Highlight::None, false, s));
             let left = rect.left() + t.space.row_x;
             let chevron = Rect::from_min_size(
                 pos2(left - CHEVRON_PULL, rect.center().y - glyph::BOX / 2.0),

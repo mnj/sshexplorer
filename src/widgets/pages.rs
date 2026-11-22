@@ -13,7 +13,7 @@
 
 use egui::{Context, Id, Modal, ScrollArea, Ui};
 
-use super::Selection;
+use super::Highlight;
 use crate::theme::TokensExt as _;
 use crate::theme::motion::{self, Look};
 
@@ -81,9 +81,9 @@ impl PagesDialog<'_> {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for (i, name) in self.pages.iter().enumerate() {
                             let selection = if i == *page {
-                                Selection::Live
+                                Highlight::Live
                             } else {
-                                Selection::None
+                                Highlight::None
                             };
                             let row = super::list_row(*name)
                                 .selection(selection)

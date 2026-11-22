@@ -127,6 +127,8 @@ impl Matches {
             .map(|m| Entry {
                 name: name(&m.path).to_owned(),
                 is_dir: m.is_dir,
+                // Download only asks whether it is a link; the target is not known.
+                link: m.link.then(String::new),
                 ..Entry::default()
             })
             .collect();

@@ -52,6 +52,7 @@ fn browsing(
     std::fs::copy("tests/media/clip.webm", home.join("clip.webm")).unwrap();
     std::fs::copy("tests/media/tone.ogg", home.join("tone.ogg")).unwrap();
     std::fs::write(home.join("broken.mp4"), b"no movie in here".repeat(64)).unwrap();
+    std::fs::write(home.join("long.wav"), silence(60)).unwrap();
     let known_hosts = dir.path().join("known_hosts");
     std::fs::write(&known_hosts, format!("{}\n", fixture.known_hosts_line())).unwrap();
     let app = App::with_settings(settings)
@@ -62,38 +63,59 @@ fn browsing(
         .with_size(egui::vec2(1100.0, 700.0))
         .with_context_setup(app::setup)
         .build_ui_state(|ui, app: &mut App| app.ui(ui), app);
-    harness.get_by_role_and_label(Role::Button, "Hosts").click();
-    harness.run_ok();
-    type_into(&mut harness, Role::TextInput, "Address", fixture.address());
-    let port = fixture.port().to_string();
-    type_into(&mut harness, Role::TextInput, "Port", &port);
-    type_into(&mut harness, Role::TextInput, "Account", fixture::ACCOUNT);
-    harness
-        .get_by_role_and_label(Role::Button, "Open Session")
-        .click();
-    harness.run_ok();
-    until(&mut harness, "the password prompt", |h| {
-        h.query_by_role(Role::PasswordInput).is_some()
-    });
-    type_into(
-        &mut harness,
-        Role::PasswordInput,
-        "Password",
-        fixture::PASSWORD,
-    );
-    harness
-        .get_by_role_and_label(Role::Button, "Connect")
-        .click();
-    harness.run_ok();
-    until(&mut harness, "the tree", |h| {
-        h.query_by_role_and_label(Role::Row, "tester").is_some()
-    });
+    open_session(&mut harness, fixture);
     harness.key_press_modifiers(Modifiers::COMMAND, Key::Num2);
     harness.run_ok();
     until(&mut harness, "the listing", |h| {
         h.query_by_role_and_label(Role::Row, "clip.webm").is_some()
     });
     harness
+}
+
+/// Opens a new Session on the fixture from the Host dialog; it shows in Tree view.
+fn open_session(harness: &mut Harness<'static, App>, fixture: &Fixture) {
+    harness.get_by_role_and_label(Role::Button, "Hosts").click();
+    harness.run_ok();
+    type_into(harness, Role::TextInput, "Address", fixture.address());
+    let port = fixture.port().to_string();
+    type_into(harness, Role::TextInput, "Port", &port);
+    type_into(harness, Role::TextInput, "Account", fixture::ACCOUNT);
+    harness
+        .get_by_role_and_label(Role::Button, "Open Session")
+        .click();
+    harness.run_ok();
+    until(harness, "the password prompt", |h| {
+        h.query_by_role(Role::PasswordInput).is_some()
+    });
+    type_into(harness, Role::PasswordInput, "Password", fixture::PASSWORD);
+    harness
+        .get_by_role_and_label(Role::Button, "Connect")
+        .click();
+    harness.run_ok();
+    until(harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
+}
+
+/// A WAV file of `seconds` of silence: 8 kHz, mono, 8-bit.
+fn silence(seconds: u32) -> Vec<u8> {
+    let rate = 8000u32;
+    let data = rate * seconds;
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes()); // bytes per second
+    wav.extend_from_slice(&1u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&8u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data.to_le_bytes());
+    wav.resize(wav.len() + data as usize, 0x80);
+    wav
 }
 
 fn click_row(harness: &mut Harness<'static, App>, name: &str) {
@@ -230,4 +252,25 @@ fn a_format_it_cannot_decode_shows_the_failure_line() {
         has_label(h, "Cannot preview: unsupported format")
     });
     assert!(!has_button(&harness, "Play"));
+}
+
+#[test]
+fn playback_pauses_when_its_session_tab_is_hidden() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = AppSettings::default();
+    // Autoplay plays with the listing focused, so the focus rule plays no part.
+    settings.preview.autoplay = true;
+    let mut harness = browsing(&fixture, &dir, settings);
+    click_row(&mut harness, "long.wav");
+    until(&mut harness, "playback", |h| has_button(h, "Pause"));
+
+    open_session(&mut harness, &fixture);
+    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab);
+    harness.run_ok();
+    assert!(
+        has_label(&harness, "long.wav"),
+        "the first Session is shown"
+    );
+    assert!(has_button(&harness, "Play"), "playback paused while hidden");
 }

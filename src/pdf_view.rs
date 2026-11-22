@@ -20,8 +20,6 @@ use crate::theme::TokensExt as _;
 use crate::widgets;
 use crate::zoom::{self, Level, Zoom};
 
-/// The height one move key scrolls, in screen points.
-const LINE: f32 = 40.0;
 /// How many pages either side of those in view keep their textures.
 const KEEP: usize = 2;
 
@@ -33,6 +31,8 @@ pub struct PdfView {
     offset: Vec2,
     /// The view's height last frame, for paging with the keys.
     height: f32,
+    /// The height one move key scrolls, in screen points: a row's.
+    line: f32,
 }
 
 #[derive(Default)]
@@ -66,6 +66,7 @@ impl PdfView {
         scroll: f32,
         focus: Id,
     ) -> Option<String> {
+        self.line = ui.tokens().row_height();
         if let State::Idle = self.state {
             self.state = match pdf.fetched.kept.bytes() {
                 Ok(bytes) => {
@@ -83,7 +84,7 @@ impl PdfView {
                     let State::Opening(renderer) = std::mem::take(&mut self.state) else {
                         unreachable!()
                     };
-                    let layout = Layout::new(&sizes);
+                    let layout = Layout::new(&sizes, ui.tokens().size.page_gap);
                     self.state = State::Ready(Ready {
                         renderer,
                         textures: (0..layout.len()).map(|_| None).collect(),
@@ -101,11 +102,7 @@ impl PdfView {
         }
         let State::Ready(ready) = &mut self.state else {
             if let State::Opening(_) = self.state {
-                let t = ui.tokens();
-                ui.horizontal(|ui| {
-                    ui.add(widgets::spinner());
-                    ui.label(t.ty.body.rich("Loading preview…").color(t.color.text.muted));
-                });
+                ui.add(widgets::loading_line(crate::preview::LOADING));
             }
             return None;
         };
@@ -172,7 +169,7 @@ impl PdfView {
             }
         }
         let scale = scale_of(&self.zoom, fit);
-        self.offset.y += scroll * self.height.max(LINE);
+        self.offset.y += scroll * self.height.max(self.line);
         let scaled = content * scale;
         // Within the stack, so that the keys' ends land on its ends.
         self.offset = self
@@ -243,7 +240,7 @@ impl PdfView {
 
     /// How many move-key steps make one view height, for paging.
     pub fn rows(&self) -> usize {
-        (self.height / LINE).max(1.0) as usize
+        (self.height / self.line.max(1.0)).max(1.0) as usize
     }
 }
 

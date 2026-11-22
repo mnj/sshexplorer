@@ -12,7 +12,9 @@ use egui::{Pos2, Rect, Vec2, pos2};
 /// The presets after Fit, as scales.
 pub const PRESETS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
 /// How far Ctrl+wheel goes out (unless Fit is smaller still) and in.
+// theme-exempt: a zoom scale, not a size
 pub const MIN: f32 = 0.1;
+// theme-exempt: a zoom scale, not a size
 pub const MAX: f32 = 8.0;
 
 /// The zoom level chosen.

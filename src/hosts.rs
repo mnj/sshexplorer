@@ -59,6 +59,14 @@ impl Default for Host {
     }
 }
 
+/// The local OS user name (`USER`, or `USERNAME` on Windows): the account when neither
+/// the Host nor the config names one.
+pub fn local_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
+}
+
 /// The operator's Downloads directory; `~/Downloads` when the OS names none.
 pub fn downloads_dir() -> PathBuf {
     directories::UserDirs::new()

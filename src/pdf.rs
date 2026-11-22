@@ -26,10 +26,7 @@ pub const ENCRYPTED: &str = "Cannot preview: encrypted PDF";
 /// The line for bytes hayro cannot read as a PDF.
 pub const INVALID: &str = "Cannot preview: not a valid PDF";
 
-/// The space between stacked pages, in points.
-pub const GAP: f32 = 8.0;
-
-/// The pages stacked top to bottom with [`GAP`] between them, each centred across the
+/// The pages stacked top to bottom with a gap between them, each centred across the
 /// widest, in points. Times the zoom scale, that is where they sit on screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
@@ -38,19 +35,19 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The layout of pages of `sizes` points.
-    pub fn new(sizes: &[[f32; 2]]) -> Layout {
+    /// The layout of pages of `sizes` points, `gap` points apart.
+    pub fn new(sizes: &[[f32; 2]], gap: f32) -> Layout {
         let width = sizes.iter().map(|s| s[0]).fold(0.0, f32::max);
         let mut top = 0.0;
         let pages = sizes
             .iter()
             .map(|&[w, h]| {
                 let rect = Rect::from_min_size(pos2((width - w) / 2.0, top), vec2(w, h));
-                top += h + GAP;
+                top += h + gap;
                 rect
             })
             .collect();
-        let height = if sizes.is_empty() { 0.0 } else { top - GAP };
+        let height = if sizes.is_empty() { 0.0 } else { top - gap };
         Layout {
             pages,
             size: vec2(width, height),
