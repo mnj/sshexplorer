@@ -37,6 +37,36 @@ fn hidden_entries_are_not_shown_by_default_and_the_choice_is_saved() {
 }
 
 #[test]
+fn the_preview_defaults_are_the_specs_and_are_saved() {
+    use sshexplorer::settings::ScratchChoice;
+
+    let p = AppSettings::default().preview;
+    assert_eq!(p.size_cap, 10);
+    assert_eq!(p.size_cap_bytes(), 10 << 20);
+    assert!(!p.autoplay);
+    assert_eq!(p.scratch, ScratchChoice::Memory);
+    assert_eq!(p.scratch_dir, None);
+
+    let (_dir, store) = store();
+    let mut settings = AppSettings::default();
+    settings.preview.size_cap = 64;
+    settings.preview.scratch = ScratchChoice::Chosen;
+    settings.preview.scratch_dir = Some("/var/tmp/peek".into());
+    store.save(&settings).expect("saved");
+    assert_eq!(store.load().preview, settings.preview);
+
+    // A cap that is not a whole number of MiB from 1 falls back to 10, alone.
+    std::fs::write(
+        store.path(),
+        "[preview]\nsize_cap = 0\nscratch = \"temp\"\n",
+    )
+    .unwrap();
+    let loaded = store.load().preview;
+    assert_eq!(loaded.size_cap, 10);
+    assert_eq!(loaded.scratch, ScratchChoice::Temp);
+}
+
+#[test]
 fn no_file_loads_the_defaults() {
     let (_dir, store) = store();
     assert_eq!(store.load(), AppSettings::default());

@@ -20,8 +20,8 @@ use crate::keymap::{Action, KeyMap};
 use crate::openssh_config::Config;
 use crate::session::{self, Session, View};
 use crate::settings::{
-    Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge, Search, Store,
-    ThemeChoice, UI_SCALES,
+    Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge,
+    PreviewSettings, ScratchChoice, Search, Store, ThemeChoice, UI_SCALES,
 };
 use crate::ssh::{Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
@@ -738,6 +738,7 @@ impl App {
                     appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
                 }
                 Page::Browsing => browsing(ui, &mut settings.browsing),
+                Page::Preview => preview(ui, &mut settings.preview),
                 Page::Download => download_page(ui, settings),
                 Page::Keys => editor.ui(ui, &mut settings.keys),
                 Page::Connections => connections(ui, &mut settings.connections),
@@ -749,6 +750,7 @@ impl App {
             match page {
                 Page::Appearance => settings.appearance = Appearance::default(),
                 Page::Browsing => settings.browsing = Browsing::default(),
+                Page::Preview => settings.preview = PreviewSettings::default(),
                 Page::Download => {
                     settings.download = crate::settings::Download::default();
                     settings.search.follow_links = Search::default().follow_links;
@@ -880,6 +882,51 @@ fn browsing(ui: &mut egui::Ui, b: &mut Browsing) {
     widgets::form("browsing").show(ui, |ui| {
         widgets::form_row(ui, "Show hidden entries", |ui| {
             ui.add(widgets::switch(&mut b.show_hidden, "").name("Show hidden entries"));
+        });
+    });
+}
+
+const SCRATCH: [(ScratchChoice, &str); 3] = [
+    (ScratchChoice::Memory, "In memory"),
+    (ScratchChoice::Temp, "System temp"),
+    (ScratchChoice::Chosen, "Chosen"),
+];
+
+/// The Preview page.
+fn preview(ui: &mut egui::Ui, p: &mut PreviewSettings) {
+    widgets::form("preview").show(ui, |ui| {
+        widgets::form_row(ui, "Size cap", |ui| {
+            let mut cap = i64::from(p.size_cap);
+            ui.add(widgets::stepper_field(&mut cap, 1..=4096).suffix("MiB"));
+            p.size_cap = u32::try_from(cap.max(1)).unwrap_or(p.size_cap);
+        });
+        widgets::form_row(ui, "Autoplay audio and video", |ui| {
+            ui.add(widgets::switch(&mut p.autoplay, "").name("Autoplay audio and video"));
+        });
+        widgets::form_row(ui, "Scratch folder", |ui| {
+            ui.vertical(|ui| {
+                ui.add(widgets::segmented(&mut p.scratch, &SCRATCH));
+                if p.scratch == ScratchChoice::Chosen {
+                    ui.horizontal(|ui| {
+                        let mut path = p
+                            .scratch_dir
+                            .as_ref()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_default();
+                        let field = ui
+                            .add(widgets::text_field(&mut path).hint("Folder"))
+                            .accessible_name("Scratch folder path");
+                        if field.changed() {
+                            p.scratch_dir = (!path.is_empty()).then(|| PathBuf::from(path));
+                        }
+                        if ui.add(widgets::button("Browse…")).clicked()
+                            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                        {
+                            p.scratch_dir = Some(dir);
+                        }
+                    });
+                }
+            });
         });
     });
 }

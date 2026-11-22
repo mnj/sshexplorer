@@ -30,6 +30,8 @@ pub struct AppSettings {
     #[serde(deserialize_with = "lenient")]
     pub browsing: Browsing,
     #[serde(deserialize_with = "lenient")]
+    pub preview: PreviewSettings,
+    #[serde(deserialize_with = "lenient")]
     pub connections: Connections,
     #[serde(deserialize_with = "lenient")]
     pub search: Search,
@@ -64,6 +66,57 @@ impl Default for Download {
             keep_executable: true,
         }
     }
+}
+
+/// The Preview page.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreviewSettings {
+    /// The most of a file Preview fetches, in MiB: text and source show that much of a
+    /// larger file. At least 1.
+    #[serde(deserialize_with = "size_cap")]
+    pub size_cap: u32,
+    /// Whether audio and video start playing when focused. Stored only, until they play.
+    #[serde(deserialize_with = "lenient")]
+    pub autoplay: bool,
+    #[serde(deserialize_with = "lenient")]
+    pub scratch: ScratchChoice,
+    /// The Chosen directory, kept when another choice is made.
+    #[serde(deserialize_with = "lenient")]
+    pub scratch_dir: Option<PathBuf>,
+}
+
+/// The size cap a new install and a reset have, in MiB.
+pub const DEFAULT_SIZE_CAP: u32 = 10;
+
+impl Default for PreviewSettings {
+    fn default() -> Self {
+        PreviewSettings {
+            size_cap: DEFAULT_SIZE_CAP,
+            autoplay: false,
+            scratch: ScratchChoice::Memory,
+            scratch_dir: None,
+        }
+    }
+}
+
+impl PreviewSettings {
+    /// The size cap in bytes.
+    pub fn size_cap_bytes(&self) -> u64 {
+        u64::from(self.size_cap.max(1)) << 20
+    }
+}
+
+/// Where Preview keeps fetched bytes (the Scratch folder).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScratchChoice {
+    #[default]
+    Memory,
+    /// The system temp directory.
+    Temp,
+    /// The directory in `scratch_dir`.
+    Chosen,
 }
 
 /// The Browsing page.
@@ -239,6 +292,15 @@ fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Re
 fn lenient_true<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     let value = toml::Value::deserialize(d)?;
     Ok(value.as_bool().unwrap_or(true))
+}
+
+/// A size cap: a whole number of MiB from 1, or the default.
+fn size_cap<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let value = toml::Value::deserialize(d)?;
+    Ok(value
+        .as_integer()
+        .filter(|n| (1..=i64::from(u32::MAX)).contains(n))
+        .map_or(DEFAULT_SIZE_CAP, |n| n as u32))
 }
 
 /// A UI scale: the nearest step, or the default when it is not a number.

@@ -287,6 +287,9 @@ pub struct Entry {
     pub permissions: Option<u32>,
     /// The link's target as the host stores it, when the entry is a symlink.
     pub link: Option<String>,
+    /// The owner's and group's numeric ids. SFTP v3 sends no names.
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
 }
 
 /// An open Session's connection. Dropping it closes the connection.
@@ -317,16 +320,20 @@ impl Session {
     }
 
     /// Starts reading up to `len` bytes of the file at the absolute `path`, from byte
-    /// `offset`. Fewer arrive only when the file ends first. The answer wakes the frame.
+    /// `offset`. Fewer arrive only when the file ends first. The answer wakes the frame;
+    /// dropping the request stops the read.
     pub fn read(&self, path: String, offset: u64, len: usize) -> Request<Vec<u8>> {
         let (sender, answer) = mpsc::channel();
         let remote = self.remote();
         let wake = self.wake.clone();
-        self.runtime.spawn(async move {
+        let task = self.runtime.spawn(async move {
             let _ = sender.send(remote.read(path, offset, len).await);
             wake();
         });
-        Request { answer }
+        Request {
+            answer,
+            task: Some(task.abort_handle()),
+        }
     }
 
     /// Starts listing the directory at the absolute `path`. A symlinked directory is
@@ -340,7 +347,7 @@ impl Session {
             let _ = sender.send(listing);
             wake();
         });
-        Request { answer }
+        Request { answer, task: None }
     }
 }
 
@@ -411,9 +418,12 @@ fn operator_reason(error: &russh_sftp::client::error::Error) -> String {
     }
 }
 
-/// A request to the host: its answer, or why there is none.
+/// A request to the host: its answer, or why there is none. Dropping a request whose
+/// work can be stopped (a read) stops it.
 pub struct Request<T> {
     answer: mpsc::Receiver<Result<T, String>>,
+    /// The task answering it, stopped when the request is dropped.
+    task: Option<tokio::task::AbortHandle>,
 }
 
 impl<T> Request<T> {
@@ -425,6 +435,14 @@ impl<T> Request<T> {
     /// Waits up to `timeout` for the answer: for tests, not the frame thread.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<T, String>> {
         self.answer.recv_timeout(timeout).ok()
+    }
+}
+
+impl<T> Drop for Request<T> {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -625,6 +643,8 @@ async fn list(
             modified: attrs.mtime,
             permissions: attrs.permissions,
             link,
+            uid: attrs.uid,
+            gid: attrs.gid,
         });
     }
     Ok(Listing { path, entries })

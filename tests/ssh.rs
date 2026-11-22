@@ -339,6 +339,11 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
         .recv_timeout(Duration::from_secs(10))
         .expect("the listing arrives")
         .expect("the listing succeeds");
+    // The wake follows the answer from the SSH thread, so it may land a moment later.
+    let start = std::time::Instant::now();
+    while wakes.load(Ordering::SeqCst) <= before && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(
         wakes.load(Ordering::SeqCst) > before,
         "the answer wakes the frame"

@@ -94,13 +94,17 @@ pub enum Action {
     PreviousSession,
     /// Opens the Host dialog.
     HostDialog,
+    /// Moves the keyboard on round the Session: listing, search field, Preview.
+    CycleFocus,
+    /// Moves the keyboard back round the Session.
+    CycleFocusBack,
     /// Downloads the Selection into the Session's Local folder.
     Download,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 32] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -127,6 +131,8 @@ impl Action {
         Action::PreviousSession,
         Action::CloseSession,
         Action::HostDialog,
+        Action::CycleFocus,
+        Action::CycleFocusBack,
         Action::UiScaleUp,
         Action::UiScaleDown,
         Action::UiScaleReset,
@@ -141,7 +147,9 @@ impl Action {
             Action::CloseSession
             | Action::NextSession
             | Action::PreviousSession
-            | Action::HostDialog => Area::Sessions,
+            | Action::HostDialog
+            | Action::CycleFocus
+            | Action::CycleFocusBack => Area::Sessions,
             Action::MoveUp
             | Action::MoveDown
             | Action::MoveFirst
@@ -199,6 +207,8 @@ impl Action {
             Action::NextSession => "Next Session",
             Action::PreviousSession => "Previous Session",
             Action::HostDialog => "Host dialog",
+            Action::CycleFocus => "Cycle focus",
+            Action::CycleFocusBack => "Cycle focus back",
             Action::Download => "Download",
         }
     }
@@ -242,6 +252,8 @@ impl Action {
             Action::NextSession => Binding::new(cmd, Key::Tab),
             Action::PreviousSession => Binding::new(shift_cmd, Key::Tab),
             Action::HostDialog => Binding::new(cmd, Key::O),
+            Action::CycleFocus => Binding::new(none, Key::Tab),
+            Action::CycleFocusBack => Binding::new(shift, Key::Tab),
             Action::Download => Binding::new(cmd, Key::S),
         })
     }
