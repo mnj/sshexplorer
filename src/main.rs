@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use sshexplorer::app::{self, App};
+use sshexplorer::credentials;
 use sshexplorer::scratch;
 use sshexplorer::settings::Store;
 use sshexplorer::theme::fonts;
@@ -12,7 +13,9 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_title("sshexplorer"),
         ..Default::default()
     };
-    let mut app = Store::platform().map_or_else(App::default, App::with_store);
+    let mut app = Store::platform()
+        .map_or_else(App::default, App::with_store)
+        .credentials_at(Arc::new(credentials::OsStore));
     // Preview files a crash left in the Scratch folder.
     scratch::clear_leftovers(&app.settings().preview);
     let installed = fonts::Installed::load();

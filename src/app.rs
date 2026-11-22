@@ -10,11 +10,13 @@
 //! opened, and every network step runs on it, off this frame thread.
 
 use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
 
 use egui::{Id, LayerId, Order, ViewportCommand};
 
 use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
+use crate::credentials;
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
 use crate::openssh_config::{Config, IdentityAgent};
@@ -129,6 +131,11 @@ pub struct App {
     /// Where Hosts are saved; `None` keeps them for this run only.
     host_store: Option<HostStore>,
     host_dialog: Option<HostDialog>,
+    /// Where remembered secrets are kept: the OS credential store in the app, a store in
+    /// memory unless [`App::credentials_at`] says otherwise.
+    credentials: Arc<dyn credentials::Store>,
+    /// Removals from the credential store still running, each answering once.
+    forgetting: Vec<mpsc::Receiver<Result<(), credentials::Refused>>>,
     pending: Vec<Pending>,
     /// Dropped before `ssh`, so that each closes its connection on a live runtime.
     sessions: Vec<Session>,
@@ -191,6 +198,8 @@ impl App {
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
+            credentials: Arc::new(credentials::MemoryStore::default()),
+            forgetting: Vec::new(),
             pending: Vec::new(),
             sessions: Vec::new(),
             active: 0,
@@ -205,13 +214,31 @@ impl App {
     /// every change back.
     pub fn with_store(store: Store) -> App {
         let host_store = HostStore::beside(store.path());
-        App {
+        let mut hosts = host_store.load();
+        // Hosts saved before they had ids get them now, so a secret can be kept.
+        let mut named = false;
+        for host in hosts.iter_mut().filter(|h| h.id.is_empty()) {
+            host.id = crate::hosts::new_id();
+            named = true;
+        }
+        let app = App {
             settings: store.load(),
-            hosts: host_store.load(),
+            hosts,
             host_store: Some(host_store),
             store: Some(store),
             ..App::default()
+        };
+        if named {
+            app.save_hosts();
         }
+        app
+    }
+
+    /// The same app, keeping remembered secrets in `store`: the OS credential store in
+    /// the app, a [`credentials::MemoryStore`] in tests.
+    pub fn credentials_at(mut self, store: Arc<dyn credentials::Store>) -> App {
+        self.credentials = store;
+        self
     }
 
     /// The same app, checking host keys against the `known_hosts` file at `path`.
@@ -333,6 +360,7 @@ impl App {
         let mut hosts = false;
         let mut download = false;
         let mut open_settings = false;
+        let mut dismiss = false;
         let session = self.sessions.get(self.active);
         let can_download = session.is_some_and(Session::can_download);
         let download_key = self
@@ -382,6 +410,14 @@ impl App {
                     if let Some(note) = &details.note {
                         ui.add(widgets::warning_message(note));
                     }
+                    if let Some(note) = &details.dismissible {
+                        // The dismiss control first, so a long note cannot push it out.
+                        dismiss = ui
+                            .add(widgets::glyph_button(Glyph::Close).name("Dismiss"))
+                            .tooltip("Dismiss")
+                            .clicked();
+                        ui.add(widgets::warning_message(note));
+                    }
                 }
             },
             |ui| {
@@ -393,6 +429,9 @@ impl App {
         );
         if hosts {
             self.open_host_dialog();
+        }
+        if dismiss && let Some(session) = self.sessions.get_mut(self.active) {
+            session.details.dismissible = None;
         }
         if download {
             self.download();
@@ -521,6 +560,10 @@ impl App {
                                     IdentityAgent::Off => None,
                                     IdentityAgent::Socket(path) => Some(path),
                                 },
+                                remember: plan.remember.map(|host| ssh::Remember {
+                                    store: self.credentials.clone(),
+                                    host,
+                                }),
                             };
                             let ssh = self.ssh.get_or_insert_with(|| {
                                 let ctx = ctx.clone();
@@ -534,17 +577,36 @@ impl App {
                     let id = Id::NULL.with("opening").with(self.next_id);
                     self.pending.push(Pending::new(id, plan.details, opening));
                 }
-                Some(HostAction::Changed) => self.save_hosts(),
+                Some(HostAction::Changed) => {
+                    let keys = dialog.take_forgotten();
+                    self.save_hosts();
+                    if !keys.is_empty() {
+                        self.forget(ctx, keys);
+                    }
+                }
                 Some(HostAction::Dismiss) => self.host_dialog = None,
                 None => {}
             }
+        }
+        let mut refused = false;
+        self.forgetting.retain(|answer| match answer.try_recv() {
+            Ok(result) => {
+                refused |= result.is_err();
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        if refused && let Some(dialog) = &mut self.host_dialog {
+            dialog.set_notice(credentials::NOT_REMOVED);
         }
         let mut i = 0;
         while i < self.pending.len() {
             match self.pending[i].show(ctx) {
                 Some(outcome) => {
-                    let pending = self.pending.remove(i);
-                    if let Outcome::Opened(opened) = outcome {
+                    let mut pending = self.pending.remove(i);
+                    if let Outcome::Opened(mut opened) = outcome {
+                        pending.details.dismissible = opened.note.take();
                         self.sessions.push(Session::new(pending.details, opened));
                         self.active = self.sessions.len() - 1;
                     }
@@ -552,6 +614,25 @@ impl App {
                 None => i += 1,
             }
         }
+    }
+
+    /// Removes `keys` from the credential store on a thread of its own, since the store
+    /// may block. The answer wakes the frame.
+    fn forget(&mut self, ctx: &egui::Context, keys: Vec<credentials::Key>) {
+        let (sender, answer) = mpsc::channel();
+        let store = self.credentials.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut result = Ok(());
+            for key in &keys {
+                if store.delete(key).is_err() {
+                    result = Err(credentials::Refused);
+                }
+            }
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+        self.forgetting.push(answer);
     }
 
     /// Queues a Download of the active Session's Selection.

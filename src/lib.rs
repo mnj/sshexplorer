@@ -16,6 +16,7 @@
 pub mod app;
 pub mod binding_editor;
 pub mod connect;
+pub mod credentials;
 pub mod download;
 pub mod download_ui;
 pub mod folder;

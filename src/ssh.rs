@@ -20,6 +20,7 @@ use russh::{Disconnect, Preferred};
 use russh_sftp::client::SftpSession;
 use tokio::sync::oneshot;
 
+use crate::credentials::{self, Kind};
 use crate::hosts::AuthMethod;
 use crate::known_hosts::{self, Recorded, Verdict};
 
@@ -54,6 +55,59 @@ pub struct Options {
     pub identities_only: bool,
     /// The SSH agent's socket (a named pipe on Windows); `None` for no agent.
     pub agent: Option<PathBuf>,
+    /// Where a remembering Host keeps its secret; `None` when nothing is remembered.
+    pub remember: Option<Remember>,
+}
+
+/// A saved Host with Remember on: its secret is read from `store` when one is needed,
+/// and the one that logged in is written there once the Session is open.
+#[derive(Clone)]
+pub struct Remember {
+    pub store: Arc<dyn credentials::Store>,
+    /// The Host's id, which names its entries.
+    pub host: String,
+}
+
+impl std::fmt::Debug for Remember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Remember")
+            .field("host", &self.host)
+            .finish()
+    }
+}
+
+impl PartialEq for Remember {
+    fn eq(&self, other: &Self) -> bool {
+        self.host == other.host && Arc::ptr_eq(&self.store, &other.store)
+    }
+}
+
+impl Eq for Remember {}
+
+/// What a secret prompt says of the credential store.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Saved {
+    /// Nothing: no store involved, no saved secret, or not the first prompt.
+    #[default]
+    Nothing,
+    /// The secret the store returned was rejected.
+    Rejected,
+    /// The store could not return a secret.
+    Unavailable,
+}
+
+impl Saved {
+    /// The dialog's line for a secret of `kind`, if any.
+    pub fn line(self, kind: Kind) -> Option<String> {
+        match self {
+            Saved::Nothing => None,
+            Saved::Rejected => Some(format!(
+                "The saved {} was rejected. Enter it to open this Session.",
+                kind.name()
+            )),
+            Saved::Unavailable => Some(credentials::UNAVAILABLE.to_owned()),
+        }
+    }
 }
 
 impl Options {
@@ -69,6 +123,7 @@ impl Options {
             key_files: Vec::new(),
             identities_only: false,
             agent: None,
+            remember: None,
         }
     }
 }
@@ -200,6 +255,8 @@ pub struct PasswordPrompt {
     pub account: String,
     /// Whether the host just rejected the password entered before.
     pub rejected: bool,
+    /// What to say of the credential store.
+    pub saved: Saved,
     answer: oneshot::Sender<Option<String>>,
 }
 
@@ -290,6 +347,8 @@ pub struct Opened {
     pub session: Session,
     /// The Initial remote folder, or the home directory when that is empty.
     pub home: Listing,
+    /// Something the operator may dismiss: the credential store did not keep the secret.
+    pub note: Option<String>,
 }
 
 /// One directory's entries, without `.` and `..`, in the order the host sent them.
@@ -516,6 +575,48 @@ async fn connect(
     folder: &str,
     out: &Arc<Events>,
 ) -> Result<Opened, Failure> {
+    let mut handle = dial(target, &options, out).await?;
+    let kept = auth::authenticate(&mut handle, target, &options, out).await?;
+
+    let sftp = start_sftp(&handle)
+        .await
+        .map_err(|e| Failure::Sftp(format!("The SFTP subsystem did not start: {e}")))?;
+    let home = list_folder(&sftp, folder).await.map_err(|e| {
+        let folder = if folder.is_empty() {
+            "the home directory"
+        } else {
+            folder
+        };
+        Failure::Sftp(format!("Could not list {folder}: {e}"))
+    })?;
+    // Only now, with the Session open, is a newly entered secret kept.
+    let mut note = None;
+    if let (Some(remember), Some((kind, secret))) = (&options.remember, kept) {
+        let store = remember.store.clone();
+        let key = credentials::Key::new(remember.host.clone(), kind);
+        let written = tokio::task::spawn_blocking(move || store.set(&key, &secret)).await;
+        if !matches!(written, Ok(Ok(()))) {
+            note = Some(credentials::NOT_KEPT.to_owned());
+        }
+    }
+    Ok(Opened {
+        session: Session {
+            handle: Arc::new(handle),
+            sftp: Arc::new(sftp),
+            runtime: tokio::runtime::Handle::current(),
+            wake: out.wake.clone(),
+        },
+        home,
+        note,
+    })
+}
+
+/// Connects to `target` and checks its host key: everything before logging in.
+async fn dial(
+    target: &Target,
+    options: &Options,
+    out: &Arc<Events>,
+) -> Result<client::Handle<HostCheck>, Failure> {
     let recorded: Vec<Algorithm> = std::iter::once(&options.known_hosts)
         .chain(&options.also_known_hosts)
         .flat_map(|file| {
@@ -553,36 +654,13 @@ async fn connect(
         Ok(Err(e)) => return Err(Failure::Connection(e.to_string())),
         Err(_) => return Err(Failure::Connection("timed out".into())),
     };
-    let mut handle = match client::connect_stream(Arc::new(config), stream, check).await {
-        Ok(handle) => handle,
+    match client::connect_stream(Arc::new(config), stream, check).await {
+        Ok(handle) => Ok(handle),
         Err(e) => {
             let refused = refused.lock().ok().and_then(|mut r| r.take());
-            return Err(refused.unwrap_or_else(|| Failure::Connection(e.to_string())));
+            Err(refused.unwrap_or_else(|| Failure::Connection(e.to_string())))
         }
-    };
-
-    auth::authenticate(&mut handle, target, &options, out).await?;
-
-    let sftp = start_sftp(&handle)
-        .await
-        .map_err(|e| Failure::Sftp(format!("The SFTP subsystem did not start: {e}")))?;
-    let home = list_folder(&sftp, folder).await.map_err(|e| {
-        let folder = if folder.is_empty() {
-            "the home directory"
-        } else {
-            folder
-        };
-        Failure::Sftp(format!("Could not list {folder}: {e}"))
-    })?;
-    Ok(Opened {
-        session: Session {
-            handle: Arc::new(handle),
-            sftp: Arc::new(sftp),
-            runtime: tokio::runtime::Handle::current(),
-            wake: out.wake.clone(),
-        },
-        home,
-    })
+    }
 }
 
 async fn start_sftp(

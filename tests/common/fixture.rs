@@ -86,6 +86,9 @@ pub struct Accepts {
     /// Public keys authorized for [`ACCOUNT`].
     pub keys: Vec<PublicKey>,
     pub keyboard: Keyboard,
+    /// The server's own attempt limit (OpenSSH's `MaxAuthTries`), after which it closes
+    /// the connection; `None` for russh's default of 10.
+    pub max_tries: Option<usize>,
 }
 
 /// The keyboard-interactive rounds the server runs.
@@ -173,6 +176,7 @@ impl Fixture {
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             keys: vec![host_key.clone()],
+            max_auth_attempts: accepts.max_tries.unwrap_or(10),
             ..Default::default()
         });
         let served = root.path().to_path_buf();
