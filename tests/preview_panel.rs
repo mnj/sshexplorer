@@ -74,6 +74,17 @@ fn browsing(
         .get_by_role_and_label(Role::Button, "Connect")
         .click();
     harness.run_ok();
+    // A Session opens in Tree view, at the home directory, which Preview describes.
+    until(&mut harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
+    until(&mut harness, "the home's details", |h| {
+        detail(h, "Name", "tester")
+    });
+    assert!(detail(&harness, "Kind", "Directory"));
+    // The rest of these tests browse in Folder view.
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    harness.run_ok();
     until(&mut harness, "the listing", |h| {
         h.query_by_role_and_label(Role::Row, "notes.txt").is_some()
     });

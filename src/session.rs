@@ -1,11 +1,17 @@
-//! An open Session: its connection, its tab label, and its Folder view.
+//! An open Session: its connection, its tab label, and its Tree view and Folder view.
 //!
-//! Folder view is a table of one directory: Name, Size, Modified and Permissions, with
-//! the Kind icons, sorted by clicking a header. What the keys and the pointer do to it is
-//! [`Folder`]'s; this module turns them into [`Command`]s, asks the host for another
-//! directory when a command leaves this one, and draws the result. Preview, on the
-//! right, shows the Focused entry; Enter on a file and Tab move the keyboard there.
-// TODO(#28): Tree view and switching views.
+//! Both views are a table with the columns Name, Size, Modified and Permissions, with
+//! the Kind icons, sorted by clicking a header; Tree view indents within Name. What the
+//! keys and the pointer do is [`Tree`]'s or [`Folder`]'s; this module turns them into
+//! [`Command`]s, asks the host for the directories they need, and draws the result.
+//!
+//! A Session opens in Tree view. Every directory fetched is kept in the [`Tree`], and
+//! Folder view lists a kept directory without fetching it again. Switching views keeps
+//! the place: Tree view to Folder view lists the Current directory with the same entry
+//! focused, and Folder view to Tree view expands to it and focuses the same entry.
+//!
+//! Preview, on the right, shows the Focused entry of either view; Enter on a file and
+//! Tab move the keyboard there.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,17 +19,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use egui::{Event, EventFilter, Id, Sense};
 
 use crate::folder::{
-    Column, Command, Effect, Folder, Line, Sort, join, modified_text, parent, permissions_text,
-    size_text,
+    self, Column, Command, Effect, Folder, Sort, modified_text, permissions_text, size_text,
 };
 use crate::keymap::{Action, KeyMap};
 use crate::kind::Kind;
 use crate::preview::Focused;
 use crate::preview_panel::{Leave, PanelFrame, PreviewPanel};
 use crate::settings::AppSettings;
-use crate::ssh::{self, Listing, Request, Target};
+use crate::ssh::{self, Entry, Listing, Request, Target};
 use crate::theme::TokensExt as _;
-use crate::widgets::{self, RowLook, Selection, State};
+use crate::tree::{self, Line, Tree};
+use crate::widgets::{self, Glyph, RowLook, Selection, State};
+
+/// How a Session shows the remote filesystem. The choice belongs to the Session.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Tree,
+    Folder,
+}
 
 /// What the Session needs from the app to draw a frame.
 pub struct Frame<'a> {
@@ -42,15 +55,22 @@ pub struct Details {
     pub tooltip: Option<String>,
     pub readonly: bool,
     pub local_folder: PathBuf,
+    /// Why the OpenSSH config was not applied, naming the file and line.
+    pub note: Option<String>,
 }
 
 pub struct Session {
     pub details: Details,
+    view: View,
+    /// Every directory fetched so far, as Tree view shows them.
+    tree: Tree,
+    /// Directories Tree view is fetching.
+    fetches: Vec<(String, Request<Listing>)>,
     folder: Folder,
     sort: Sort,
-    /// The "Show hidden entries" setting the folder was last arranged with.
+    /// The "Show hidden entries" setting the views were last arranged with.
     show_hidden: bool,
-    /// A directory being listed, and the entry to focus in it.
+    /// A directory being listed for Folder view, and the entry to focus in it.
     listing: Option<(Request<Listing>, Option<String>)>,
     /// Why the last directory asked for could not be listed.
     error: Option<String>,
@@ -75,8 +95,17 @@ impl Session {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let sort = Sort::default();
         let id = Id::NULL.with("sshexplorer-listing").with(n);
+        let mut tree = Tree::new(sort, false);
+        let fetches = tree
+            .open_at(opened.home.clone())
+            .into_iter()
+            .map(|path| (path.clone(), opened.session.list(path)))
+            .collect();
         Session {
             details,
+            view: View::Tree,
+            tree,
+            fetches,
             folder: Folder::new(opened.home, sort, false),
             sort,
             show_hidden: false,
@@ -96,13 +125,63 @@ impl Session {
         &self.details.label
     }
 
-    /// The Folder view of the listed directory.
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// The place the toolbar shows: the Current directory.
+    pub fn place(&self) -> String {
+        match self.view {
+            View::Tree => self.tree.current_dir(),
+            View::Folder => self.folder.path().to_owned(),
+        }
+    }
+
+    /// Switches to `view`, keeping the place, and gives the listing the keyboard.
+    pub fn set_view(&mut self, view: View) {
+        if view == self.view {
+            return;
+        }
+        self.view = view;
+        self.focus_listing = true;
+        self.reveal = true;
+        match view {
+            View::Folder => {
+                let dir = self.tree.current_dir();
+                // A directory is focused as `.` in its own listing; a file by its name.
+                let focus = match self.tree.focused_path() {
+                    Some(path) if path != dir => folder::parent(path).map(|(_, name)| name),
+                    _ => Some(".".to_owned()),
+                };
+                self.list(dir, focus);
+            }
+            View::Tree => {
+                let dir = self.folder.path().to_owned();
+                let at = self.folder.focus();
+                let fetch = match self.folder.line(at) {
+                    folder::Line::Here => self.tree.reveal(&dir, None),
+                    folder::Line::Up => match folder::parent(&dir) {
+                        Some((up, _)) => self.tree.reveal(&up, None),
+                        None => self.tree.reveal(&dir, None),
+                    },
+                    folder::Line::Entry(_) => {
+                        let name = self.folder.name(at).to_owned();
+                        self.tree.reveal(&dir, Some(&name))
+                    }
+                };
+                self.fetch(fetch);
+            }
+        }
+    }
+
+    /// The Session's listing in its view.
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
         self.receive();
         let show_hidden = frame.settings.browsing.show_hidden;
         if show_hidden != self.show_hidden {
             self.show_hidden = show_hidden;
             self.folder.arrange(self.sort, show_hidden);
+            self.tree.arrange(self.sort, show_hidden);
         }
 
         let t = ui.tokens();
@@ -166,13 +245,13 @@ impl Session {
             self.keys(ui, frame.keymap, page);
         }
 
-        if let Some(error) = &self.error {
+        if let (View::Folder, Some(error)) = (self.view, &self.error) {
             ui.add(widgets::invalid_message(error));
         }
         let show_icons = frame.settings.appearance.show_icons;
         let mut command = None;
         let mut sort = None;
-        let reveal = std::mem::take(&mut self.reveal);
+        let reveal = std::mem::take(&mut self.reveal) | self.tree.take_reveal();
         // The Selection is live while the listing holds the keyboard and the window is in
         // front.
         let live = focused && ui.input(|i| i.focused);
@@ -199,24 +278,36 @@ impl Session {
                                 }
                             }
                         });
-                        for i in 0..self.folder.len() {
-                            let selection = match (self.folder.is_selected(i), live) {
+                        let (len, focus) = match self.view {
+                            View::Tree => (self.tree.len(), self.tree.focus()),
+                            View::Folder => (self.folder.len(), Some(self.folder.focus())),
+                        };
+                        for i in 0..len {
+                            let selected = match self.view {
+                                View::Tree => self.tree.is_selected(i),
+                                View::Folder => self.folder.is_selected(i),
+                            };
+                            let selection = match (selected, live) {
                                 (false, _) => Selection::None,
                                 (true, true) => Selection::Live,
                                 (true, false) => Selection::Unfocused,
                             };
                             let mut look = RowLook::selected(selection);
-                            if focused && i == self.folder.focus() {
+                            if focused && Some(i) == focus {
                                 look = look.forced(State::Focus);
                             }
+                            let shown = self.shown(i);
                             let response = table.row_with(look, |row| {
-                                self.cells(row, i, show_icons);
+                                self.cells(row, &shown, show_icons);
                             });
-                            let name = self.folder.name(i).to_owned();
-                            response
-                                .ctx
-                                .accesskit_node_builder(response.id, |node| node.set_label(name));
-                            if reveal && i == self.folder.focus() {
+                            let (label, expanded) = (shown.label, shown.expanded);
+                            response.ctx.accesskit_node_builder(response.id, |node| {
+                                node.set_label(label);
+                                if let Some(expanded) = expanded {
+                                    node.set_expanded(expanded);
+                                }
+                            });
+                            if reveal && Some(i) == focus {
                                 response.scroll_to_me(None);
                             }
                             if response.double_clicked() {
@@ -237,12 +328,12 @@ impl Session {
         if let Some(sort) = sort {
             self.sort = sort;
             self.folder.arrange(sort, self.show_hidden);
+            self.tree.arrange(sort, self.show_hidden);
         }
         if let Some(command) = command {
             ui.memory_mut(|m| m.request_focus(self.id));
             let now = ui.input(|i| i.time);
-            let effect = self.folder.apply(command, now);
-            self.carry_out(effect);
+            self.apply(command, now);
         }
         if std::mem::take(&mut self.focus_preview) {
             ui.memory_mut(|m| m.request_focus(self.preview.id));
@@ -251,26 +342,39 @@ impl Session {
 
     /// The Focused entry, as Preview shows it.
     fn focused(&self) -> Option<Focused> {
+        if self.view == View::Tree {
+            let row = self.tree.row(self.tree.focus()?);
+            return match row.line {
+                tree::Line::Entry {
+                    name, path, entry, ..
+                } => Some(Focused {
+                    path: path.to_owned(),
+                    name: name.to_owned(),
+                    entry: entry.cloned(),
+                }),
+                _ => None,
+            };
+        }
         if self.folder.is_empty() {
             return None;
         }
         let i = self.folder.focus();
         let path = self.folder.path();
         Some(match self.folder.line(i) {
-            Line::Here => Focused {
+            folder::Line::Here => Focused {
                 path: path.to_owned(),
                 name: ".".into(),
                 entry: None,
             },
-            Line::Up => Focused {
-                path: parent(path).map_or_else(|| "/".to_owned(), |(up, _)| up),
+            folder::Line::Up => Focused {
+                path: folder::parent(path).map_or_else(|| "/".to_owned(), |(up, _)| up),
                 name: "..".into(),
                 entry: None,
             },
-            Line::Entry(_) => {
+            folder::Line::Entry(_) => {
                 let entry = self.folder.entry(i)?.clone();
                 Focused {
-                    path: join(path, &entry.name),
+                    path: folder::join(path, &entry.name),
                     name: entry.name.clone(),
                     entry: Some(entry),
                 }
@@ -278,18 +382,70 @@ impl Session {
         })
     }
 
-    fn cells(&self, row: &mut widgets::TableRow<'_>, i: usize, show_icons: bool) {
-        let entry = self.folder.entry(i);
-        let name = self.folder.name(i);
+    /// What row `i` of the view shows.
+    fn shown(&self, i: usize) -> Shown<'_> {
+        match self.view {
+            View::Folder => Shown {
+                label: self.folder.name(i).to_owned(),
+                entry: self.folder.entry(i),
+                depth: None,
+                expanded: None,
+                status: false,
+            },
+            View::Tree => {
+                let row = self.tree.row(i);
+                let (label, entry, expanded, status) = match row.line {
+                    Line::Entry {
+                        name,
+                        entry,
+                        expanded,
+                        ..
+                    } => (name.to_owned(), entry, expanded, false),
+                    Line::Loading => ("Loading…".to_owned(), None, None, true),
+                    Line::Failed(reason) => (format!("Cannot read: {reason}"), None, None, true),
+                };
+                Shown {
+                    label,
+                    entry,
+                    depth: Some(row.depth),
+                    expanded,
+                    status,
+                }
+            }
+        }
+    }
+
+    fn cells(&self, row: &mut widgets::TableRow<'_>, shown: &Shown<'_>, show_icons: bool) {
+        let entry = shown.entry;
         let kind = entry.map_or(Kind::Directory, |e| Kind::of(&e.name, e.is_dir));
         let target = entry.and_then(|e| e.link.as_deref());
         row.ui(|ui| {
-            ui.add(
-                widgets::entry_name(name, kind)
-                    .icon(show_icons)
-                    .link(target.is_some())
-                    .target(target),
-            );
+            if let Some(depth) = shown.depth {
+                ui.add_space(widgets::TREE_INDENT * depth as f32);
+                match shown.expanded {
+                    Some(open) => {
+                        let glyph = if open {
+                            Glyph::ChevronDown
+                        } else {
+                            Glyph::ChevronRight
+                        };
+                        let ink = ui.tokens().color.text.muted;
+                        ui.add(widgets::glyph(glyph).color(ink));
+                    }
+                    None => ui.add_space(widgets::TREE_INDENT),
+                }
+            }
+            if shown.status {
+                let t = ui.tokens();
+                ui.label(t.ty.body.rich(&shown.label).color(t.color.text.muted));
+            } else {
+                ui.add(
+                    widgets::entry_name(&shown.label, kind)
+                        .icon(show_icons)
+                        .link(target.is_some())
+                        .target(target),
+                );
+            }
         });
         // A directory's size is blank, and so is anything the host did not say.
         let size = entry.and_then(|e| e.size.filter(|_| !e.is_dir));
@@ -306,7 +462,7 @@ impl Session {
 
     /// The listing's keys, and typed characters for the name prefix.
     fn keys(&mut self, ui: &mut egui::Ui, keymap: &KeyMap, page: usize) {
-        const KEYS: [(Action, Command); 15] = [
+        const KEYS: [(Action, Command); 17] = [
             (Action::MoveUp, Command::Up),
             (Action::MoveDown, Command::Down),
             (Action::MoveFirst, Command::Home),
@@ -322,11 +478,19 @@ impl Session {
             (Action::Open, Command::Open),
             (Action::Parent, Command::Parent),
             (Action::ParentFolder, Command::Parent),
+            (Action::Expand, Command::Expand),
+            (Action::Collapse, Command::Collapse),
         ];
+        let view = self.view;
         let (commands, sort, now) = ui.input_mut(|input| {
             let mut commands = Vec::new();
             for (action, command) in KEYS {
-                if keymap.take(input, action) {
+                // Alt+Up is Folder view's alone, and Right and Left are Tree view's.
+                let skip = match view {
+                    View::Tree => action == Action::ParentFolder,
+                    View::Folder => matches!(action, Action::Expand | Action::Collapse),
+                };
+                if !skip && keymap.take(input, action) {
                     commands.push(match command {
                         Command::PageUp(_) => Command::PageUp(page),
                         Command::PageDown(_) => Command::PageDown(page),
@@ -347,11 +511,25 @@ impl Session {
         if sort {
             self.sort = self.sort.next();
             self.folder.arrange(self.sort, self.show_hidden);
+            self.tree.arrange(self.sort, self.show_hidden);
         }
         for command in commands {
             self.reveal = true;
-            let effect = self.folder.apply(command, now);
-            self.carry_out(effect);
+            self.apply(command, now);
+        }
+    }
+
+    fn apply(&mut self, command: Command, now: f64) {
+        match self.view {
+            View::Folder => {
+                let effect = self.folder.apply(command, now);
+                self.carry_out(effect);
+            }
+            View::Tree => match self.tree.apply(command, now) {
+                tree::Effect::None => {}
+                tree::Effect::Fetch(path) => self.fetch(vec![path]),
+                tree::Effect::Preview => self.focus_preview = true,
+            },
         }
     }
 
@@ -365,8 +543,51 @@ impl Session {
         }
     }
 
-    /// Takes a listing that has arrived.
+    /// Starts fetching `paths` for Tree view.
+    fn fetch(&mut self, paths: Vec<String>) {
+        for path in paths {
+            let request = self.connection.list(path.clone());
+            self.fetches.push((path, request));
+        }
+    }
+
+    /// Lists `path` in Folder view, from the kept listing when there is one, and focuses
+    /// `focus` in it.
+    fn list(&mut self, path: String, focus: Option<String>) {
+        match self.tree.listing(&path) {
+            Some(listing) => {
+                let listing = listing.clone();
+                self.show_folder(listing, focus);
+            }
+            None => self.listing = Some((self.connection.list(path), focus)),
+        }
+    }
+
+    fn show_folder(&mut self, listing: Listing, focus: Option<String>) {
+        self.folder = Folder::new(listing, self.sort, self.show_hidden);
+        if let Some(name) = focus {
+            self.folder.focus_name(&name);
+        }
+        self.listing = None;
+        self.error = None;
+        self.reveal = true;
+    }
+
+    /// Takes the listings that have arrived. Every one is kept in the tree.
     fn receive(&mut self) {
+        let mut arrived = Vec::new();
+        self.fetches
+            .retain(|(path, request)| match request.try_take() {
+                Some(answer) => {
+                    arrived.push((path.clone(), answer));
+                    false
+                }
+                None => true,
+            });
+        for (path, answer) in arrived {
+            self.tree.listed(&path, answer);
+        }
+
         let Some((request, _)) = &self.listing else {
             return;
         };
@@ -378,12 +599,8 @@ impl Session {
         };
         match answer {
             Ok(listing) => {
-                self.folder = Folder::new(listing, self.sort, self.show_hidden);
-                if let Some(name) = focus {
-                    self.folder.focus_name(&name);
-                }
-                self.error = None;
-                self.reveal = true;
+                self.tree.listed(&listing.path.clone(), Ok(listing.clone()));
+                self.show_folder(listing, focus);
             }
             Err(reason) => {
                 self.error = Some(format!("Cannot read: {reason}"));
@@ -394,6 +611,18 @@ impl Session {
 
 /// The Preview panel's width when a Session opens.
 const PREVIEW_WIDTH: f32 = 360.0;
+/// What one row shows, in either view.
+struct Shown<'a> {
+    /// The entry's name, or a status row's text: the row's AccessKit label.
+    label: String,
+    entry: Option<&'a Entry>,
+    /// Tree view's depth, for the indent.
+    depth: Option<usize>,
+    /// Whether a Tree view directory is expanded.
+    expanded: Option<bool>,
+    /// A "Loading…" or failure row.
+    status: bool,
+}
 
 /// An unsaved Session's tab label: `account@address`, and `:port` off port 22.
 pub fn label(target: &Target) -> String {

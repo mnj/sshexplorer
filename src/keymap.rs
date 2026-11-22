@@ -69,6 +69,14 @@ pub enum Action {
     Parent,
     /// Parent's second key, which only Folder view answers to.
     ParentFolder,
+    /// Tree view: expands a directory, or moves to its first child.
+    Expand,
+    /// Tree view: collapses a directory, or moves to the parent.
+    Collapse,
+    /// Switches the active Session to Tree view.
+    TreeView,
+    /// Switches the active Session to Folder view.
+    FolderView,
     ExtendUp,
     ExtendDown,
     /// Moves the focus without changing the Selection.
@@ -94,7 +102,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 31] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -104,6 +112,8 @@ impl Action {
         Action::Open,
         Action::Parent,
         Action::ParentFolder,
+        Action::Expand,
+        Action::Collapse,
         Action::ExtendUp,
         Action::ExtendDown,
         Action::FocusUp,
@@ -111,6 +121,8 @@ impl Action {
         Action::ToggleSelected,
         Action::SelectAll,
         Action::ShowHidden,
+        Action::TreeView,
+        Action::FolderView,
         Action::Sort,
         Action::NextSession,
         Action::PreviousSession,
@@ -144,6 +156,10 @@ impl Action {
             | Action::Open
             | Action::Parent
             | Action::ParentFolder
+            | Action::Expand
+            | Action::Collapse
+            | Action::TreeView
+            | Action::FolderView
             | Action::ExtendUp
             | Action::ExtendDown
             | Action::FocusUp
@@ -172,6 +188,10 @@ impl Action {
             Action::Open => "Open",
             Action::Parent => "Parent",
             Action::ParentFolder => "Parent (Folder view)",
+            Action::Expand => "Tree: expand / first child",
+            Action::Collapse => "Tree: collapse / parent",
+            Action::TreeView => "Tree view",
+            Action::FolderView => "Folder view",
             Action::ExtendUp => "Extend Selection up",
             Action::ExtendDown => "Extend Selection down",
             Action::FocusUp => "Move focus up",
@@ -208,6 +228,10 @@ impl Action {
             Action::Open => Binding::new(none, Key::Enter),
             Action::Parent => Binding::new(none, Key::Backspace),
             Action::ParentFolder => Binding::new(Modifiers::ALT, Key::ArrowUp),
+            Action::Expand => Binding::new(none, Key::ArrowRight),
+            Action::Collapse => Binding::new(none, Key::ArrowLeft),
+            Action::TreeView => Binding::new(cmd, Key::Num1),
+            Action::FolderView => Binding::new(cmd, Key::Num2),
             Action::ExtendUp => Binding::new(shift, Key::ArrowUp),
             Action::ExtendDown => Binding::new(shift, Key::ArrowDown),
             Action::FocusUp => Binding::new(cmd, Key::ArrowUp),

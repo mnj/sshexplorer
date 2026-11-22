@@ -6,9 +6,8 @@
 //! - [`app`] is the window: the toolbar and the Sessions as tabs. [`connect`] holds the
 //!   Host dialog and the prompts while a Session opens; [`session`] an open Session.
 //! - [`ssh`] is the SSH stack (russh, ADR-0003) on its own runtime, off the frame
-//!   thread; [`known_hosts`] checks host keys against the operator's `known_hosts`.
-//! - [`preview`] is the Preview panel's model; [`source`] highlights source for it, and
-//!   [`scratch`] keeps the bytes it fetched.
+//!   thread; [`known_hosts`] checks host keys against the operator's `known_hosts`, and
+//!   [`openssh_config`] reads and applies the operator's `~/.ssh/config` (ADR-0002).
 //! - [`settings`] holds the app settings saved between runs, and [`keymap`] every key
 //!   binding; [`binding_editor`] is Settings → Keys, where the operator rebinds them.
 
@@ -21,6 +20,7 @@ pub mod icons;
 pub mod keymap;
 pub mod kind;
 pub mod known_hosts;
+pub mod openssh_config;
 pub mod preview;
 pub mod preview_panel;
 pub mod scratch;
@@ -29,4 +29,5 @@ pub mod settings;
 pub mod source;
 pub mod ssh;
 pub mod theme;
+pub mod tree;
 pub mod widgets;
