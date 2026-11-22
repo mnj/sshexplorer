@@ -1,6 +1,8 @@
 //! App settings persist in a file and load at launch; unknown or missing fields fall back
 //! to their defaults.
 
+use egui::{Key, Modifiers};
+use sshexplorer::keymap::{Action, Binding};
 use sshexplorer::settings::{Animate, AppSettings, Edge, Store, ThemeChoice};
 use sshexplorer::theme::{Accent, Density};
 
@@ -74,6 +76,52 @@ fn missing_and_unknown_fields_fall_back_to_their_defaults() {
     // Missing ones are the defaults.
     assert_eq!(a.theme, ThemeChoice::System);
     assert_eq!(a.tab_bar_edge, Edge::Top);
+}
+
+#[test]
+fn rebound_keys_load_again() {
+    let (_dir, store) = store();
+    let mut settings = AppSettings::default();
+    let shift_ctrl = Modifiers::COMMAND | Modifiers::SHIFT;
+    let control_alt = Modifiers::CTRL | Modifiers::ALT;
+    settings
+        .keys
+        .set(Action::Settings, Binding::new(shift_ctrl, Key::Plus));
+    settings
+        .keys
+        .set(Action::CloseSession, Binding::new(control_alt, Key::F4));
+    store.save(&settings).expect("saved");
+    assert_eq!(store.load(), settings);
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(text.contains(r#"Settings = "Ctrl+Shift+Plus""#), "{text}");
+}
+
+#[test]
+fn a_key_entry_that_cannot_be_read_keeps_its_default() {
+    let (_dir, store) = store();
+    std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+    std::fs::write(
+        store.path(),
+        r#"
+        [keys]
+        Settings = "Ctrl+Escape"
+        CloseSession = "Hyper+Q"
+        UiScaleUp = 7
+        UiScaleDown = ""
+        UiScaleReset = "Alt+F9"
+        NoSuchAction = "F1"
+        "#,
+    )
+    .unwrap();
+    let keys = store.load().keys;
+    for action in [Action::Settings, Action::CloseSession, Action::UiScaleUp] {
+        assert!(!keys.is_changed(action), "{action:?}");
+    }
+    assert_eq!(keys.binding(Action::UiScaleDown), None, "\"\" is unbound");
+    assert_eq!(
+        keys.binding(Action::UiScaleReset),
+        Some(Binding::new(Modifiers::ALT, Key::F9))
+    );
 }
 
 #[test]

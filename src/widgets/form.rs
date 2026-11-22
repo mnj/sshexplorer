@@ -45,6 +45,49 @@ pub fn form_name(text: impl Into<String>) -> FormName {
     FormName { text: text.into() }
 }
 
+/// The title over a group of form rows, such as an area of the binding editor: body text,
+/// strong, in the primary colour.
+pub fn form_group(text: impl Into<String>) -> FormText {
+    FormText {
+        text: text.into(),
+        hint: false,
+    }
+}
+
+/// A line of help under a form row, in small muted text: "Press the new keys. Escape
+/// cancels."
+pub fn form_hint(text: impl Into<String>) -> FormText {
+    FormText {
+        text: text.into(),
+        hint: true,
+    }
+}
+
+#[must_use = "add it with ui.add"]
+pub struct FormText {
+    text: String,
+    hint: bool,
+}
+
+impl Widget for FormText {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let t = ui.tokens();
+        let (style, ink) = if self.hint {
+            (&t.ty.small, t.color.text.muted)
+        } else {
+            (&t.ty.body_strong, t.color.text.primary)
+        };
+        let galley = paint::galley(ui, style, &self.text, ink);
+        let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        let enabled = ui.is_enabled();
+        response.widget_info(|| WidgetInfo::labeled(Role::Label, enabled, &self.text));
+        if ui.is_rect_visible(rect) {
+            ui.painter().galley(rect.min.round(), galley, ink);
+        }
+        response
+    }
+}
+
 #[must_use = "add it with ui.add"]
 pub struct FormName {
     text: String,

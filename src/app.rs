@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use egui::Id;
 
+use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
@@ -84,6 +85,7 @@ struct SettingsDialog {
     /// The installed families the font fields list, read when the dialog opened.
     ui_fonts: Vec<String>,
     mono_fonts: Vec<String>,
+    keys: BindingEditor,
 }
 
 impl SettingsDialog {
@@ -100,6 +102,7 @@ impl SettingsDialog {
             page: 0,
             ui_fonts: names(fonts::Family::has_latin_regular),
             mono_fonts: names(fonts::Family::is_fixed_pitch),
+            keys: BindingEditor::default(),
         }
     }
 }
@@ -109,7 +112,6 @@ pub struct App {
     settings: AppSettings,
     /// Where settings are saved; `None` keeps them for this run only.
     store: Option<Store>,
-    keymap: KeyMap,
     dialog: Option<SettingsDialog>,
     /// The Appearance last put on the context, so a change is applied once.
     applied: Option<Appearance>,
@@ -157,7 +159,6 @@ impl App {
         App {
             settings: AppSettings::default(),
             store: None,
-            keymap: KeyMap::default(),
             dialog: None,
             applied: None,
             known_hosts: path,
@@ -204,7 +205,7 @@ impl App {
     }
 
     pub fn keymap(&self) -> &KeyMap {
-        &self.keymap
+        &self.settings.keys
     }
 
     /// Puts the settings on `ctx` if they are not there yet. The first frame does this
@@ -248,6 +249,10 @@ impl App {
         self.apply(&ctx);
         let before = self.settings.clone();
         let modal = self.host_dialog.is_some() || self.pending.iter().any(Pending::is_modal);
+        // A binding being recorded takes the keys before any action sees them.
+        if let Some(dialog) = &mut self.dialog {
+            dialog.keys.record(&ctx, &mut self.settings.keys);
+        }
         self.keys(ui, modal);
         let mut open_settings = false;
         ui.add_enabled_ui(!modal, |ui| {
@@ -423,7 +428,7 @@ impl App {
     /// The app-wide keys: Settings and the UI scale; and the Sessions' keys, which wait
     /// while a dialog is up.
     fn keys(&mut self, ui: &mut egui::Ui, modal: bool) {
-        let map = &self.keymap;
+        let map = &self.settings.keys;
         let free = !modal && self.dialog.is_none();
         let sessions = [
             Action::CloseSession,
@@ -494,15 +499,22 @@ impl App {
         let id = egui::Id::NULL.with("sshexplorer-settings");
         let report = fonts::report(ctx);
         let settings = &mut self.settings;
-        let keymap = &mut self.keymap;
-        let (ui_fonts, mono_fonts) = (&dialog.ui_fonts, &dialog.mono_fonts);
+        let SettingsDialog {
+            page: current,
+            ui_fonts,
+            mono_fonts,
+            keys: editor,
+        } = dialog;
+        if page != Page::Keys {
+            editor.stop();
+        }
         let shown = widgets::pages_dialog(id, "Changes apply at once", &PAGE_NAMES)
             .reset_label(page.reset_label())
-            .show(ctx, &mut dialog.page, |ui, page| match Page::ALL[page] {
+            .show(ctx, current, |ui, page| match Page::ALL[page] {
                 Page::Appearance => {
                     appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
                 }
-                Page::Keys => keys_page(ui, keymap),
+                Page::Keys => editor.ui(ui, &mut settings.keys),
                 _ => {
                     ui.add(widgets::form_name("Nothing to set here yet."));
                 }
@@ -510,7 +522,10 @@ impl App {
         if shown.reset {
             match page {
                 Page::Appearance => settings.appearance = Appearance::default(),
-                Page::Keys => keymap.reset_all(),
+                Page::Keys => {
+                    settings.keys.reset_all();
+                    editor.stop();
+                }
                 _ => {}
             }
         }
@@ -667,28 +682,6 @@ fn font_field(
             }
         }
     });
-}
-
-/// The Keys page: every binding by area, read-only until the binding editor.
-fn keys_page(ui: &mut egui::Ui, keymap: &KeyMap) {
-    let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
-    for area in crate::keymap::Area::ALL {
-        let rows: Vec<(String, String)> = Action::ALL
-            .into_iter()
-            .filter(|a| a.area() == area)
-            .map(|a| {
-                let key = keymap
-                    .binding(a)
-                    .map_or("unbound".to_owned(), |b| b.label(mac));
-                (key, a.name().to_owned())
-            })
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        ui.add(widgets::form_name(area.name()));
-        widgets::key_list(ui, area.name(), &rows);
-    }
 }
 
 impl eframe::App for App {
