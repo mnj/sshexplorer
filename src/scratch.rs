@@ -6,10 +6,15 @@
 //! nothing else in a chosen directory is ever touched. A kept file is deleted when its
 //! [`Kept`] is dropped: when the preview changes, when its Session closes and at exit.
 //! Files a crash left behind are cleared by [`clear_leftovers`] at the next launch.
+//!
+//! Each instance holds a lock on `sshexplorer-scratch-<pid>.lock` in every directory it
+//! keeps files in, for as long as it runs. Clearing leaves the files of an instance
+//! whose lock is still held, so a second instance does not delete what the first shows.
 
 use std::borrow::Cow;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::settings::{PreviewSettings, ScratchChoice};
@@ -45,6 +50,7 @@ impl Place {
             return Ok(Kept::Memory(bytes));
         };
         std::fs::create_dir_all(dir)?;
+        hold_lock(dir)?;
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = dir.join(format!("{PREFIX}{}-{n}", std::process::id()));
@@ -126,15 +132,62 @@ pub fn clear_leftovers(settings: &PreviewSettings) {
     }
 }
 
-/// Deletes the scratch files in `dir`.
+/// The lock file of instance `pid` in `dir`.
+fn lock_path(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!("{PREFIX}{pid}.lock"))
+}
+
+/// Takes this instance's lock in `dir`, once, and holds it until exit.
+fn hold_lock(dir: &Path) -> io::Result<()> {
+    static HELD: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
+    let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    if held.iter().any(|(d, _)| d == dir) {
+        return Ok(());
+    }
+    let file = std::fs::File::create(lock_path(dir, std::process::id()))?;
+    file.lock()?;
+    held.push((dir.to_owned(), file));
+    Ok(())
+}
+
+/// The pid in a scratch file's name (`<PREFIX><pid>-<n>` or `<PREFIX><pid>.lock`).
+fn pid_of(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(PREFIX)?;
+    let end = rest.find(['-', '.']).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Whether instance `pid` still runs: it holds its lock in `dir`.
+fn running(dir: &Path, pid: u32) -> bool {
+    let Ok(file) = std::fs::File::open(lock_path(dir, pid)) else {
+        return false;
+    };
+    match file.try_lock() {
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        // A lock that cannot be checked is taken as held: nothing is lost by waiting.
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
+}
+
+/// Deletes the scratch files in `dir` that no running instance holds.
 pub fn clear_dir(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let mut alive = std::collections::HashMap::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let ours = name.to_string_lossy().starts_with(PREFIX);
-        if ours && entry.file_type().is_ok_and(|t| t.is_file()) {
+        let name = name.to_string_lossy();
+        if !name.starts_with(PREFIX) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let held = pid_of(&name).is_some_and(|pid| {
+            *alive
+                .entry(pid)
+                .or_insert_with(|| running(dir, pid))
+        });
+        if !held {
             let _ = std::fs::remove_file(entry.path());
         }
     }
