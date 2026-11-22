@@ -9,9 +9,16 @@
 //! Folder view lists a kept directory without fetching it again. Switching views keeps
 //! the place: Tree view to Folder view lists the Current directory with the same entry
 //! focused, and Folder view to Tree view expands to it and focuses the same entry.
+//!
+//! A Refresh (F5, the toolbar button, or Auto-refresh) fetches the Current directory
+//! again, and in Tree view every expanded directory below it, and merges the answers in
+//! ([`Tree::refreshed`], [`Folder::refreshed`]); the old rows stay until then. Folder
+//! view on a directory that no longer exists lists the nearest ancestor that does, with
+//! one line naming the one that went. Each Session refreshes only itself.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use egui::{Event, EventFilter, Id, Sense};
 
@@ -20,8 +27,9 @@ use crate::folder::{
 };
 use crate::keymap::{Action, KeyMap};
 use crate::kind::Kind;
+use crate::refresh::Timer;
 use crate::settings::AppSettings;
-use crate::ssh::{self, Entry, Listing, Request, Target};
+use crate::ssh::{self, Entry, Listing, NO_SUCH_FILE, Request, Target};
 use crate::theme::TokensExt as _;
 use crate::tree::{self, Line, Tree};
 use crate::widgets::{self, Glyph, RowLook, Selection, State};
@@ -69,6 +77,15 @@ pub struct Session {
     listing: Option<(Request<Listing>, Option<String>)>,
     /// Why the last directory asked for could not be listed.
     error: Option<String>,
+    /// Directories a Tree view Refresh is fetching again.
+    refreshes: Vec<(String, Request<Listing>)>,
+    /// Folder view's Refresh, while it runs.
+    folder_refresh: Option<FolderRefresh>,
+    /// A Refresh finished since the last frame: the Auto-refresh interval restarts.
+    refreshed: bool,
+    /// "<path> no longer exists.", above the ancestor Folder view lists instead.
+    notice: Option<String>,
+    timer: Timer,
     /// The listing's own focus target: it holds the keyboard while it has egui's focus.
     id: Id,
     /// The listing takes the keyboard on the next frame: a new Session focuses it.
@@ -101,6 +118,11 @@ impl Session {
             show_hidden: false,
             listing: None,
             error: None,
+            refreshes: Vec::new(),
+            folder_refresh: None,
+            refreshed: false,
+            notice: None,
+            timer: Timer::default(),
             id: Id::NULL.with("sshexplorer-listing").with(n),
             focus_listing: true,
             reveal: false,
@@ -123,6 +145,35 @@ impl Session {
             View::Tree => self.tree.current_dir(),
             View::Folder => self.folder.path().to_owned(),
         }
+    }
+
+    /// Starts a Refresh, unless one is running: the Current directory, and in Tree view
+    /// every expanded directory below it, fetched again and merged in.
+    pub fn refresh(&mut self) {
+        if self.is_refreshing() {
+            return;
+        }
+        match self.view {
+            View::Tree => {
+                for path in self.tree.refresh_paths() {
+                    let request = self.connection.list(path.clone());
+                    self.refreshes.push((path, request));
+                }
+            }
+            View::Folder => {
+                let path = self.folder.path().to_owned();
+                self.folder_refresh = Some(FolderRefresh {
+                    request: self.connection.list(path.clone()),
+                    path,
+                    gone: None,
+                });
+            }
+        }
+    }
+
+    /// Whether a Refresh is running: the toolbar button shows a spinner.
+    pub fn is_refreshing(&self) -> bool {
+        !self.refreshes.is_empty() || self.folder_refresh.is_some()
     }
 
     /// Switches to `view`, keeping the place, and gives the listing the keyboard.
@@ -165,6 +216,7 @@ impl Session {
     /// The Session's listing in its view.
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
         self.receive();
+        self.auto_refresh(ui, frame.settings);
         let show_hidden = frame.settings.browsing.show_hidden;
         if show_hidden != self.show_hidden {
             self.show_hidden = show_hidden;
@@ -200,8 +252,13 @@ impl Session {
             self.keys(ui, frame.keymap, page);
         }
 
-        if let (View::Folder, Some(error)) = (self.view, &self.error) {
-            ui.add(widgets::invalid_message(error));
+        if self.view == View::Folder {
+            if let Some(notice) = &self.notice {
+                ui.add(widgets::warning_message(notice));
+            }
+            if let Some(error) = &self.error {
+                ui.add(widgets::invalid_message(error));
+            }
         }
         let show_icons = frame.settings.appearance.show_icons;
         let mut command = None;
@@ -480,11 +537,111 @@ impl Session {
         }
         self.listing = None;
         self.error = None;
+        self.notice = None;
         self.reveal = true;
+    }
+
+    /// Starts an Auto-refresh when one is due. This only runs while the Session is
+    /// shown; a tick is held back while the window is minimized or a Refresh runs.
+    // Once Search exists, a tick is also held back while Matches show.
+    fn auto_refresh(&mut self, ui: &egui::Ui, settings: &AppSettings) {
+        let now = ui.input(|i| i.time);
+        if std::mem::take(&mut self.refreshed) {
+            self.timer.restart(now);
+        }
+        let minimized = ui.input(|i| i.viewport().minimized == Some(true));
+        let ready = !minimized && !self.is_refreshing();
+        let every = settings.browsing.auto_refresh;
+        if self.timer.tick(now, every, ready) {
+            self.refresh();
+        } else if ready && let Some(wait) = self.timer.wait(now, every) {
+            ui.ctx()
+                .request_repaint_after(Duration::from_secs_f64(wait.max(0.01)));
+        }
+    }
+
+    /// Takes the answers of a running Refresh and merges them in.
+    fn receive_refresh(&mut self) {
+        let running = self.is_refreshing();
+        let mut arrived = Vec::new();
+        self.refreshes
+            .retain(|(path, request)| match request.try_take() {
+                Some(answer) => {
+                    arrived.push((path.clone(), answer));
+                    false
+                }
+                None => true,
+            });
+        for (path, answer) in arrived {
+            if self.tree.refreshed(&path, answer) {
+                // TODO(#33): Preview reloads the Focused file, whose size or modified
+                // time changed.
+            }
+        }
+
+        if let Some(answer) = self
+            .folder_refresh
+            .as_ref()
+            .and_then(|r| r.request.try_take())
+            && let Some(FolderRefresh { path, gone, .. }) = self.folder_refresh.take()
+        {
+            self.folder_refreshed(path, gone, answer);
+        }
+        if running && !self.is_refreshing() {
+            self.refreshed = true;
+        }
+    }
+
+    /// Folder view's Refresh answer for `path`. `gone` is the directory Folder view
+    /// listed, when it no longer exists and `path` is an ancestor tried instead.
+    fn folder_refreshed(
+        &mut self,
+        path: String,
+        gone: Option<String>,
+        answer: Result<Listing, String>,
+    ) {
+        let missing = matches!(&answer, Err(reason) if reason == NO_SUCH_FILE);
+        self.tree.refreshed(&path, answer.clone());
+        match answer {
+            Ok(listing) => match gone {
+                None => {
+                    self.error = None;
+                    if self.folder.refreshed(listing) {
+                        // TODO(#33): Preview reloads the Focused file, whose size or
+                        // modified time changed.
+                    }
+                }
+                Some(gone) => {
+                    self.show_folder(listing, None);
+                    self.notice = Some(format!("{gone} no longer exists."));
+                }
+            },
+            Err(_) if missing && folder::parent(&path).is_some() => {
+                if let Some((up, _)) = folder::parent(&path) {
+                    self.folder_refresh = Some(FolderRefresh {
+                        request: self.connection.list(up.clone()),
+                        path: up,
+                        gone: Some(gone.unwrap_or(path)),
+                    });
+                }
+            }
+            Err(reason) => {
+                let empty = Listing {
+                    path: path.clone(),
+                    entries: Vec::new(),
+                };
+                self.show_folder(empty, None);
+                self.error = Some(format!("Cannot read: {reason}"));
+                if let Some(gone) = gone {
+                    self.notice = Some(format!("{gone} no longer exists."));
+                }
+            }
+        }
     }
 
     /// Takes the listings that have arrived. Every one is kept in the tree.
     fn receive(&mut self) {
+        self.receive_refresh();
         let mut arrived = Vec::new();
         self.fetches
             .retain(|(path, request)| match request.try_take() {
@@ -517,6 +674,14 @@ impl Session {
             }
         }
     }
+}
+
+/// Folder view's Refresh: the directory being listed again, and the one that went when
+/// that is an ancestor tried instead.
+struct FolderRefresh {
+    request: Request<Listing>,
+    path: String,
+    gone: Option<String>,
 }
 
 /// What one row shows, in either view.

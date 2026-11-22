@@ -86,6 +86,9 @@ pub enum Action {
     SelectAll,
     /// Toggles the "Show hidden entries" setting, for every Session.
     ShowHidden,
+    /// Fetches the active Session's Current directory again, and in Tree view the
+    /// expanded directories below it.
+    Refresh,
     /// Sorts the active Session by the next column. Unbound by default.
     Sort,
     /// Brings the next Session's tab to the front, wrapping round.
@@ -98,7 +101,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 30] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -117,6 +120,7 @@ impl Action {
         Action::ToggleSelected,
         Action::SelectAll,
         Action::ShowHidden,
+        Action::Refresh,
         Action::TreeView,
         Action::FolderView,
         Action::Sort,
@@ -159,6 +163,7 @@ impl Action {
             | Action::ToggleSelected
             | Action::SelectAll
             | Action::ShowHidden
+            | Action::Refresh
             | Action::Sort => Area::Browsing,
         }
     }
@@ -191,6 +196,7 @@ impl Action {
             Action::ToggleSelected => "Toggle Focused entry in Selection",
             Action::SelectAll => "Select all",
             Action::ShowHidden => "Show hidden entries",
+            Action::Refresh => "Refresh",
             Action::Sort => "Sort",
             Action::NextSession => "Next Session",
             Action::PreviousSession => "Previous Session",
@@ -229,6 +235,7 @@ impl Action {
             Action::ToggleSelected => Binding::new(cmd, Key::Space),
             Action::SelectAll => Binding::new(cmd, Key::A),
             Action::ShowHidden => Binding::new(cmd, Key::H),
+            Action::Refresh => Binding::new(none, Key::F5),
             Action::Settings => Binding::new(cmd, Key::Comma),
             Action::UiScaleUp => Binding::new(shift_cmd, Key::Equals),
             Action::UiScaleDown => Binding::new(shift_cmd, Key::Minus),

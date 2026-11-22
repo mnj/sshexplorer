@@ -44,6 +44,7 @@ mod range;
 mod row;
 mod section;
 mod segmented;
+mod spinner;
 mod splitter;
 mod status;
 mod stepper;
@@ -88,6 +89,7 @@ pub use range::{PROGRESS_RAIL, Progress, SLIDER_KNOB, SLIDER_RAIL, Slider, progr
 pub use row::{Row, RowResponse, Selection, TREE_INDENT, list_row, rows, tree_row};
 pub use section::{Section, SectionHeader, SectionResponse, section, section_header};
 pub use segmented::{Segmented, segmented};
+pub use spinner::{Spinner, spinner};
 pub use splitter::splitter;
 pub use status::{
     STATUS_ITEM_MIN, STATUS_ITEM_PAD, StatusItem, status_bar, status_ink, status_item,

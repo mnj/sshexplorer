@@ -15,7 +15,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::folder::{Command, Sort, TYPE_RESET, by_column, join, parent};
-use crate::ssh::{Entry, Listing};
+use crate::ssh::{Entry, Listing, NO_SUCH_FILE};
 
 /// What the Session does after a command.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -173,6 +173,137 @@ impl Tree {
             }
         }
         self.layout();
+    }
+
+    /// What a Refresh fetches again: the Current directory, then every expanded
+    /// directory showing below it, in row order. Kept directories that are collapsed or
+    /// elsewhere are left alone.
+    pub fn refresh_paths(&self) -> Vec<String> {
+        let current = self.current_dir();
+        let below = |path: &str| current == "/" || path.starts_with(&format!("{current}/"));
+        let mut paths = vec![current.clone()];
+        for i in 0..self.len() {
+            let Some(path) = self.path(i) else {
+                continue;
+            };
+            if below(path) && self.is_dir(i) && self.expanded.contains(path) && path != current {
+                paths.push(path.to_owned());
+            }
+        }
+        paths
+    }
+
+    /// Merges a Refresh's answer for the directory at `path` into what is kept, and gives
+    /// whether the Focused entry is a file that survived with a changed size or modified
+    /// time, for Preview to reload.
+    ///
+    /// Surviving entries keep their expansion and kept children; a removed directory, or
+    /// one that is no longer a directory, goes with all that was kept under it, so a new
+    /// entry of that name is collapsed and not yet fetched. A directory that no longer
+    /// exists ([`NO_SUCH_FILE`]) leaves its parent; one that cannot be read shows the
+    /// reason in place of its children. An answer for a directory that is no longer
+    /// listed is dropped. If the Focused entry vanished, focus moves to the next row left,
+    /// else the previous one, else the parent; an emptied Selection becomes the Focused
+    /// entry.
+    pub fn refreshed(&mut self, path: &str, answer: Result<Listing, String>) -> bool {
+        if !self.still_listed(path) {
+            return false;
+        }
+        let nav: Vec<String> = self
+            .nav()
+            .into_iter()
+            .filter_map(|i| self.path(i).map(str::to_owned))
+            .collect();
+        let focus = self.focus.clone();
+        let stamp = |tree: &Tree| {
+            let path = tree.focus.as_deref()?;
+            let entry = tree.entry_of(path).filter(|e| !e.is_dir)?;
+            Some((path.to_owned(), entry.size, entry.modified))
+        };
+        let before = stamp(self);
+        let had_selection = !self.selected.is_empty();
+
+        match answer {
+            Ok(listing) => {
+                if let Some(Dir::Listed(old)) = self.dirs.get(path) {
+                    let dropped: Vec<String> = old
+                        .entries
+                        .iter()
+                        .filter(|o| o.is_dir)
+                        .filter(|o| !listing.entries.iter().any(|n| n.is_dir && n.name == o.name))
+                        .map(|o| join(path, &o.name))
+                        .collect();
+                    for dir in dropped {
+                        self.forget(&dir);
+                    }
+                }
+                self.dirs.insert(path.to_owned(), Dir::Listed(listing));
+            }
+            Err(reason) if reason == NO_SUCH_FILE && parent(path).is_some() => {
+                if let Some((up, name)) = parent(path)
+                    && let Some(Dir::Listed(listing)) = self.dirs.get_mut(&up)
+                {
+                    listing.entries.retain(|e| e.name != name);
+                }
+                self.forget(path);
+            }
+            Err(reason) => {
+                self.dirs.insert(path.to_owned(), Dir::Failed(reason));
+            }
+        }
+        self.layout();
+
+        if let Some(old) = focus.as_deref()
+            && self.find(old).is_none()
+            && let Some(at) = nav.iter().position(|p| p == old)
+        {
+            let next = nav[at + 1..].iter().find_map(|p| self.find(p));
+            let previous = || nav[..at].iter().rev().find_map(|p| self.find(p));
+            if let Some(i) = next.or_else(previous) {
+                self.set_focus(i);
+            }
+        }
+        if had_selection
+            && self.selected.is_empty()
+            && let Some(i) = self.focus()
+        {
+            self.choose(i);
+        }
+        match (before, stamp(self)) {
+            (Some(before), Some(after)) => after.0 == before.0 && after != before,
+            _ => false,
+        }
+    }
+
+    /// Whether the directory at `path` is still one the tree holds: `/`, or a directory
+    /// its parent's kept listing has, or kept under a parent that has no listing.
+    fn still_listed(&self, path: &str) -> bool {
+        let Some((up, name)) = parent(path) else {
+            return true;
+        };
+        match self.dirs.get(&up) {
+            Some(Dir::Listed(listing)) => {
+                listing.entries.iter().any(|e| e.is_dir && e.name == name)
+            }
+            _ => self.dirs.contains_key(path),
+        }
+    }
+
+    /// Drops the directory at `path` and everything kept or expanded under it.
+    fn forget(&mut self, path: &str) {
+        let under = format!("{path}/");
+        let gone = |p: &String| p == path || p.starts_with(&under);
+        self.dirs.retain(|p, _| !gone(p));
+        self.expanded.retain(|p| !gone(p));
+    }
+
+    /// The entry at the absolute `path`, if its parent's listing is kept.
+    fn entry_of(&self, path: &str) -> Option<&Entry> {
+        let (up, name) = parent(path)?;
+        match self.dirs.get(&up) {
+            Some(Dir::Listed(listing)) => listing.entries.iter().find(|e| e.name == name),
+            _ => None,
+        }
     }
 
     /// The kept listing of the directory at `path`, if it has been fetched.

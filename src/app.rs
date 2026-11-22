@@ -4,7 +4,7 @@
 //! Launch opens no Session and lists no Hosts. Hosts, or Ctrl+O, opens the Host dialog;
 //! saved Hosts are kept in `hosts.toml` beside the settings. The tabs run along the
 //! Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle them. The toolbar shows the active
-//! Session's Readonly indicator and Local folder. The Settings
+//! Session's view switch, Refresh (also F5), Readonly indicator and Local folder. The Settings
 //! gear, and Ctrl+, from anywhere, opens the Settings dialog. Every change there applies
 //! on the next frame and is saved at once. The SSH stack starts with the first Session
 //! opened, and every network step runs on it, off this frame thread.
@@ -20,8 +20,8 @@ use crate::keymap::{Action, KeyMap};
 use crate::openssh_config::Config;
 use crate::session::{self, Session, View};
 use crate::settings::{
-    Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge, Store,
-    ThemeChoice, UI_SCALES,
+    Animate, AppSettings, Appearance, AutoRefresh, Browsing, Connections, DEFAULT_UI_SCALE, Edge,
+    Store, ThemeChoice, UI_SCALES,
 };
 use crate::ssh::{Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
@@ -304,17 +304,25 @@ impl App {
         let place = self
             .sessions
             .get(self.active)
-            .map(|s| (s.view(), s.place()));
+            .map(|s| (s.view(), s.place(), s.is_refreshing()));
         let mut picked = None;
+        let mut refresh = false;
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
-                if let Some((view, place)) = &place {
+                if let Some((view, place, refreshing)) = &place {
                     let mut choice = *view;
                     let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
                     if ui.add(widgets::segmented(&mut choice, &views)).changed() {
                         picked = Some(choice);
+                    }
+                    refresh = ui
+                        .add_enabled(!refreshing, widgets::button("Refresh").flat())
+                        .tooltip("Fetch the listing again")
+                        .clicked();
+                    if *refreshing {
+                        ui.add(widgets::spinner("Refreshing"));
                     }
                     ui.label(ui.tokens().ty.body.rich(place.as_str()))
                         .tooltip("Current directory");
@@ -345,6 +353,9 @@ impl App {
         }
         if let (Some(view), Some(session)) = (picked, self.sessions.get_mut(self.active)) {
             session.set_view(view);
+        }
+        if let (true, Some(session)) = (refresh, self.sessions.get_mut(self.active)) {
+            session.refresh();
         }
         if self.sessions.is_empty() {
             return open_settings;
@@ -502,6 +513,7 @@ impl App {
             Action::ShowHidden,
             Action::TreeView,
             Action::FolderView,
+            Action::Refresh,
         ];
         let [
             settings,
@@ -515,6 +527,7 @@ impl App {
             hidden,
             tree_view,
             folder_view,
+            refresh,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -528,6 +541,7 @@ impl App {
                 Action::ShowHidden,
                 Action::TreeView,
                 Action::FolderView,
+                Action::Refresh,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
@@ -541,6 +555,9 @@ impl App {
             }
             if folder_view {
                 session.set_view(View::Folder);
+            }
+            if refresh {
+                session.refresh();
             }
         }
         if close {
@@ -734,6 +751,15 @@ fn browsing(ui: &mut egui::Ui, b: &mut Browsing) {
     widgets::form("browsing").show(ui, |ui| {
         widgets::form_row(ui, "Show hidden entries", |ui| {
             ui.add(widgets::switch(&mut b.show_hidden, "").name("Show hidden entries"));
+        });
+        widgets::form_row(ui, "Auto-refresh", |ui| {
+            widgets::dropdown("auto-refresh", b.auto_refresh.name())
+                .name("Auto-refresh")
+                .show(ui, |ui| {
+                    for every in AutoRefresh::ALL {
+                        widgets::choice_value(ui, &mut b.auto_refresh, every, every.name());
+                    }
+                });
         });
     });
 }
