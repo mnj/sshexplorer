@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::fixture::{self, Fixture};
-use sshexplorer::ssh::{Event, Failure, Opening, Ssh, Target};
+use sshexplorer::ssh::{Event, Failure, Opening, Options, Ssh, Target};
 
 fn target(fixture: &Fixture) -> Target {
     Target {
@@ -244,4 +244,57 @@ fn a_missing_initial_remote_folder_fails_naming_it() {
     };
     assert!(matches!(failure, Failure::Sftp(_)));
     assert!(failure.to_string().contains("/nowhere"), "{failure}");
+}
+
+#[test]
+fn a_key_recorded_in_a_user_known_hosts_file_is_known_and_trust_still_appends_to_known_hosts() {
+    let fixture = Fixture::start();
+    let (_dir, path) = known_hosts("");
+    let (_extra_dir, extra) = known_hosts(&format!("{}\n", fixture.known_hosts_line()));
+    let ssh = Ssh::new(|| {});
+    let options = Options {
+        also_known_hosts: vec![extra],
+        ..Options::new(path.clone())
+    };
+    let opening = ssh.connect(target(&fixture), options, "");
+    let Event::Password(prompt) = next(&opening) else {
+        panic!("a key in UserKnownHostsFile goes straight to the password");
+    };
+    drop(prompt);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_changed_key_in_a_user_known_hosts_file_is_refused_naming_that_file() {
+    let fixture = Fixture::start();
+    let (_dir, path) = known_hosts("");
+    let (_extra_dir, extra) = known_hosts(&format!(
+        "{}\n",
+        fixture.known_hosts_line_with(fixture::OTHER_KEY)
+    ));
+    let ssh = Ssh::new(|| {});
+    let options = Options {
+        also_known_hosts: vec![extra.clone()],
+        ..Options::new(path)
+    };
+    let opening = ssh.connect(target(&fixture), options, "");
+    let Event::Failed(Failure::HostKeyChanged(mismatch)) = next(&opening) else {
+        panic!("a changed key is refused");
+    };
+    assert_eq!(mismatch.file, extra);
+    assert_eq!(mismatch.recorded.line_no, 1);
+}
+
+#[test]
+fn a_session_that_cannot_open_fails_at_once_with_the_reason() {
+    let opening = Opening::failed(Failure::Unsupported(
+        "This host needs ProxyJump, which sshexplorer does not support yet.".into(),
+    ));
+    let Event::Failed(failure) = next(&opening) else {
+        panic!("expected the failure");
+    };
+    assert_eq!(
+        failure.to_string(),
+        "This host needs ProxyJump, which sshexplorer does not support yet."
+    );
 }

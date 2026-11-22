@@ -5,7 +5,9 @@
 //! the picked entry's fields on the right. Up and Down pick an entry, Enter opens a
 //! Session, and Escape, the close control or a backdrop click dismisses it. Save and
 //! Delete change the saved Hosts and keep the dialog open. Remember is kept on the Host
-//! but nothing is remembered yet, and OpenSSH config placeholders come later.
+//! but nothing is remembered yet. An empty Port, Account or Key file shows what the
+//! OpenSSH config gives the Address typed, and a filled Port or Account that differs
+//! from it says so under the field.
 //! Each Session being opened is a [`Pending`], which polls its [`ssh::Opening`] once a
 //! frame and never waits on it.
 
@@ -14,6 +16,7 @@ use std::path::PathBuf;
 use egui::{Context, Id, Key, LayerId, Order};
 
 use crate::hosts::{self, AuthMethod, Host, PasteError};
+use crate::openssh_config::{CONFIG_NAME, Config, HostFields, NeedsProxy, Resolved};
 use crate::session::{self, Details};
 use crate::ssh::{self, Event, Failure, Opened, PasswordPrompt, Target, TrustPrompt};
 use crate::theme::TokensExt as _;
@@ -49,8 +52,8 @@ fn paragraph(ui: &mut egui::Ui, text: &str) {
     ui.label(t.ty.body.rich(text).color(t.color.text.primary));
 }
 
-/// The local OS user name: the account when the Host leaves it empty.
-fn local_user() -> String {
+/// The local OS user name: the account when neither the Host nor the config names one.
+pub fn local_user() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_default()
@@ -127,6 +130,8 @@ impl Fields {
 pub struct HostDialog {
     entry: Entry,
     fields: Fields,
+    /// The OpenSSH config the placeholders come from, read when the dialog opened.
+    config: Config,
     /// Why pasted text stayed in Address, since focus last left it.
     pasted: Vec<PasteError>,
     shown_before: bool,
@@ -140,12 +145,68 @@ pub enum HostAction {
     Dismiss,
 }
 
-/// A Session to open: where, the folder to open in, and what its tab and toolbar show.
+/// A Session to open, as the dialog's fields describe it, before the OpenSSH config
+/// is applied.
 pub struct OpenRequest {
-    pub target: Target,
+    host: Host,
+    /// Whether the tab takes the display name: a saved Host or a named New Host.
+    named: bool,
+}
+
+/// A Session to open, once the OpenSSH config is applied to its request.
+pub struct Plan {
+    /// Where and how to connect, or why the Session cannot.
+    pub resolved: Result<Resolved, NeedsProxy>,
     /// The Initial remote folder; empty for the home directory.
     pub folder: String,
     pub details: Details,
+}
+
+impl OpenRequest {
+    /// Applies `config`: a non-empty field wins, then the config, then the defaults.
+    pub fn plan(self, config: &Config) -> Plan {
+        let host = self.host;
+        let fields = HostFields {
+            address: host.address.clone(),
+            port: host.port,
+            account: host.account.clone(),
+            key_file: host.key_file.clone(),
+        };
+        let resolved = config.resolve(&fields, &local_user());
+        // The tab names the address as typed, with the account and port it resolved to.
+        let shown = match &resolved {
+            Ok(r) => Target {
+                address: host.address.clone(),
+                ..r.target.clone()
+            },
+            Err(_) => Target {
+                address: host.address.clone(),
+                port: host.port.unwrap_or(22),
+                account: if host.account.is_empty() {
+                    local_user()
+                } else {
+                    host.account.clone()
+                },
+            },
+        };
+        let unsaved = session::label(&shown);
+        let (label, tooltip) = if self.named && !host.display_name.is_empty() {
+            (host.display_name.clone(), Some(unsaved))
+        } else {
+            (unsaved, None)
+        };
+        Plan {
+            resolved,
+            folder: host.initial_folder.clone(),
+            details: Details {
+                label,
+                tooltip,
+                readonly: host.readonly,
+                local_folder: host.local_folder,
+                note: config.note(),
+            },
+        }
+    }
 }
 
 /// A saved Host's name in the left column: its display name, else its address.
@@ -159,10 +220,12 @@ fn entry_name(host: &Host) -> &str {
 
 impl HostDialog {
     /// The dialog with the first saved Host picked, or New Host when there is none.
-    pub fn new(hosts: &[Host]) -> HostDialog {
+    /// Placeholders come from `config`: an empty one when the config is not used.
+    pub fn new(hosts: &[Host], config: Config) -> HostDialog {
         let mut dialog = HostDialog {
             entry: Entry::NewHost,
             fields: Fields::of(&Host::default()),
+            config,
             pasted: Vec::new(),
             shown_before: false,
         };
@@ -320,6 +383,7 @@ impl HostDialog {
     /// The form: every field of the entry picked, and the messages under them.
     fn fields_ui(&mut self, ui: &mut egui::Ui, id: Id) {
         let t = ui.tokens();
+        let matched = self.config.lookup(&self.fields.address);
         let f = &mut self.fields;
         let pasted = &mut self.pasted;
         let first = !self.shown_before;
@@ -329,6 +393,16 @@ impl HostDialog {
             ui.add(widgets::invalid_message(text));
             ui.end_row();
         };
+        let hint = |ui: &mut egui::Ui, text: &str| {
+            ui.label("");
+            ui.add(widgets::form_hint(text));
+            ui.end_row();
+        };
+        let from_config = |value: &str| format!("{value} (from {CONFIG_NAME})");
+        let overrides = |value: &str| format!("Overrides {value} from {CONFIG_NAME}");
+        let port_hint = matched
+            .port
+            .map_or("22".to_owned(), |p| from_config(&p.to_string()));
         widgets::form(id.with("form")).show(ui, |ui| {
             widgets::form_row(ui, "Display name", |ui| {
                 ui.add(widgets::text_field(&mut f.display_name))
@@ -353,10 +427,16 @@ impl HostDialog {
                         *pasted = split.errors;
                     }
                     let bad_port = hosts::port_value(&f.port).is_err();
+                    // Wide enough for a placeholder that names the config.
+                    let width = if f.port.is_empty() && matched.port.is_some() {
+                        t.size.field * 0.75
+                    } else {
+                        t.size.field / 4.0
+                    };
                     ui.add(
                         widgets::number_field(&mut f.port)
-                            .hint("22")
-                            .width(t.size.field / 4.0)
+                            .hint(port_hint)
+                            .width(width)
                             .invalid(bad_port),
                     )
                     .accessible_name("Port");
@@ -365,13 +445,25 @@ impl HostDialog {
             for error in pasted.iter() {
                 message(ui, &error.to_string());
             }
-            if hosts::port_value(&f.port).is_err() {
-                message(ui, "Port must be 1 to 65535");
+            match (hosts::port_value(&f.port), matched.port) {
+                (Err(_), _) => message(ui, "Port must be 1 to 65535"),
+                (Ok(Some(port)), Some(config)) if port != config => {
+                    hint(ui, &overrides(&config.to_string()));
+                }
+                _ => {}
             }
+            let account_hint = matched.user.as_deref().map_or_else(local_user, from_config);
             widgets::form_row(ui, "Account", |ui| {
-                ui.add(widgets::text_field(&mut f.account).hint(local_user()))
+                ui.add(widgets::text_field(&mut f.account).hint(account_hint))
                     .accessible_name("Account");
             });
+            let account = f.account.trim();
+            if let Some(user) = &matched.user
+                && !account.is_empty()
+                && account != user
+            {
+                hint(ui, &overrides(user));
+            }
             widgets::form_row(ui, "Authentication method", |ui| {
                 let name = AUTH_METHODS
                     .iter()
@@ -385,8 +477,13 @@ impl HostDialog {
                         }
                     });
             });
+            let key_hint = matched
+                .identity_files
+                .first()
+                .map(|k| from_config(k))
+                .unwrap_or_default();
             widgets::form_row(ui, "Key file", |ui| {
-                ui.add(widgets::text_field(&mut f.key_file))
+                ui.add(widgets::text_field(&mut f.key_file).hint(key_hint))
                     .accessible_name("Key file");
             });
             widgets::form_row(ui, "Local folder", |ui| {
@@ -410,32 +507,9 @@ impl HostDialog {
 
     /// The Session the fields describe.
     fn request(&self) -> OpenRequest {
-        let host = self.fields.host();
-        let target = Target {
-            address: host.address.clone(),
-            port: host.port.unwrap_or(22),
-            account: if host.account.is_empty() {
-                local_user()
-            } else {
-                host.account.clone()
-            },
-        };
-        let unsaved = session::label(&target);
-        let (label, tooltip) = match self.entry {
-            Entry::Saved(_) | Entry::NewHost if !host.display_name.is_empty() => {
-                (host.display_name.clone(), Some(unsaved))
-            }
-            _ => (unsaved, None),
-        };
         OpenRequest {
-            folder: host.initial_folder.clone(),
-            details: Details {
-                label,
-                tooltip,
-                readonly: host.readonly,
-                local_folder: host.local_folder,
-            },
-            target,
+            host: self.fields.host(),
+            named: self.entry != Entry::UnsavedSession,
         }
     }
 }

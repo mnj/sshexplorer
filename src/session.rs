@@ -19,6 +19,8 @@ pub struct Details {
     pub tooltip: Option<String>,
     pub readonly: bool,
     pub local_folder: PathBuf,
+    /// Why the OpenSSH config was not applied, naming the file and line.
+    pub note: Option<String>,
 }
 
 pub struct Session {

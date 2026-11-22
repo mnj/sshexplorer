@@ -27,6 +27,26 @@ pub struct AppSettings {
     /// The Keys page: the bindings that differ from the defaults.
     #[serde(deserialize_with = "lenient")]
     pub keys: KeyMap,
+    #[serde(deserialize_with = "lenient")]
+    pub connections: Connections,
+}
+
+/// The Connections page.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Connections {
+    /// "Use ~/.ssh/config": Sessions and the Host dialog take values from the
+    /// operator's OpenSSH config.
+    #[serde(deserialize_with = "lenient_true")]
+    pub use_ssh_config: bool,
+}
+
+impl Default for Connections {
+    fn default() -> Self {
+        Connections {
+            use_ssh_config: true,
+        }
+    }
 }
 
 /// Light, dark, or whatever the OS uses.
