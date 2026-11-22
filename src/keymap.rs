@@ -108,11 +108,13 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomFit,
+    /// Gives the search field the keyboard.
+    Search,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -136,6 +138,7 @@ impl Action {
         Action::FolderView,
         Action::Sort,
         Action::Download,
+        Action::Search,
         Action::NextSession,
         Action::PreviousSession,
         Action::CloseSession,
@@ -186,6 +189,7 @@ impl Action {
             | Action::Refresh
             | Action::Sort
             | Action::Download => Area::Browsing,
+            Action::Search => Area::Search,
         }
     }
 
@@ -228,6 +232,7 @@ impl Action {
             Action::ZoomIn => "Zoom in (or Ctrl+wheel)",
             Action::ZoomOut => "Zoom out (or Ctrl+wheel)",
             Action::ZoomFit => "Zoom to Fit",
+            Action::Search => "Search",
         }
     }
 
@@ -277,6 +282,7 @@ impl Action {
             Action::ZoomIn => Binding::new(cmd, Key::Equals),
             Action::ZoomOut => Binding::new(cmd, Key::Minus),
             Action::ZoomFit => Binding::new(cmd, Key::Num0),
+            Action::Search => Binding::new(cmd, Key::F),
         })
     }
 }
