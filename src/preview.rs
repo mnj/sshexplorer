@@ -96,10 +96,17 @@ pub enum Body {
     TooLarge(String),
     /// An image: the panel decodes and shows it.
     Image(Image),
+    /// A PDF: the panel renders its pages.
+    Pdf(Pdf),
 }
 
 /// An image's bytes, fetched whole.
 pub struct Image {
+    pub fetched: Fetched,
+}
+
+/// A PDF's bytes, fetched whole.
+pub struct Pdf {
     pub fetched: Fetched,
 }
 
@@ -275,7 +282,7 @@ impl Preview {
         let body = match kind {
             Kind::Directory => Body::Header,
             Kind::Text | Kind::Source | Kind::Markdown | Kind::Other => Body::Loading,
-            Kind::Image => Body::Loading,
+            Kind::Image | Kind::Pdf => Body::Loading,
             Kind::Archive if archive::may_list(&focused.name) => Body::Loading,
             _ => Body::Unsupported,
         };
@@ -350,19 +357,26 @@ impl Preview {
         let total = shown.focused.entry.as_ref().and_then(|e| e.size);
         let fetched_len = bytes.len() as u64;
         let capped = total.is_some_and(|t| t > fetched_len);
-        if let Some(total) = total.filter(|_| capped && shown.kind == Kind::Image) {
+        let picture = matches!(shown.kind, Kind::Image | Kind::Pdf);
+        if let Some(total) = total.filter(|_| capped && picture) {
             shown.body = Body::TooLarge(too_large(total));
             return;
         }
-        if shown.kind == Kind::Image {
+        if picture {
+            let pdf = shown.kind == Kind::Pdf;
             shown.body = match place.keep(bytes) {
-                Ok(kept) => Body::Image(Image {
-                    fetched: Fetched {
+                Ok(kept) => {
+                    let fetched = Fetched {
                         kept,
                         total,
                         capped,
-                    },
-                }),
+                    };
+                    if pdf {
+                        Body::Pdf(Pdf { fetched })
+                    } else {
+                        Body::Image(Image { fetched })
+                    }
+                }
                 Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
             };
             return;

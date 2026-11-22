@@ -32,6 +32,8 @@ pub mod known_hosts;
 pub mod markdown;
 pub mod matches;
 pub mod openssh_config;
+pub mod pdf;
+pub mod pdf_view;
 pub mod picture;
 pub mod preview;
 pub mod preview_panel;

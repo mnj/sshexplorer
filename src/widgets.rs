@@ -107,4 +107,4 @@ pub use text_view::{TextView, text_view};
 pub use tooltip::{
     KeyChip, TOOLTIP_WIDTH, Tooltip, TooltipText, key_chip, tooltip_contents, tooltip_frame,
 };
-pub use zoom::{ZoomShown, ZoomView, paint_texture, zoom_bar, zoom_view};
+pub use zoom::{ZoomShown, ZoomView, paint_page, paint_texture, zoom_bar, zoom_menu, zoom_view};

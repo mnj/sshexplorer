@@ -15,6 +15,7 @@ use crate::archive::{Listing, Stamp};
 use crate::folder::{modified_text, permissions_text, size_text};
 use crate::image_view::ImageView;
 use crate::keymap::{Action, KeyMap};
+use crate::pdf_view::PdfView;
 use crate::preview::{self, Body, Focused, MarkdownView, Preview, Text, UNSUPPORTED};
 use crate::scratch::Place;
 use crate::settings::AppSettings;
@@ -54,6 +55,8 @@ pub struct PreviewPanel {
     page: usize,
     /// The shown image's decoding, textures and zoom; new for each preview.
     image: ImageView,
+    /// The shown PDF's renderer, textures, zoom and scroll; new for each preview.
+    pdf: PdfView,
     /// The rendered Markdown view's state.
     markdown: egui_commonmark::CommonMarkCache,
     /// The shown archive listing's rows, made on first draw.
@@ -73,6 +76,7 @@ impl PreviewPanel {
             reading: None,
             page: 1,
             image: ImageView::default(),
+            pdf: PdfView::default(),
             markdown: egui_commonmark::CommonMarkCache::default(),
             archive_rows: None,
         }
@@ -87,6 +91,7 @@ impl PreviewPanel {
         if self.preview.focus(frame.focused, now) {
             self.reading = None;
             self.image = ImageView::default();
+            self.pdf = PdfView::default();
             self.archive_rows = None;
         }
         self.receive(&Place::of(&frame.settings.preview));
@@ -155,6 +160,13 @@ impl PreviewPanel {
                 if let Some(line) = self.image.ui(ui, &shown.focused.name, image, keys) {
                     shown.body = Body::Failed(line);
                 }
+            }
+            Body::Pdf(pdf) => {
+                let keys = frame.keys.then_some(frame.keymap);
+                if let Some(line) = self.pdf.ui(ui, pdf, keys, scroll, self.id) {
+                    shown.body = Body::Failed(line);
+                }
+                self.page = self.pdf.rows();
             }
             Body::TooLarge(line) => {
                 ui.add(widgets::warning_message(line.as_str()));
