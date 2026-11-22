@@ -45,6 +45,18 @@ const TONES: [[&str; 4]; 4] = [
         "success.on_solid",
     ],
 ];
+const KINDS: [&str; 10] = [
+    "kind.directory",
+    "kind.text",
+    "kind.source",
+    "kind.markdown",
+    "kind.image",
+    "kind.pdf",
+    "kind.archive",
+    "kind.audio",
+    "kind.video",
+    "kind.other",
+];
 /// Text and anything read like text.
 const TEXT: f64 = 4.5;
 /// Lines, rings and icons that must be found.
@@ -103,6 +115,12 @@ fn rules() -> Vec<Rule> {
         // The accent line and the focus ring.
         rule("accent.text", &[surface], GRAPHIC);
         rule("stroke.focus_ring", &[surface], GRAPHIC);
+        // The Kind icons, also on a selected or hovered row.
+        for kind in KINDS {
+            rule(kind, &[surface], GRAPHIC);
+            rule(kind, &["accent.subtle", surface], GRAPHIC);
+            rule(kind, &["fill.hover", surface], GRAPHIC);
+        }
     }
     // What the rows above leave out, so that every colour token has a rule.
     for surface in SURFACES {
@@ -153,8 +171,9 @@ fn contrast_ratio_matches_the_wcag_worked_values() {
 #[test]
 fn every_contrast_rule_holds_in_light_and_dark_with_every_accent() {
     let rules = rules();
-    // 128 rules of text and lines, and 9 for the tokens the others leave out.
-    assert_eq!(rules.len(), 128 + 9);
+    // 128 rules of text and lines, 90 for the Kind icons, and 9 for the tokens the others
+    // leave out.
+    assert_eq!(rules.len(), 128 + 90 + 9);
     let mut failures = Vec::new();
     let cases = [Theme::Light, Theme::Dark]
         .into_iter()

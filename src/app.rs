@@ -18,10 +18,10 @@ use crate::connect::{HostAction, HostDialog, Outcome, Pending};
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
 use crate::openssh_config::Config;
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::settings::{
-    Animate, AppSettings, Appearance, Connections, DEFAULT_UI_SCALE, Edge, Store, ThemeChoice,
-    UI_SCALES,
+    Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge, Store,
+    ThemeChoice, UI_SCALES,
 };
 use crate::ssh::{Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
@@ -399,9 +399,16 @@ impl App {
         }
     }
 
-    fn active_session(&self, ui: &mut egui::Ui) {
-        if let Some(session) = self.sessions.get(self.active) {
-            session.ui(ui);
+    fn active_session(&mut self, ui: &mut egui::Ui) {
+        // The listing takes keys only while no dialog is up.
+        let keys = ui.is_enabled() && self.dialog.is_none();
+        if let Some(session) = self.sessions.get_mut(self.active) {
+            let frame = session::Frame {
+                keymap: &self.settings.keys,
+                settings: &self.settings,
+                keys,
+            };
+            session.ui(ui, frame);
         }
     }
 
@@ -464,8 +471,8 @@ impl App {
         }
     }
 
-    /// The app-wide keys: Settings and the UI scale; and the Sessions' keys, which wait
-    /// while a dialog is up.
+    /// The app-wide keys: Settings and the UI scale; and the Sessions' keys and Show
+    /// hidden entries, which wait while a dialog is up.
     fn keys(&mut self, ui: &mut egui::Ui, modal: bool) {
         let map = &self.settings.keys;
         let free = !modal && self.dialog.is_none();
@@ -474,6 +481,7 @@ impl App {
             Action::NextSession,
             Action::PreviousSession,
             Action::HostDialog,
+            Action::ShowHidden,
         ];
         let [
             settings,
@@ -484,6 +492,7 @@ impl App {
             next,
             previous,
             host_dialog,
+            hidden,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -494,9 +503,14 @@ impl App {
                 Action::NextSession,
                 Action::PreviousSession,
                 Action::HostDialog,
+                Action::ShowHidden,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
+        if hidden {
+            let b = &mut self.settings.browsing;
+            b.show_hidden = !b.show_hidden;
+        }
         if close {
             self.close(self.active);
         }
@@ -553,6 +567,7 @@ impl App {
                 Page::Appearance => {
                     appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
                 }
+                Page::Browsing => browsing(ui, &mut settings.browsing),
                 Page::Keys => editor.ui(ui, &mut settings.keys),
                 Page::Connections => connections(ui, &mut settings.connections),
                 _ => {
@@ -562,6 +577,7 @@ impl App {
         if shown.reset {
             match page {
                 Page::Appearance => settings.appearance = Appearance::default(),
+                Page::Browsing => settings.browsing = Browsing::default(),
                 Page::Connections => settings.connections = Connections::default(),
                 Page::Keys => {
                     settings.keys.reset_all();
@@ -677,6 +693,15 @@ fn appearance(
                         widgets::choice_value(ui, &mut a.tab_bar_edge, edge, name);
                     }
                 });
+        });
+    });
+}
+
+/// The Browsing page.
+fn browsing(ui: &mut egui::Ui, b: &mut Browsing) {
+    widgets::form("browsing").show(ui, |ui| {
+        widgets::form_row(ui, "Show hidden entries", |ui| {
+            ui.add(widgets::switch(&mut b.show_hidden, "").name("Show hidden entries"));
         });
     });
 }

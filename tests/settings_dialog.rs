@@ -149,6 +149,32 @@ fn another_page_shows_its_own_reset() {
 }
 
 #[test]
+fn show_hidden_entries_is_on_the_browsing_page_and_ctrl_h_toggles_it() {
+    let mut l = launch();
+    let h = &mut l.harness;
+    open_with_gear(h);
+    h.get_by_role_and_label(Role::ListItem, "Browsing").click();
+    h.run();
+    h.get_by_role_and_label(Role::Switch, "Show hidden entries")
+        .click();
+    h.run();
+    assert!(l.store.load().browsing.show_hidden);
+    h.get_by_role_and_label(Role::Button, "Reset Browsing to defaults")
+        .click();
+    h.run();
+    assert!(!l.store.load().browsing.show_hidden);
+    h.key_press(Key::Escape);
+    h.run();
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::H);
+    h.run();
+    assert!(l.store.load().browsing.show_hidden);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::H);
+    h.run();
+    assert!(!l.store.load().browsing.show_hidden);
+}
+
+#[test]
 fn density_applies_on_the_next_frame_and_survives_a_restart() {
     let mut l = launch();
     open_with_gear(&mut l.harness);

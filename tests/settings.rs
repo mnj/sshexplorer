@@ -27,6 +27,16 @@ fn the_appearance_defaults_are_the_specs() {
 }
 
 #[test]
+fn hidden_entries_are_not_shown_by_default_and_the_choice_is_saved() {
+    assert!(!AppSettings::default().browsing.show_hidden);
+    let (_dir, store) = store();
+    let mut settings = AppSettings::default();
+    settings.browsing.show_hidden = true;
+    store.save(&settings).expect("saved");
+    assert!(store.load().browsing.show_hidden);
+}
+
+#[test]
 fn no_file_loads_the_defaults() {
     let (_dir, store) = store();
     assert_eq!(store.load(), AppSettings::default());

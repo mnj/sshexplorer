@@ -55,7 +55,10 @@ fn middle(h: &Harness<'static, App>, role: Role, label: &str) -> f32 {
     h.get_by_role_and_label(role, label).rect().center().y
 }
 
+/// Clicks the chip that reads `keys`, first focusing it so the page scrolls it into view.
 fn click_chip(h: &mut Harness<'static, App>, keys: &str) {
+    h.get_by_role_and_label(Role::Button, keys).focus();
+    h.run();
     h.get_by_role_and_label(Role::Button, keys).click();
     h.run();
 }

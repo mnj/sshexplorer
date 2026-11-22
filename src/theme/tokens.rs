@@ -229,6 +229,53 @@ pub struct Colors {
     pub error: Tone,
     pub warning: Tone,
     pub success: Tone,
+    pub kind: KindColors,
+}
+
+/// The bundled colour set of the Kind icons: one per Kind, each found on a surface as an
+/// icon must be. A disabled icon is drawn in the muted text colour instead.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct KindColors {
+    pub directory: Color32,
+    pub text: Color32,
+    pub source: Color32,
+    pub markdown: Color32,
+    pub image: Color32,
+    pub pdf: Color32,
+    pub archive: Color32,
+    pub audio: Color32,
+    pub video: Color32,
+    pub other: Color32,
+}
+
+impl KindColors {
+    /// Each colour with its token name.
+    pub fn named(&self) -> [(&'static str, Color32); 10] {
+        let KindColors {
+            directory,
+            text,
+            source,
+            markdown,
+            image,
+            pdf,
+            archive,
+            audio,
+            video,
+            other,
+        } = *self;
+        [
+            ("kind.directory", directory),
+            ("kind.text", text),
+            ("kind.source", source),
+            ("kind.markdown", markdown),
+            ("kind.image", image),
+            ("kind.pdf", pdf),
+            ("kind.archive", archive),
+            ("kind.audio", audio),
+            ("kind.video", video),
+            ("kind.other", other),
+        ]
+    }
 }
 
 impl Colors {
@@ -262,6 +309,7 @@ impl Colors {
             error,
             warning,
             success,
+            kind,
         } = *self;
         let mut named = vec![
             ("surface.base", base),
@@ -314,6 +362,7 @@ impl Colors {
             } = tone;
             named.extend(names.into_iter().zip([text, subtle, solid, on_solid]));
         }
+        named.extend(kind.named());
         named
     }
 }
@@ -565,6 +614,29 @@ fn colors(p: &Palette, accent: Accent) -> Colors {
         error: tone(p.red),
         warning: tone(p.amber),
         success: tone(p.green),
+        kind: kind_colors(p),
+    }
+}
+
+/// The Kind icons' colours: the text strength of the accent presets and the semantic
+/// hues, and the muted ink for the gray kinds.
+fn kind_colors(p: &Palette) -> KindColors {
+    let preset = |accent: Accent| {
+        let i = Accent::ALL.iter().position(|a| *a == accent).unwrap_or(0);
+        rgb(p.accents[i].hue.text)
+    };
+    let gray = rgb(p.ink_soft);
+    KindColors {
+        directory: rgb(p.amber.text),
+        text: gray,
+        source: preset(Accent::Green),
+        markdown: preset(Accent::Blue),
+        image: preset(Accent::Violet),
+        pdf: rgb(p.red.text),
+        archive: preset(Accent::Orange),
+        audio: preset(Accent::Pink),
+        video: preset(Accent::Teal),
+        other: gray,
     }
 }
 

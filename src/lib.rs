@@ -14,9 +14,11 @@
 pub mod app;
 pub mod binding_editor;
 pub mod connect;
+pub mod folder;
 pub mod hosts;
 pub mod icons;
 pub mod keymap;
+pub mod kind;
 pub mod known_hosts;
 pub mod openssh_config;
 pub mod session;
