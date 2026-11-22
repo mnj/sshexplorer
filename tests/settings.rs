@@ -3,7 +3,7 @@
 
 use egui::{Key, Modifiers};
 use sshexplorer::keymap::{Action, Binding};
-use sshexplorer::settings::{Animate, AppSettings, Edge, Store, ThemeChoice};
+use sshexplorer::settings::{Animate, AppSettings, AutoRefresh, Edge, Store, ThemeChoice};
 use sshexplorer::theme::{Accent, Density};
 
 fn store() -> (tempfile::TempDir, Store) {
@@ -34,6 +34,29 @@ fn hidden_entries_are_not_shown_by_default_and_the_choice_is_saved() {
     settings.browsing.show_hidden = true;
     store.save(&settings).expect("saved");
     assert!(store.load().browsing.show_hidden);
+}
+
+#[test]
+fn auto_refresh_is_off_by_default_and_an_unreadable_choice_is_off() {
+    assert_eq!(
+        AppSettings::default().browsing.auto_refresh,
+        AutoRefresh::Off
+    );
+    let (_dir, store) = store();
+    let mut settings = AppSettings::default();
+    settings.browsing.auto_refresh = AutoRefresh::Seconds30;
+    store.save(&settings).expect("saved");
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(text.contains("auto_refresh = \"30s\""), "{text}");
+    assert_eq!(store.load().browsing.auto_refresh, AutoRefresh::Seconds30);
+    std::fs::write(
+        store.path(),
+        "[browsing]\nshow_hidden = true\nauto_refresh = \"often\"\n",
+    )
+    .unwrap();
+    let loaded = store.load().browsing;
+    assert_eq!(loaded.auto_refresh, AutoRefresh::Off);
+    assert!(loaded.show_hidden);
 }
 
 #[test]

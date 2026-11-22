@@ -4,7 +4,7 @@
 //! Launch opens no Session and lists no Hosts. Hosts, or Ctrl+O, opens the Host dialog;
 //! saved Hosts are kept in `hosts.toml` beside the settings. The tabs run along the
 //! Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle them. The toolbar shows the active
-//! Session's Readonly indicator and Local folder. The Settings
+//! Session's view switch, Refresh (also F5), Readonly indicator and Local folder. The Settings
 //! gear, and Ctrl+, from anywhere, opens the Settings dialog. Every change there applies
 //! on the next frame and is saved at once. The SSH stack starts with the first Session
 //! opened, and every network step runs on it, off this frame thread.
@@ -17,13 +17,13 @@ use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
-use crate::openssh_config::Config;
+use crate::openssh_config::{Config, IdentityAgent};
 use crate::session::{self, Session, View};
 use crate::settings::{
-    Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge,
+    Animate, AppSettings, Appearance, AutoRefresh, Browsing, Connections, DEFAULT_UI_SCALE, Edge,
     PreviewSettings, ScratchChoice, Search, Store, ThemeChoice, UI_SCALES,
 };
-use crate::ssh::{Failure, Opening, Options, Ssh};
+use crate::ssh::{self, Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
 use crate::widgets::{self, Glyph, TabKind, Tooltip as _};
 
@@ -121,6 +121,9 @@ pub struct App {
     known_hosts: PathBuf,
     /// The operator's OpenSSH config, read at each Session open while it is in use.
     ssh_config: PathBuf,
+    /// The SSH agent when the config does not name one: `SSH_AUTH_SOCK`, or the OpenSSH
+    /// agent's pipe on Windows.
+    agent: Option<PathBuf>,
     /// The saved Hosts, in the Host dialog's order.
     hosts: Vec<Host>,
     /// Where Hosts are saved; `None` keeps them for this run only.
@@ -184,6 +187,7 @@ impl App {
             applied: None,
             known_hosts: path,
             ssh_config: default_ssh_config(),
+            agent: ssh::default_agent(),
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
@@ -213,6 +217,13 @@ impl App {
     /// The same app, checking host keys against the `known_hosts` file at `path`.
     pub fn known_hosts_at(mut self, path: PathBuf) -> App {
         self.known_hosts = path;
+        self
+    }
+
+    /// The same app, reaching the SSH agent at `socket` unless the config names another;
+    /// `None` for no agent. Tests use it to keep away from the operator's agent.
+    pub fn agent_at(mut self, socket: Option<PathBuf>) -> App {
+        self.agent = socket;
         self
     }
 
@@ -334,8 +345,9 @@ impl App {
         let place = self
             .sessions
             .get(self.active)
-            .map(|s| (s.view(), s.place()));
+            .map(|s| (s.view(), s.place(), s.is_refreshing()));
         let mut picked = None;
+        let mut refresh = false;
         widgets::toolbar(
             ui,
             |ui| {
@@ -350,11 +362,18 @@ impl App {
                         .tooltip(&tip)
                         .clicked();
                 }
-                if let Some((view, place)) = &place {
+                if let Some((view, place, refreshing)) = &place {
                     let mut choice = *view;
                     let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
                     if ui.add(widgets::segmented(&mut choice, &views)).changed() {
                         picked = Some(choice);
+                    }
+                    refresh = ui
+                        .add_enabled(!refreshing, widgets::button("Refresh").flat())
+                        .tooltip("Fetch the listing again")
+                        .clicked();
+                    if *refreshing {
+                        ui.add(widgets::spinner());
                     }
                     ui.label(ui.tokens().ty.body.rich(place.as_str()))
                         .tooltip("Current directory");
@@ -388,6 +407,9 @@ impl App {
         }
         if let (Some(view), Some(session)) = (picked, self.sessions.get_mut(self.active)) {
             session.set_view(view);
+        }
+        if let (true, Some(session)) = (refresh, self.sessions.get_mut(self.active)) {
+            session.refresh();
         }
         if self.sessions.is_empty() {
             return open_settings;
@@ -502,6 +524,14 @@ impl App {
                                 also_known_hosts: resolved.known_hosts,
                                 connect_timeout: resolved.connect_timeout,
                                 keepalive: resolved.server_alive_interval,
+                                auth: plan.auth,
+                                key_files: resolved.key_files,
+                                identities_only: resolved.identities_only,
+                                agent: match resolved.identity_agent {
+                                    IdentityAgent::Default => self.agent.clone(),
+                                    IdentityAgent::Off => None,
+                                    IdentityAgent::Socket(path) => Some(path),
+                                },
                             };
                             let ssh = self.ssh.get_or_insert_with(|| {
                                 let ctx = ctx.clone();
@@ -635,6 +665,7 @@ impl App {
             Action::Download,
             Action::TreeView,
             Action::FolderView,
+            Action::Refresh,
         ];
         let [
             settings,
@@ -649,6 +680,7 @@ impl App {
             download,
             tree_view,
             folder_view,
+            refresh,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -663,6 +695,7 @@ impl App {
                 Action::Download,
                 Action::TreeView,
                 Action::FolderView,
+                Action::Refresh,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
@@ -676,6 +709,9 @@ impl App {
             }
             if folder_view {
                 session.set_view(View::Folder);
+            }
+            if refresh {
+                session.refresh();
             }
         }
         if close {
@@ -882,6 +918,15 @@ fn browsing(ui: &mut egui::Ui, b: &mut Browsing) {
     widgets::form("browsing").show(ui, |ui| {
         widgets::form_row(ui, "Show hidden entries", |ui| {
             ui.add(widgets::switch(&mut b.show_hidden, "").name("Show hidden entries"));
+        });
+        widgets::form_row(ui, "Auto-refresh", |ui| {
+            widgets::dropdown("auto-refresh", b.auto_refresh.name())
+                .name("Auto-refresh")
+                .show(ui, |ui| {
+                    for every in AutoRefresh::ALL {
+                        widgets::choice_value(ui, &mut b.auto_refresh, every, every.name());
+                    }
+                });
         });
     });
 }

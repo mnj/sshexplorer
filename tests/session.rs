@@ -19,7 +19,7 @@ fn window(known_hosts: PathBuf) -> Harness<'static, App> {
         .with_context_setup(app::setup)
         .build_ui_state(
             |ui, app: &mut App| app.ui(ui),
-            App::with_known_hosts(known_hosts),
+            App::with_known_hosts(known_hosts).agent_at(None),
         )
 }
 
