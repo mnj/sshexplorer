@@ -515,7 +515,11 @@ impl RangedReader {
                     match remote.open(path.clone()).await {
                         Ok(opened) => file = Some(opened),
                         Err(e) => {
-                            let e = if remote.closed().await { LOST.to_owned() } else { e };
+                            let e = if remote.closed().await {
+                                LOST.to_owned()
+                            } else {
+                                e
+                            };
                             let _ = answer.send(match ask {
                                 Ask::Read { .. } => Answer::Data(Err(e)),
                                 Ask::Size => Answer::Size(Err(e)),

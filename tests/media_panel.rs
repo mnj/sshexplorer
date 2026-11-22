@@ -87,12 +87,7 @@ fn open_session(harness: &mut Harness<'static, App>, fixture: &Fixture) {
     until(harness, "the password prompt", |h| {
         h.query_by_role(Role::PasswordInput).is_some()
     });
-    type_into(
-        harness,
-        Role::PasswordInput,
-        "Password",
-        fixture::PASSWORD,
-    );
+    type_into(harness, Role::PasswordInput, "Password", fixture::PASSWORD);
     harness
         .get_by_role_and_label(Role::Button, "Connect")
         .click();
@@ -273,6 +268,9 @@ fn playback_pauses_when_its_session_tab_is_hidden() {
     open_session(&mut harness, &fixture);
     harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab);
     harness.run_ok();
-    assert!(has_label(&harness, "long.wav"), "the first Session is shown");
+    assert!(
+        has_label(&harness, "long.wav"),
+        "the first Session is shown"
+    );
     assert!(has_button(&harness, "Play"), "playback paused while hidden");
 }

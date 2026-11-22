@@ -182,11 +182,8 @@ pub fn clear_dir(dir: &Path) {
         if !name.starts_with(PREFIX) || !entry.file_type().is_ok_and(|t| t.is_file()) {
             continue;
         }
-        let held = pid_of(&name).is_some_and(|pid| {
-            *alive
-                .entry(pid)
-                .or_insert_with(|| running(dir, pid))
-        });
+        let held =
+            pid_of(&name).is_some_and(|pid| *alive.entry(pid).or_insert_with(|| running(dir, pid)));
         if !held {
             let _ = std::fs::remove_file(entry.path());
         }
