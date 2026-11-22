@@ -345,9 +345,9 @@ impl HostDialog {
                                 Entry::UnsavedSession => "Unsaved Session",
                             };
                             let selection = if entry == self.entry {
-                                widgets::Selection::Live
+                                widgets::Highlight::Live
                             } else {
-                                widgets::Selection::None
+                                widgets::Highlight::None
                             };
                             let row = widgets::list_row(name)
                                 .selection(selection)

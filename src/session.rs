@@ -56,7 +56,7 @@ use crate::settings::{AppSettings, ReconnectAttempts};
 use crate::ssh::{self, Entry, Listing, NO_SUCH_FILE, Request, Target};
 use crate::theme::TokensExt as _;
 use crate::tree::{self, Line, Tree};
-use crate::widgets::{self, Glyph, RowLook, Selection, State, Tooltip as _};
+use crate::widgets::{self, Glyph, RowLook, Tooltip as _};
 
 /// How a Session shows the remote filesystem. The choice belongs to the Session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -710,15 +710,8 @@ impl Session {
                         let shown = reveal.then_some(focus).flatten();
                         table.rows(count, shown, |table, i| {
                             let m = matches.get(i);
-                            let selection = match (matches.is_selected(i), live) {
-                                (false, _) => Selection::None,
-                                (true, true) => Selection::Live,
-                                (true, false) => Selection::Unfocused,
-                            };
-                            let mut look = RowLook::selected(selection);
-                            if focused && Some(i) == focus {
-                                look = look.forced(State::Focus);
-                            }
+                            let ringed = focused && Some(i) == focus;
+                            let look = RowLook::of(matches.is_selected(i), live, ringed);
                             let kind = Kind::of(matches::name(&m.path), m.is_dir);
                             let response = table.row_with(look, |row| {
                                 row.ui(|ui| {
@@ -1019,15 +1012,8 @@ impl Session {
                                 View::Tree => self.tree.is_selected(i),
                                 View::Folder => self.folder.is_selected(i),
                             };
-                            let selection = match (selected, live) {
-                                (false, _) => Selection::None,
-                                (true, true) => Selection::Live,
-                                (true, false) => Selection::Unfocused,
-                            };
-                            let mut look = RowLook::selected(selection);
-                            if focused && Some(i) == focus {
-                                look = look.forced(State::Focus);
-                            }
+                            let ringed = focused && Some(i) == focus;
+                            let look = RowLook::of(selected, live, ringed);
                             let shown = self.shown(i);
                             let response = table.row_with(look, |row| {
                                 self.cells(row, &shown, show_icons);

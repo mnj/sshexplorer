@@ -32,7 +32,7 @@ use egui::{
 use super::glyph::{self, Glyph};
 use super::mark::{Status, status_mark};
 use super::paint::{self, State};
-use super::row::{Selection, ground};
+use super::row::{Highlight, ground};
 use crate::theme::{Text, Tokens, TokensExt as _};
 
 /// Between two columns of a table.
@@ -96,7 +96,7 @@ pub struct Sorted {
 /// How one row of a table is drawn.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RowLook {
-    pub selection: Selection,
+    pub selection: Highlight,
     /// Something dragged is over this row and would drop on it.
     pub drop_target: bool,
     /// Forces one state, for the gallery.
@@ -105,10 +105,28 @@ pub struct RowLook {
 
 impl RowLook {
     /// A row that shows `selection`.
-    pub fn selected(selection: Selection) -> RowLook {
+    pub fn selected(selection: Highlight) -> RowLook {
         RowLook {
             selection,
             ..RowLook::default()
+        }
+    }
+
+    /// A row of a list that can hold the keyboard: highlighted when `selected`, live
+    /// when the list holds the keyboard and the window is in front (`live`), and with
+    /// the focus ring when it is the list's focused row while the list holds the
+    /// keyboard (`ringed`).
+    pub fn of(selected: bool, live: bool, ringed: bool) -> RowLook {
+        let highlight = match (selected, live) {
+            (false, _) => Highlight::None,
+            (true, true) => Highlight::Live,
+            (true, false) => Highlight::Unfocused,
+        };
+        let look = RowLook::selected(highlight);
+        if ringed {
+            look.forced(State::Focus)
+        } else {
+            look
         }
     }
 

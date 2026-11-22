@@ -24,10 +24,10 @@ pub const TREE_INDENT: f32 = 16.0;
 /// row's padding.
 pub(super) const CHEVRON_PULL: f32 = 3.0;
 
-/// How a selected row shows
+/// How a row shows that it is selected: a highlight, not the glossary's Selection itself
 /// (REDA docs/spec/v0.1/design-language.md#selection-and-window-focus).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Selection {
+pub enum Highlight {
     /// Not selected.
     #[default]
     None,
@@ -38,21 +38,21 @@ pub enum Selection {
     Unfocused,
 }
 
-impl Selection {
+impl Highlight {
     /// The selection a row shows: live only when its Panel holds keyboard focus and
     /// sshexplorer's window is in front.
-    pub fn of(ui: &Ui, selected: bool, panel_focused: bool) -> Selection {
+    pub fn of(ui: &Ui, selected: bool, panel_focused: bool) -> Highlight {
         if !selected {
-            Selection::None
+            Highlight::None
         } else if panel_focused && ui.input(|i| i.focused) {
-            Selection::Live
+            Highlight::Live
         } else {
-            Selection::Unfocused
+            Highlight::Unfocused
         }
     }
 
     pub fn is_selected(self) -> bool {
-        self != Selection::None
+        self != Highlight::None
     }
 }
 
@@ -62,7 +62,7 @@ impl Selection {
 pub(super) fn ground(
     t: &Tokens,
     rect: Rect,
-    selection: Selection,
+    selection: Highlight,
     drop_target: bool,
     s: Seen,
 ) -> Shape {
@@ -71,9 +71,9 @@ pub(super) fn ground(
         c.accent.subtle
     } else {
         match selection {
-            Selection::None => Color32::TRANSPARENT,
-            Selection::Live => c.accent.subtle,
-            Selection::Unfocused => c.fill.selected_unfocused,
+            Highlight::None => Color32::TRANSPARENT,
+            Highlight::Live => c.accent.subtle,
+            Highlight::Unfocused => c.fill.selected_unfocused,
         }
     };
     let mut shapes = Vec::new();
@@ -168,7 +168,7 @@ pub struct Row<'a> {
     tree: Option<Tree>,
     selected: bool,
     panel_focused: bool,
-    selection: Option<Selection>,
+    selection: Option<Highlight>,
     drop_target: bool,
     muted: bool,
     strong: bool,
@@ -204,7 +204,7 @@ impl<'a> Row<'a> {
     }
 
     /// The selection to show, whatever the window's focus is: for the gallery.
-    pub fn selection(mut self, selection: Selection) -> Self {
+    pub fn selection(mut self, selection: Highlight) -> Self {
         self.selection = Some(selection);
         self
     }
@@ -316,7 +316,7 @@ impl<'a> Row<'a> {
         let enabled = ui.is_enabled();
         let selection = self
             .selection
-            .unwrap_or_else(|| Selection::of(ui, self.selected, self.panel_focused));
+            .unwrap_or_else(|| Highlight::of(ui, self.selected, self.panel_focused));
         let role = if self.tree.is_some() {
             Role::TreeItem
         } else {
