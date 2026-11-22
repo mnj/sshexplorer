@@ -32,11 +32,12 @@ fn on_disk_a_file_is_private_and_deleted_when_dropped() {
 #[test]
 fn leftovers_are_cleared_and_nothing_else_in_a_chosen_directory() {
     let dir = tempfile::tempdir().unwrap();
-    let place = Place::Dir(dir.path().to_owned());
     // What a crashed instance left: its pid is no process.
     let left = dir.path().join(format!("{}4294967294-0", scratch::PREFIX));
     std::fs::write(&left, "left behind").unwrap();
-    let lock = dir.path().join(format!("{}4294967294.lock", scratch::PREFIX));
+    let lock = dir
+        .path()
+        .join(format!("{}4294967294.lock", scratch::PREFIX));
     std::fs::write(&lock, "").unwrap();
     std::fs::write(dir.path().join("mine.txt"), "keep me").unwrap();
 
