@@ -17,13 +17,13 @@ use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
-use crate::openssh_config::Config;
+use crate::openssh_config::{Config, IdentityAgent};
 use crate::session::{self, Session, View};
 use crate::settings::{
     Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge,
     PreviewSettings, ScratchChoice, Search, Store, ThemeChoice, UI_SCALES,
 };
-use crate::ssh::{Failure, Opening, Options, Ssh};
+use crate::ssh::{self, Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
 use crate::widgets::{self, Glyph, TabKind, Tooltip as _};
 
@@ -121,6 +121,9 @@ pub struct App {
     known_hosts: PathBuf,
     /// The operator's OpenSSH config, read at each Session open while it is in use.
     ssh_config: PathBuf,
+    /// The SSH agent when the config does not name one: `SSH_AUTH_SOCK`, or the OpenSSH
+    /// agent's pipe on Windows.
+    agent: Option<PathBuf>,
     /// The saved Hosts, in the Host dialog's order.
     hosts: Vec<Host>,
     /// Where Hosts are saved; `None` keeps them for this run only.
@@ -184,6 +187,7 @@ impl App {
             applied: None,
             known_hosts: path,
             ssh_config: default_ssh_config(),
+            agent: ssh::default_agent(),
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
@@ -213,6 +217,13 @@ impl App {
     /// The same app, checking host keys against the `known_hosts` file at `path`.
     pub fn known_hosts_at(mut self, path: PathBuf) -> App {
         self.known_hosts = path;
+        self
+    }
+
+    /// The same app, reaching the SSH agent at `socket` unless the config names another;
+    /// `None` for no agent. Tests use it to keep away from the operator's agent.
+    pub fn agent_at(mut self, socket: Option<PathBuf>) -> App {
+        self.agent = socket;
         self
     }
 
@@ -502,6 +513,14 @@ impl App {
                                 also_known_hosts: resolved.known_hosts,
                                 connect_timeout: resolved.connect_timeout,
                                 keepalive: resolved.server_alive_interval,
+                                auth: plan.auth,
+                                key_files: resolved.key_files,
+                                identities_only: resolved.identities_only,
+                                agent: match resolved.identity_agent {
+                                    IdentityAgent::Default => self.agent.clone(),
+                                    IdentityAgent::Off => None,
+                                    IdentityAgent::Socket(path) => Some(path),
+                                },
                             };
                             let ssh = self.ssh.get_or_insert_with(|| {
                                 let ctx = ctx.clone();
