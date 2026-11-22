@@ -102,11 +102,7 @@ impl PdfView {
         }
         let State::Ready(ready) = &mut self.state else {
             if let State::Opening(_) = self.state {
-                let t = ui.tokens();
-                ui.horizontal(|ui| {
-                    ui.add(widgets::spinner());
-                    ui.label(t.ty.body.rich("Loading preview…").color(t.color.text.muted));
-                });
+                ui.add(widgets::loading_line(crate::preview::LOADING));
             }
             return None;
         };

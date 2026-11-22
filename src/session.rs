@@ -660,14 +660,10 @@ impl Session {
             Some(ended) => {
                 match ended.how {
                     How::Finished => {
-                        ui.label(t.ty.body.rich(counted).color(t.color.text.muted));
+                        ui.add(widgets::muted(counted));
                     }
                     How::Stopped => {
-                        ui.label(
-                            t.ty.body
-                                .rich(format!("Search stopped. {counted}"))
-                                .color(t.color.text.muted),
-                        );
+                        ui.add(widgets::muted(format!("Search stopped. {counted}")));
                     }
                     How::Capped => {
                         ui.add(widgets::warning_message(format!(
@@ -844,8 +840,7 @@ impl Session {
                 Some(status) => {
                     now_clicked = ui.add(widgets::button("Reconnect now").flat()).clicked();
                     stop = ui.add(widgets::button("Stop").flat()).clicked();
-                    let t = ui.tokens();
-                    ui.label(t.ty.body.rich(status.as_str()).color(t.color.text.muted));
+                    ui.add(widgets::muted(status.as_str()));
                 }
                 None => {
                     now_clicked = ui
@@ -1168,8 +1163,7 @@ impl Session {
                 }
             }
             if shown.status {
-                let t = ui.tokens();
-                ui.label(t.ty.body.rich(&shown.label).color(t.color.text.muted));
+                ui.add(widgets::muted(&shown.label));
             } else {
                 ui.add(
                     widgets::entry_name(&shown.label, kind)

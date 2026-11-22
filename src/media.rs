@@ -120,7 +120,7 @@ impl Player {
                 }
                 // The first error is the cause; the rest follow from it.
                 MessageView::Error(error) if !matches!(self.phase, Phase::Failed(_)) => {
-                    self.phase = Phase::Failed(failure_line(&error.error()));
+                    self.phase = Phase::Failed(line_for(&error.error()));
                     self.playing = false;
                 }
                 _ => {}
@@ -263,7 +263,7 @@ impl Drop for Player {
 }
 
 /// A failure as Preview's one line.
-fn failure_line(error: &gst::glib::Error) -> String {
+fn line_for(error: &gst::glib::Error) -> String {
     if error.kind::<gst::ResourceError>().is_some() {
         return crate::preview::failure_line(error.message());
     }
@@ -284,7 +284,7 @@ fn failure_line(error: &gst::glib::Error) -> String {
     if unsupported {
         return UNSUPPORTED_FORMAT.to_owned();
     }
-    crate::image_view::failure_line(error.message())
+    crate::preview::cannot_preview(error.message())
 }
 
 /// The file as `appsrc` reads it: the reader and where it is.
@@ -303,8 +303,9 @@ fn build<R>(
 where
     R: Read + Seek + Send + 'static,
 {
-    let missing = |what: &str| format!("Cannot preview: GStreamer has no {what}");
-    gst::init().map_err(|e| format!("Cannot preview: GStreamer is not available ({e})"))?;
+    use crate::preview::cannot_preview;
+    let missing = |what: &str| cannot_preview(&format!("GStreamer has no {what}"));
+    gst::init().map_err(|e| cannot_preview(&format!("GStreamer is not available ({e})")))?;
     let playbin = gst::ElementFactory::make("playbin")
         .property("uri", "appsrc://")
         .build()

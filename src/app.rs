@@ -447,10 +447,8 @@ impl App {
                         ui.add(widgets::badge("Readonly"))
                             .tooltip("This Session cannot change the remote filesystem");
                     }
-                    let t = ui.tokens();
                     let folder = details.local_folder.display().to_string();
-                    ui.label(t.ty.body.rich(folder).color(t.color.text.muted))
-                        .tooltip("Local folder");
+                    ui.add(widgets::muted(folder)).tooltip("Local folder");
                     if let Some(note) = &details.note {
                         ui.add(widgets::warning_message(note));
                     }

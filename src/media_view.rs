@@ -79,11 +79,7 @@ impl MediaView {
         match player.phase() {
             Phase::Failed(line) => return Some(line.clone()),
             Phase::Opening => {
-                let t = ui.tokens();
-                ui.horizontal(|ui| {
-                    ui.add(widgets::spinner());
-                    ui.label(t.ty.body.rich("Loading preview…").color(t.color.text.muted));
-                });
+                ui.add(widgets::loading_line(crate::preview::LOADING));
                 return None;
             }
             Phase::Ready => {}
@@ -135,7 +131,7 @@ impl MediaView {
             }
             (_, true) => {}
             (_, false) => {
-                ui.label(t.ty.body.rich(AUDIO_PLACEHOLDER).color(t.color.text.muted));
+                ui.add(widgets::muted(AUDIO_PLACEHOLDER));
             }
         }
         None

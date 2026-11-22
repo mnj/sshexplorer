@@ -32,6 +32,8 @@ pub const DELAY: f64 = 0.2;
 const LISTING_POLL: f64 = 0.05;
 /// How many of the first bytes decide whether an unknown file is text.
 pub const SNIFF: usize = 8 * 1024;
+/// Beside the spinner while a preview loads.
+pub const LOADING: &str = "Loading preview…";
 /// The line for a file Preview cannot show.
 pub const UNSUPPORTED: &str = "No preview for this file type.";
 /// What a load cut short, or not started, by a dropped connection shows.
@@ -632,12 +634,25 @@ pub fn failure_line(reason: &str) -> String {
     if reason == "No such file" {
         return "Cannot read: no longer exists".to_owned();
     }
+    format!("Cannot read: {}", in_line(reason))
+}
+
+/// The one line a file that was read but cannot be shown gives: "Cannot preview: <reason,
+/// first letter lowercased>". The fixed lines ([`crate::archive::CORRUPT`],
+/// [`crate::pdf::ENCRYPTED`], …) read the same way.
+pub fn cannot_preview(reason: &str) -> String {
+    format!("Cannot preview: {}", in_line(reason))
+}
+
+/// `reason` to follow a colon: its first letter lowercased, unless the first word is a
+/// name such as "GStreamer" or "PDF", whose second letter is a capital too.
+fn in_line(reason: &str) -> String {
     let mut chars = reason.chars();
-    let reason = match chars.next() {
-        Some(first) => first.to_lowercase().chain(chars).collect(),
-        None => String::new(),
-    };
-    format!("Cannot read: {reason}")
+    let name = reason.chars().nth(1).is_some_and(char::is_uppercase);
+    match chars.next() {
+        Some(first) if !name => first.to_lowercase().chain(chars).collect(),
+        _ => reason.to_owned(),
+    }
 }
 
 /// The header's name for a kind.

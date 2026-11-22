@@ -57,12 +57,7 @@ fn paragraph(ui: &mut egui::Ui, text: &str) {
     ui.label(t.ty.body.rich(text).color(t.color.text.primary));
 }
 
-/// The local OS user name: the account when neither the Host nor the config names one.
-pub fn local_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_default()
-}
+pub use crate::hosts::local_user;
 
 /// The Authentication method choices, as the dropdown names them.
 const AUTH_METHODS: [(AuthMethod, &str); 4] = [

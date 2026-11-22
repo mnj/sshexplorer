@@ -185,13 +185,10 @@ impl PreviewPanel {
         match &mut shown.body {
             Body::Header => {}
             Body::Loading => {
-                ui.horizontal(|ui| {
-                    ui.add(widgets::spinner());
-                    ui.label(t.ty.body.rich("Loading preview…").color(t.color.text.muted));
-                });
+                ui.add(widgets::loading_line(crate::preview::LOADING));
             }
             Body::Unsupported => {
-                ui.label(t.ty.body.rich(UNSUPPORTED).color(t.color.text.muted));
+                ui.add(widgets::muted(UNSUPPORTED));
             }
             Body::Failed(line) => {
                 ui.add(widgets::invalid_message(line.as_str()));
@@ -224,14 +221,14 @@ impl PreviewPanel {
             }
             Body::TooLarge(line) => {
                 ui.add(widgets::warning_message(line.as_str()));
-                ui.label(t.ty.body.rich(TOO_LARGE_HINT).color(t.color.text.muted));
+                ui.add(widgets::muted(TOO_LARGE_HINT));
             }
             Body::Archive(listing) => {
                 if listing.partial {
                     ui.add(widgets::warning_message(crate::archive::PARTIAL));
                 }
                 if listing.members.is_empty() {
-                    ui.label(t.ty.body.rich(EMPTY_ARCHIVE).color(t.color.text.muted));
+                    ui.add(widgets::muted(EMPTY_ARCHIVE));
                 }
                 let rows = self
                     .archive_rows

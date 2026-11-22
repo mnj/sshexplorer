@@ -4,6 +4,7 @@
 //! One [`ImageView`] belongs to one preview; a new one starts at Fit, which is how each
 //! newly focused file starts.
 
+use crate::preview::cannot_preview;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -65,22 +66,18 @@ impl ImageView {
                 Ok(Ok(picture)) => self.state = State::Ready(upload(ui, name, picture)),
                 Ok(Err(reason)) => {
                     self.state = State::Done;
-                    return Some(failure_line(&reason));
+                    return Some(cannot_preview(&reason));
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.state = State::Done;
-                    return Some(failure_line("the decoder stopped"));
+                    return Some(cannot_preview("the decoder stopped"));
                 }
             }
         }
         let State::Ready(ready) = &self.state else {
             if let State::Decoding(_) = self.state {
-                let t = crate::theme::TokensExt::tokens(ui);
-                ui.horizontal(|ui| {
-                    ui.add(widgets::spinner());
-                    ui.label(t.ty.body.rich("Loading preview…").color(t.color.text.muted));
-                });
+                ui.add(widgets::loading_line(crate::preview::LOADING));
             }
             return None;
         };
@@ -119,16 +116,6 @@ impl Ready {
         ui.ctx().request_repaint();
         &self.frames[0].0
     }
-}
-
-/// "Cannot preview: <reason, first letter lowercased>".
-pub fn failure_line(reason: &str) -> String {
-    let mut chars = reason.chars();
-    let reason: String = match chars.next() {
-        Some(first) => first.to_lowercase().chain(chars).collect(),
-        None => String::new(),
-    };
-    format!("Cannot preview: {reason}")
 }
 
 fn decode(ctx: &egui::Context, name: &str, bytes: Vec<u8>) -> Receiver<Result<Picture, String>> {

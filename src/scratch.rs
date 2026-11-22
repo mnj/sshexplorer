@@ -73,9 +73,7 @@ impl Place {
 
 /// The system temp directory's own folder for sshexplorer, one per OS account.
 pub fn temp_dir() -> PathBuf {
-    let account = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_default();
+    let account = crate::hosts::local_user();
     std::env::temp_dir().join(format!("{PREFIX}{account}"))
 }
 
