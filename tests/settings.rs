@@ -171,3 +171,18 @@ fn the_platform_store_is_in_the_config_directory() {
             .any(|c| c.as_os_str() == "sshexplorer")
     );
 }
+
+#[test]
+fn download_keeps_time_and_executable_bit_and_follows_no_links_by_default() {
+    let s = AppSettings::default();
+    assert!(s.download.keep_modified);
+    assert!(s.download.keep_executable);
+    assert!(!s.search.follow_links);
+    let (_dir, store) = store();
+    let mut settings = AppSettings::default();
+    settings.download.keep_modified = false;
+    settings.download.keep_executable = false;
+    settings.search.follow_links = true;
+    store.save(&settings).expect("saved");
+    assert_eq!(store.load(), settings);
+}
