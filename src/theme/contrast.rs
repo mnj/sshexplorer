@@ -151,13 +151,20 @@ fn contrast_ratio_matches_the_wcag_worked_values() {
 }
 
 #[test]
-fn every_contrast_rule_holds_in_light_and_dark() {
+fn every_contrast_rule_holds_in_light_and_dark_with_every_accent() {
     let rules = rules();
     // 128 rules of text and lines, and 9 for the tokens the others leave out.
     assert_eq!(rules.len(), 128 + 9);
     let mut failures = Vec::new();
-    for theme in [Theme::Light, Theme::Dark] {
-        let tokens = Tokens::new(theme, &Settings::default());
+    let cases = [Theme::Light, Theme::Dark]
+        .into_iter()
+        .flat_map(|theme| super::Accent::ALL.map(|accent| (theme, accent)));
+    for (theme, accent) in cases {
+        let settings = Settings {
+            accent,
+            ..Settings::default()
+        };
+        let tokens = Tokens::new(theme, &settings);
         let colours: BTreeMap<&str, Color32> = tokens.color.named().into_iter().collect();
         for rule in &rules {
             let mut layers = rule.layers.iter().rev().map(|name| colours[name]);
@@ -171,7 +178,7 @@ fn every_contrast_rule_holds_in_light_and_dark() {
             let ratio = contrast_ratio(colours[rule.fg], ground);
             if ratio < rule.ratio {
                 failures.push(format!(
-                    "{theme:?}: {} on {}: {ratio:.2}:1, needs {}:1",
+                    "{theme:?} {accent:?}: {} on {}: {ratio:.2}:1, needs {}:1",
                     rule.fg,
                     rule.layers.join(" over "),
                     rule.ratio

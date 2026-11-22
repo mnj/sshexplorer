@@ -1,0 +1,115 @@
+//! App settings persist in a file and load at launch; unknown or missing fields fall back
+//! to their defaults.
+
+use sshexplorer::settings::{Animate, AppSettings, Edge, Store, ThemeChoice};
+use sshexplorer::theme::{Accent, Density};
+
+fn store() -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Store::at(dir.path().join("config").join("settings.toml"));
+    (dir, store)
+}
+
+#[test]
+fn the_appearance_defaults_are_the_specs() {
+    let a = AppSettings::default().appearance;
+    assert_eq!(a.theme, ThemeChoice::System);
+    assert_eq!(a.accent, Accent::Blue);
+    assert_eq!(a.ui_scale, 100);
+    assert_eq!(a.density, Density::Comfortable);
+    assert_eq!(a.ui_font, None);
+    assert_eq!(a.mono_font, None);
+    assert!(a.show_icons);
+    assert_eq!(a.animate, Animate::System);
+    assert_eq!(a.tab_bar_edge, Edge::Top);
+}
+
+#[test]
+fn no_file_loads_the_defaults() {
+    let (_dir, store) = store();
+    assert_eq!(store.load(), AppSettings::default());
+}
+
+#[test]
+fn saved_settings_load_again() {
+    let (_dir, store) = store();
+    let mut settings = AppSettings::default();
+    let a = &mut settings.appearance;
+    a.theme = ThemeChoice::Dark;
+    a.accent = Accent::Teal;
+    a.ui_scale = 150;
+    a.density = Density::Compact;
+    a.ui_font = Some("Noto Sans".into());
+    a.mono_font = Some("Fira Code".into());
+    a.show_icons = false;
+    a.animate = Animate::Off;
+    a.tab_bar_edge = Edge::Left;
+    store.save(&settings).expect("saved");
+    assert_eq!(store.load(), settings);
+}
+
+#[test]
+fn missing_and_unknown_fields_fall_back_to_their_defaults() {
+    let (_dir, store) = store();
+    std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+    std::fs::write(
+        store.path(),
+        r#"
+        future_section = { x = 1 }
+        [appearance]
+        accent = "violet"
+        density = "chartreuse"
+        ui_scale = "big"
+        show_icons = false
+        sparkles = true
+        "#,
+    )
+    .unwrap();
+    let a = store.load().appearance;
+    assert_eq!(a.accent, Accent::Violet);
+    assert!(!a.show_icons);
+    // Wrong values fall back one field at a time.
+    assert_eq!(a.density, Density::Comfortable);
+    assert_eq!(a.ui_scale, 100);
+    // Missing ones are the defaults.
+    assert_eq!(a.theme, ThemeChoice::System);
+    assert_eq!(a.tab_bar_edge, Edge::Top);
+}
+
+#[test]
+fn a_ui_scale_off_the_steps_loads_as_the_nearest_step() {
+    let (_dir, store) = store();
+    std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+    for (written, loaded) in [(110, 100), (115, 125), (10, 75), (900, 200)] {
+        std::fs::write(
+            store.path(),
+            format!("[appearance]\nui_scale = {written}\n"),
+        )
+        .unwrap();
+        assert_eq!(store.load().appearance.ui_scale, loaded, "from {written}");
+    }
+}
+
+#[test]
+fn an_unreadable_file_loads_the_defaults_and_is_kept_aside_on_save() {
+    let (_dir, store) = store();
+    std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+    std::fs::write(store.path(), "this is [not toml").unwrap();
+    assert_eq!(store.load(), AppSettings::default());
+    store.save(&AppSettings::default()).expect("saved");
+    let aside = store.path().with_extension("toml.bad");
+    assert_eq!(std::fs::read_to_string(aside).unwrap(), "this is [not toml");
+    assert_eq!(store.load(), AppSettings::default());
+}
+
+#[test]
+fn the_platform_store_is_in_the_config_directory() {
+    let store = Store::platform().expect("a config directory");
+    assert!(store.path().ends_with("settings.toml"));
+    assert!(
+        store
+            .path()
+            .components()
+            .any(|c| c.as_os_str() == "sshexplorer")
+    );
+}

@@ -4,6 +4,7 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
 use sshexplorer::app::{self, App};
+use sshexplorer::settings::{AppSettings, ThemeChoice};
 use sshexplorer::theme::{TokensExt as _, fonts};
 
 fn launch() -> Harness<'static, App> {
@@ -44,11 +45,15 @@ fn launch_follows_the_system_theme_with_the_bundled_fonts() {
 
 #[test]
 fn launch_draws_in_the_paper_look_in_light_and_dark() {
-    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+    for (theme, choice) in [
+        (egui::Theme::Light, ThemeChoice::Light),
+        (egui::Theme::Dark, ThemeChoice::Dark),
+    ] {
+        let mut settings = AppSettings::default();
+        settings.appearance.theme = choice;
         let harness = Harness::builder()
-            .with_theme(theme)
             .with_context_setup(app::setup)
-            .build_ui_state(|ui, app: &mut App| app.ui(ui), App::default());
+            .build_ui_state(|ui, app: &mut App| app.ui(ui), App::with_settings(settings));
         let ctx = &harness.ctx;
         let t = ctx.tokens();
         assert_eq!(t.theme, theme);

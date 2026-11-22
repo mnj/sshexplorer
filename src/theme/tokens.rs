@@ -16,7 +16,8 @@ use super::palette::{self, Hue, Palette, Soft, Tint};
 
 /// How much room the chrome gives its controls and rows. It changes paddings and gaps and
 /// nothing else.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Density {
     #[default]
     Comfortable,
@@ -62,10 +63,53 @@ impl Families {
     }
 }
 
+/// The accent preset: the one hue of selection, the focus ring, checked and on states,
+/// links, progress and busy indicators. Error, warning and success keep their own hues,
+/// and the primary button stays neutral, whatever the accent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accent {
+    Graphite,
+    #[default]
+    Blue,
+    Teal,
+    Green,
+    Violet,
+    Orange,
+    Pink,
+}
+
+impl Accent {
+    /// Every preset, in the order Settings lists them.
+    pub const ALL: [Accent; 7] = [
+        Accent::Graphite,
+        Accent::Blue,
+        Accent::Teal,
+        Accent::Green,
+        Accent::Violet,
+        Accent::Orange,
+        Accent::Pink,
+    ];
+
+    /// The preset's name as Settings shows it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Accent::Graphite => "Graphite",
+            Accent::Blue => "Blue",
+            Accent::Teal => "Teal",
+            Accent::Green => "Green",
+            Accent::Violet => "Violet",
+            Accent::Orange => "Orange",
+            Accent::Pink => "Pink",
+        }
+    }
+}
+
 /// What `Tokens` is built from besides light/dark.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Settings {
     pub density: Density,
+    pub accent: Accent,
     /// The chosen UI and monospace families, by name. [`set`](super::set) resolves them
     /// against the installed fonts; the bundled faces stand in for what is missing.
     pub fonts: fonts::Choice,
@@ -485,7 +529,8 @@ pub(super) fn palette(theme: Theme) -> &'static Palette {
     }
 }
 
-fn colors(p: &Palette) -> Colors {
+fn colors(p: &Palette, accent: Accent) -> Colors {
+    let accent = &p.accents[Accent::ALL.iter().position(|a| *a == accent).unwrap_or(1)];
     let [base, card, floating] = p.paper.map(rgb);
     let fill = p.ink_fills.map(|percent| {
         tint(Tint {
@@ -508,7 +553,7 @@ fn colors(p: &Palette) -> Colors {
         stroke: StrokeColor {
             hairline: rgb(p.line),
             strong: rgb(p.line_strong),
-            focus_ring: rgb(p.ring),
+            focus_ring: rgb(accent.ring),
         },
         fill: Fill {
             control: fill[0],
@@ -516,7 +561,7 @@ fn colors(p: &Palette) -> Colors {
             press: fill[2],
             selected_unfocused: fill[3],
         },
-        accent: tone(p.blue),
+        accent: tone(accent.hue),
         error: tone(p.red),
         warning: tone(p.amber),
         success: tone(p.green),
@@ -669,7 +714,7 @@ impl Tokens {
         Tokens {
             theme,
             density: settings.density,
-            color: colors(p),
+            color: colors(p, settings.accent),
             elevation: Elevation {
                 card,
                 popup,

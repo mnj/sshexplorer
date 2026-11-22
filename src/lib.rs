@@ -7,5 +7,7 @@
 
 pub mod app;
 pub mod icons;
+pub mod keymap;
+pub mod settings;
 pub mod theme;
 pub mod widgets;

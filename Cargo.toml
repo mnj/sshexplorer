@@ -10,6 +10,12 @@ egui = "0.37"
 eframe = "0.37"
 # The font reader egui itself uses: validates a font file before egui gets it.
 skrifa = "=0.44.0"
+# App settings: a TOML file in the platform config directory.
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
+directories = "6.0.0"
+# The installed-font index behind "UI font" and "Monospace font".
+fontdb = "0.24.0"
 
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -23,6 +29,7 @@ windows = { version = "0.62.2", features = ["UI_ViewManagement", "Foundation"] }
 
 [dev-dependencies]
 egui_kittest = "0.37"
+tempfile = "3.27"
 
 [lints.rust]
 unsafe_code = "forbid"

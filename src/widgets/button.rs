@@ -25,6 +25,10 @@ enum Kind {
     Danger,
 }
 
+/// How far the primary button's fill moves toward the muted text when hovered and pressed.
+const PRIMARY_HOVER: f32 = 0.18;
+const PRIMARY_PRESS: f32 = 0.32;
+
 /// A button: filled at rest with no border. `.primary()` is the one primary button of a
 /// dialog, `.danger()` the confirm button of a destructive one, `.flat()` has no fill
 /// until hovered, and `.on(..)` makes it a toggle.
@@ -48,7 +52,8 @@ pub struct Button<'a> {
 }
 
 impl<'a> Button<'a> {
-    /// The accent solid with its on-colour. One per dialog.
+    /// A high-contrast neutral: the primary text colour as its fill, the floating surface
+    /// as its label. It never takes the accent. One per dialog.
     pub fn primary(mut self) -> Self {
         self.kind = Kind::Primary;
         self
@@ -132,7 +137,7 @@ impl Widget for Button<'_> {
             }
             let s = paint::seen(&response, self.state);
             let (under, ink) = match self.kind {
-                Kind::Primary => (c.accent.solid, c.accent.on_solid),
+                Kind::Primary => (c.text.primary, c.surface.floating),
                 Kind::Danger => (c.error.solid, c.error.on_solid),
                 Kind::Filled => (c.fill.control, c.text.primary),
                 Kind::Flat => (Color32::TRANSPARENT, c.text.primary),
@@ -144,8 +149,20 @@ impl Widget for Button<'_> {
                 }
                 _ => under,
             };
-            ui.painter()
-                .rect_filled(rect, t.radius.control, paint::state_fill(&t, under, s));
+            let fill = match self.kind {
+                // The ink fill cannot take an ink tint: hover and press move it toward the
+                // muted text, which the label still stands off.
+                Kind::Primary => {
+                    let k = if s.press {
+                        PRIMARY_PRESS
+                    } else {
+                        PRIMARY_HOVER * s.hover_fill.max(f32::from(u8::from(s.hover)))
+                    };
+                    paint::mix(under, c.text.muted, k)
+                }
+                _ => paint::state_fill(&t, under, s),
+            };
+            ui.painter().rect_filled(rect, t.radius.control, fill);
             let mut left = rect.left() + t.space.control_x;
             if let Some(key) = self.icon {
                 let at = pos2(left + t.icon.small / 2.0, rect.center().y);

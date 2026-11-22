@@ -148,3 +148,79 @@ fn installing_the_theme_installs_inter_and_jetbrains_mono() {
     assert_eq!(theme::fonts::BUNDLED_UI, "Inter");
     assert_eq!(theme::fonts::BUNDLED_MONO, "JetBrains Mono");
 }
+
+#[test]
+fn the_accent_colours_the_accent_and_the_focus_ring_and_nothing_else() {
+    use theme::Accent;
+    for theme in [Theme::Light, Theme::Dark] {
+        let with = |accent| {
+            let settings = Settings {
+                accent,
+                ..Settings::default()
+            };
+            Tokens::new(theme, &settings).color
+        };
+        let blue = with(Accent::Blue);
+        for accent in Accent::ALL {
+            let c = with(accent);
+            // Error, warning and success are fixed hues; surfaces, text and fills too.
+            assert_eq!(c.error, blue.error);
+            assert_eq!(c.warning, blue.warning);
+            assert_eq!(c.success, blue.success);
+            assert_eq!(c.surface, blue.surface);
+            assert_eq!(c.text, blue.text);
+            assert_eq!(c.fill, blue.fill);
+            assert_eq!(c.stroke.hairline, blue.stroke.hairline);
+            if accent != Accent::Blue {
+                assert_ne!(c.accent, blue.accent, "{accent:?} in {theme:?}");
+                assert_ne!(c.stroke.focus_ring, blue.stroke.focus_ring);
+            }
+        }
+        // Each preset is its own colour.
+        let solids: std::collections::BTreeSet<_> = Accent::ALL
+            .iter()
+            .map(|a| with(*a).accent.solid.to_array())
+            .collect();
+        assert_eq!(solids.len(), Accent::ALL.len());
+    }
+}
+
+#[test]
+fn blue_is_the_default_accent_and_keeps_papers_blue() {
+    let light = Tokens::new(Theme::Light, &Settings::default()).color;
+    assert_eq!(light.accent.solid, Color32::from_rgb(0x1f, 0x5f, 0xbf));
+    assert_eq!(light.stroke.focus_ring, Color32::from_rgb(0x1f, 0x5f, 0xbf));
+    let dark = Tokens::new(Theme::Dark, &Settings::default()).color;
+    assert_eq!(dark.accent.text, Color32::from_rgb(0x8f, 0xba, 0xf8));
+    assert_eq!(dark.stroke.focus_ring, Color32::from_rgb(0x8f, 0xba, 0xf8));
+}
+
+#[test]
+fn the_accent_reaches_selection_links_and_the_text_cursor_in_the_egui_style() {
+    let settings = Settings {
+        accent: theme::Accent::Pink,
+        ..Settings::default()
+    };
+    let t = Tokens::new(Theme::Light, &settings);
+    let v = theme::style(&t).visuals;
+    assert_eq!(v.selection.bg_fill, t.color.accent.subtle);
+    assert_eq!(v.hyperlink_color, t.color.accent.text);
+    assert_eq!(v.text_cursor.stroke.color, t.color.accent.text);
+    assert_eq!(v.widgets.active.bg_stroke.color, t.color.stroke.focus_ring);
+}
+
+#[test]
+fn the_installed_font_index_finds_a_listed_family_by_name_in_any_case() {
+    use theme::fonts::{Installed, Source as _};
+    let installed = Installed::load();
+    let families = installed.families();
+    let Some(first) = families.first() else {
+        return; // A machine with no fonts has nothing to look up.
+    };
+    let found = installed
+        .family(&first.name.to_uppercase())
+        .expect("a listed family is found");
+    assert_eq!(found.name, first.name);
+    assert_eq!(found.faces.len(), first.faces.len());
+    assert!(installed.family("No Such Family 0xdead").is_none());
+}

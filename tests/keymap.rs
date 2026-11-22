@@ -1,0 +1,140 @@
+//! The key map registry: named actions grouped by area, each with a default binding, with
+//! Cmd in place of Ctrl on macOS.
+
+use egui::{Event, Key, Modifiers, RawInput};
+use sshexplorer::keymap::{Action, Area, Binding, KeyMap};
+
+/// Presses `key` (and, when it differs, the `physical` key) with `modifiers` in one pass
+/// and returns what the map takes from it.
+fn taken(map: &KeyMap, key: Key, physical: Key, modifiers: Modifiers) -> Vec<Action> {
+    let ctx = egui::Context::default();
+    let mut input = RawInput::default();
+    input.events.push(Event::Key {
+        key,
+        physical_key: Some(physical),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    });
+    let mut out = Vec::new();
+    let mut output = ctx.run_ui(input, |ui| {
+        ui.input_mut(|i| {
+            for action in Action::ALL {
+                if map.take(i, action) {
+                    out.push(action);
+                }
+            }
+        });
+    });
+    output.textures_delta.clear();
+    out
+}
+
+/// Ctrl as egui-winit reports it off macOS: `ctrl` and `command` both set.
+const CTRL: Modifiers = Modifiers::COMMAND;
+const CTRL_SHIFT: Modifiers = Modifiers {
+    shift: true,
+    ..Modifiers::COMMAND
+};
+
+#[test]
+fn settings_and_ui_scale_are_registered_under_appearance() {
+    let map = KeyMap::default();
+    let shift_cmd = Modifiers::COMMAND | Modifiers::SHIFT;
+    for (action, key, modifiers) in [
+        (Action::Settings, Key::Comma, Modifiers::COMMAND),
+        (Action::UiScaleUp, Key::Equals, shift_cmd),
+        (Action::UiScaleDown, Key::Minus, shift_cmd),
+        (Action::UiScaleReset, Key::Num0, shift_cmd),
+    ] {
+        assert_eq!(action.area(), Area::Appearance);
+        assert_eq!(map.binding(action), Some(Binding::new(modifiers, key)));
+        assert_eq!(action.default_binding(), Some(Binding::new(modifiers, key)));
+    }
+    assert_eq!(Action::Settings.name(), "Settings");
+    assert_eq!(Action::UiScaleUp.name(), "UI scale up");
+}
+
+#[test]
+fn bindings_read_ctrl_elsewhere_and_cmd_on_macos() {
+    let b = Action::UiScaleUp.default_binding().unwrap();
+    assert_eq!(b.label(false), "Ctrl+Shift+=");
+    assert_eq!(b.label(true), "⇧⌘=");
+    assert_eq!(
+        Action::Settings.default_binding().unwrap().label(false),
+        "Ctrl+,"
+    );
+}
+
+#[test]
+fn the_areas_are_the_binding_editors_groups_in_order() {
+    let names: Vec<&str> = Area::ALL.iter().map(|a| a.name()).collect();
+    assert_eq!(
+        names,
+        ["Browsing", "Search", "Sessions", "Preview", "Appearance"]
+    );
+}
+
+#[test]
+fn no_two_actions_share_a_default_binding() {
+    let map = KeyMap::default();
+    for a in Action::ALL {
+        if let Some(b) = map.binding(a) {
+            assert_eq!(map.bound_to(b), Some(a));
+        }
+    }
+}
+
+#[test]
+fn a_pressed_binding_is_taken_once_by_its_action() {
+    let map = KeyMap::default();
+    assert_eq!(
+        taken(&map, Key::Comma, Key::Comma, CTRL),
+        [Action::Settings]
+    );
+    assert_eq!(
+        taken(&map, Key::Num0, Key::Num0, CTRL_SHIFT),
+        [Action::UiScaleReset]
+    );
+}
+
+#[test]
+fn shift_must_match_so_ctrl_equals_is_not_ui_scale() {
+    let map = KeyMap::default();
+    assert!(taken(&map, Key::Equals, Key::Equals, CTRL).is_empty());
+    assert!(taken(&map, Key::Comma, Key::Comma, CTRL_SHIFT).is_empty());
+}
+
+#[test]
+fn a_shifted_key_matches_by_the_key_pressed_whatever_it_types() {
+    // On a US layout Ctrl+Shift+= types "+" and Ctrl+Shift+- types "_".
+    let map = KeyMap::default();
+    assert_eq!(
+        taken(&map, Key::Plus, Key::Equals, CTRL_SHIFT),
+        [Action::UiScaleUp]
+    );
+    assert_eq!(
+        taken(&map, Key::Minus, Key::Minus, CTRL_SHIFT),
+        [Action::UiScaleDown]
+    );
+}
+
+#[test]
+fn a_rebound_action_answers_to_its_new_keys_and_resets_to_its_default() {
+    let mut map = KeyMap::default();
+    let f2 = Binding::new(Modifiers::NONE, Key::F2);
+    map.set(Action::Settings, f2);
+    assert_eq!(map.binding(Action::Settings), Some(f2));
+    assert!(map.is_changed(Action::Settings));
+    assert_eq!(
+        taken(&map, Key::F2, Key::F2, Modifiers::NONE),
+        [Action::Settings]
+    );
+    assert!(taken(&map, Key::Comma, Key::Comma, CTRL).is_empty());
+    map.reset(Action::Settings);
+    assert!(!map.is_changed(Action::Settings));
+    assert_eq!(
+        taken(&map, Key::Comma, Key::Comma, CTRL),
+        [Action::Settings]
+    );
+}

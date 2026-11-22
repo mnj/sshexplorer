@@ -220,6 +220,7 @@ pub fn switch(on: &mut bool, text: impl Into<String>) -> Switch<'_> {
     Switch {
         on,
         text: text.into(),
+        name: None,
         state: State::Live,
     }
 }
@@ -228,10 +229,18 @@ pub fn switch(on: &mut bool, text: impl Into<String>) -> Switch<'_> {
 pub struct Switch<'a> {
     on: &'a mut bool,
     text: String,
+    name: Option<String>,
     state: State,
 }
 
 impl Switch<'_> {
+    /// What assistive technology calls a switch with no text of its own, such as the
+    /// form row's name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
     pub fn forced(mut self, state: State) -> Self {
         self.state = state;
         self
@@ -249,7 +258,10 @@ impl Widget for Switch<'_> {
             &self.text,
             SWITCH_TRACK,
             SWITCH_TRACK.y / 2.0,
-            |enabled| WidgetInfo::selected(Role::Switch, enabled, on, &self.text),
+            |enabled| {
+                let name = self.name.as_deref().unwrap_or(&self.text);
+                WidgetInfo::selected(Role::Switch, enabled, on, name)
+            },
             |ui, track, s, id| {
                 let c = &t.color;
                 // The knob slides and the track's colour mixes from off to on.

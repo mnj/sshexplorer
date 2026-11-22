@@ -17,6 +17,7 @@
 //!   bundled face in place; the [`Report`] says so.
 
 mod check;
+mod system;
 #[cfg(test)]
 mod tabular;
 #[cfg(test)]
@@ -30,6 +31,7 @@ use egui::epaint::text::{FontTweak, VariationCoords};
 use egui::{FontData, FontDefinitions, FontFamily};
 
 pub use check::{Invalid, tabular_digits, validate};
+pub use system::Installed;
 
 const INTER_REGULAR: &[u8] = include_bytes!("../../fonts/inter/Inter-Regular.ttf");
 const INTER_MEDIUM: &[u8] = include_bytes!("../../fonts/inter/Inter-Medium.ttf");
@@ -473,4 +475,9 @@ pub fn apply(ctx: &egui::Context, choice: &Choice) -> Report {
 /// What became of the font settings on `ctx`, or `None` before fonts are installed.
 pub fn report(ctx: &egui::Context) -> Option<Report> {
     state(ctx).installed.map(|(_, report)| report)
+}
+
+/// Where `ctx` finds installed families ([`set_source`]); no fonts until one is set.
+pub fn source(ctx: &egui::Context) -> Arc<dyn Source> {
+    state(ctx).source
 }

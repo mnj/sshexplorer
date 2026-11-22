@@ -1,18 +1,27 @@
 //! Launches the sshexplorer window. It keeps the system title bar.
 
+use std::sync::Arc;
+
 use sshexplorer::app::{self, App};
+use sshexplorer::settings::Store;
+use sshexplorer::theme::fonts;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("sshexplorer"),
         ..Default::default()
     };
+    let mut app = Store::platform().map_or_else(App::default, App::with_store);
+    let installed = fonts::Installed::load();
     eframe::run_native(
         "sshexplorer",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             app::setup(&cc.egui_ctx);
-            Ok(Box::new(App::default()))
+            fonts::set_source(&cc.egui_ctx, Arc::new(installed));
+            // Before the first frame, so it is drawn in the chosen fonts and scale.
+            app.apply(&cc.egui_ctx);
+            Ok(Box::new(app))
         }),
     )
 }
