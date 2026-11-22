@@ -97,6 +97,12 @@ fn open(h: &mut Harness<'static, App>, name: &str) {
     h.run_ok();
     h.get_by_role_and_label(Role::Button, "Connect").click();
     h.run_ok();
+    // A Session opens in Tree view on its home; Ctrl+2 lists it in Folder view.
+    until(h, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
+    h.key_press_modifiers(CTRL, Key::Num2);
+    h.run_ok();
     until(h, "the listing", |h| {
         h.query_by_label("notes.txt").is_some()
     });
@@ -313,4 +319,30 @@ fn quitting_during_a_download_asks_first() {
         .click();
     h.step();
     assert!(sent(h, &egui::ViewportCommand::Close));
+}
+
+#[test]
+fn in_tree_view_the_selected_directory_is_downloaded() {
+    let fixture = Fixture::start();
+    let mut w = window(&fixture, &["Fixture"]);
+    let h = &mut w.harness;
+    open(h, "Fixture");
+    // Back in Tree view the home directory is focused and selected.
+    h.key_press_modifiers(CTRL, Key::Num1);
+    h.run_ok();
+    until(h, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
+    h.get_by_role_and_label(Role::Row, "tester").click();
+    h.run_ok();
+    h.key_press_modifiers(CTRL, Key::S);
+    h.run_ok();
+    // The whole directory, hidden entries too.
+    until(h, "the finish", |h| has(h, "Downloaded 3 files"));
+    assert_eq!(
+        std::fs::read_to_string(w.local.join("tester/notes.txt")).unwrap(),
+        "notes\n"
+    );
+    assert!(w.local.join("tester/docs").is_dir());
+    assert!(w.local.join("tester/.profile").is_file());
 }

@@ -166,6 +166,11 @@ pub enum Command {
     Open,
     /// Lists the parent.
     Parent,
+    /// Tree view: expands a directory, or moves to the first child of an expanded one.
+    /// Folder view does nothing.
+    Expand,
+    /// Tree view: collapses a directory, or moves to the parent. Folder view does nothing.
+    Collapse,
     /// A typed character of a name prefix.
     Type(char),
     /// A plain click on a line.
@@ -339,6 +344,7 @@ impl Folder {
             }
             Command::Open => return self.open(self.focus),
             Command::Parent => return self.parent(),
+            Command::Expand | Command::Collapse => {}
             Command::Type(c) => self.typed(c, now),
             Command::Click(i) => self.choose(i.min(last)),
             Command::CtrlClick(i) => self.toggle(i.min(last)),
@@ -449,7 +455,8 @@ impl Folder {
     }
 }
 
-fn by_column(column: Column, a: &Entry, b: &Entry) -> Ordering {
+/// How two entries compare by `column`, ties broken by [`natural_cmp`] on the name.
+pub fn by_column(column: Column, a: &Entry, b: &Entry) -> Ordering {
     let key = match column {
         Column::Name => Ordering::Equal,
         Column::Size => a.size.cmp(&b.size),

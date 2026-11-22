@@ -477,11 +477,13 @@ fn a_session_queue_runs_its_downloads_in_order() {
     std::fs::create_dir_all(s.remote("/srv")).unwrap();
     std::fs::write(s.remote("/srv/one.bin"), vec![1u8; 1 << 20]).unwrap();
     s.write("/srv/two.txt", "two");
-    s.fixture.slow_reads(Duration::from_millis(20));
+    let one = s.job("/srv", &["one.bin"], Options::default());
+    let two = s.job("/srv", &["two.txt"], Options::default());
+    s.fixture.slow_reads(Duration::from_millis(50));
 
     let mut queue = Queue::default();
-    queue.push(&s.session, s.job("/srv", &["one.bin"], Options::default()));
-    queue.push(&s.session, s.job("/srv", &["two.txt"], Options::default()));
+    queue.push(&s.session, one);
+    queue.push(&s.session, two);
     assert!(queue.is_busy());
     assert_eq!(queue.queued(), 1);
     assert!(queue.running().is_some());

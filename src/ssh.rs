@@ -336,7 +336,7 @@ impl Session {
         let sftp = self.sftp.clone();
         let wake = self.wake.clone();
         self.runtime.spawn(async move {
-            let listing = list(&sftp, path).await.map_err(|e| e.to_string());
+            let listing = list(&sftp, path).await.map_err(|e| reason(&e));
             let _ = sender.send(listing);
             wake();
         });
@@ -358,17 +358,22 @@ pub type RemoteFile = russh_sftp::client::fs::File;
 impl Remote {
     /// The entries of the directory at the absolute `path`, as [`Session::list`] gives them.
     pub async fn list(&self, path: String) -> Result<Listing, String> {
-        list(&self.sftp, path).await.map_err(|e| reason(&e))
+        list(&self.sftp, path)
+            .await
+            .map_err(|e| operator_reason(&e))
     }
 
     /// The absolute path with every symlink resolved.
     pub async fn canonicalize(&self, path: String) -> Result<String, String> {
-        self.sftp.canonicalize(path).await.map_err(|e| reason(&e))
+        self.sftp
+            .canonicalize(path)
+            .await
+            .map_err(|e| operator_reason(&e))
     }
 
     /// Opens the file at `path` for reading.
     pub async fn open(&self, path: String) -> Result<RemoteFile, String> {
-        self.sftp.open(path).await.map_err(|e| reason(&e))
+        self.sftp.open(path).await.map_err(|e| operator_reason(&e))
     }
 
     /// Up to `len` bytes of the file at `path` from `offset`.
@@ -390,8 +395,9 @@ impl Remote {
     }
 }
 
-/// An SFTP failure as the operator reads it.
-pub fn reason(error: &russh_sftp::client::error::Error) -> String {
+/// An SFTP failure as a Download's Details say it: "No such file", "Permission denied",
+/// or the host's own words.
+fn operator_reason(error: &russh_sftp::client::error::Error) -> String {
     use russh_sftp::client::error::Error;
     use russh_sftp::protocol::StatusCode;
     match error {
@@ -581,6 +587,17 @@ async fn list_folder(
     let folder = if folder.is_empty() { "." } else { folder };
     let path = sftp.canonicalize(folder).await?;
     list(sftp, path).await
+}
+
+/// Why a request failed, as a listing's reason row says it: "permission denied" for a
+/// status from the host, whose own message often only repeats the status.
+fn reason(error: &russh_sftp::client::error::Error) -> String {
+    match error {
+        russh_sftp::client::error::Error::Status(status) => {
+            status.status_code.to_string().to_lowercase()
+        }
+        other => other.to_string(),
+    }
 }
 
 /// The entries of the directory at `path`. A symlink is described by its target, which
