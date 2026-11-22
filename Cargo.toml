@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 # egui and eframe move together. eframe's defaults give the glow renderer, Wayland, X11
 # and AccessKit on Linux, and the native backends on macOS and Windows.
-egui = "0.37"
+# `monochrome_emoji_fonts` puts egui's emoji fonts at the end of every font chain, for
+# the symbols third-party widgets draw (Markdown code blocks' copy button, U+1F5D0).
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 eframe = "0.37"
 # The font reader egui itself uses: validates a font file before egui gets it.
 skrifa = "=0.44.0"
@@ -30,6 +32,12 @@ base64 = "0.22"
 # Source Preview: syntect's default syntaxes and themes with the pure-Rust regex engine
 # (no oniguruma C library), used directly rather than through egui_extras (issue #33).
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# Markdown Preview (issue #34), with code blocks highlighted by syntect. No `load-images`:
+# it installs egui_extras' file loader, which would resolve a remote README's relative
+# images against the local disk. pulldown-cmark, its parser, also replaces each image
+# with its alt text before the viewer sees the text.
+egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark", "better_syntax_highlighting"] }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 # The native folder picker behind Settings → Preview → Scratch folder → Browse….
 rfd = "0.18.0"
 # Traditional encrypted PEM keys (DEK-Info AES-128/256-CBC, DES-EDE3-CBC), which russh

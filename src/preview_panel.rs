@@ -14,7 +14,7 @@ use egui::{EventFilter, Id, Key, Modifiers, Sense};
 use crate::archive::{Listing, Stamp};
 use crate::folder::{modified_text, permissions_text, size_text};
 use crate::keymap::{Action, KeyMap};
-use crate::preview::{self, Body, Focused, Preview, UNSUPPORTED};
+use crate::preview::{self, Body, Focused, MarkdownView, Preview, Text, UNSUPPORTED};
 use crate::scratch::Place;
 use crate::settings::AppSettings;
 use crate::source::Highlighting;
@@ -51,6 +51,8 @@ pub struct PreviewPanel {
     reading: Option<(u64, Request<Vec<u8>>)>,
     /// Rows the text view showed last frame, for paging.
     page: usize,
+    /// The rendered Markdown view's state.
+    markdown: egui_commonmark::CommonMarkCache,
     /// The shown archive listing's rows, made on first draw.
     archive_rows: Option<Vec<String>>,
 }
@@ -67,6 +69,7 @@ impl PreviewPanel {
             preview: Preview::default(),
             reading: None,
             page: 1,
+            markdown: egui_commonmark::CommonMarkCache::default(),
             archive_rows: None,
         }
     }
@@ -162,22 +165,29 @@ impl PreviewPanel {
                     .show(ui);
             }
             Body::Text(text) => {
-                if let Some(banner) = text.fetched.banner() {
-                    ui.add(widgets::warning_message(banner));
+                self.page = text_view(ui, self.id, text, scroll * self.page as f32);
+            }
+            Body::Markdown(markdown) => {
+                let views = [
+                    (MarkdownView::Rendered, "Rendered"),
+                    (MarkdownView::Source, "Source"),
+                ];
+                ui.add(widgets::segmented(&mut markdown.view, &views));
+                ui.add_space(t.space.stack);
+                match markdown.view {
+                    MarkdownView::Source => {
+                        let rows = scroll * self.page as f32;
+                        self.page = text_view(ui, self.id, &mut markdown.text, rows);
+                    }
+                    MarkdownView::Rendered => {
+                        if let Some(banner) = markdown.text.fetched.banner() {
+                            ui.add(widgets::warning_message(banner));
+                        }
+                        let id = self.id.with("markdown");
+                        let rendered = &markdown.rendered;
+                        crate::markdown::show(ui, id, &mut self.markdown, rendered, scroll);
+                    }
                 }
-                if let Some(h) = &mut text.highlighting {
-                    h.poll();
-                }
-                let spans = text.highlighting.as_ref().and_then(|h| h.spans());
-                let line = |i: usize| CodeLine {
-                    text: text.line(i),
-                    spans: spans
-                        .and_then(|s| s.get(i))
-                        .map_or(&[][..], |s| s.as_slice()),
-                };
-                self.page = widgets::code_view(self.id.with("text"), text.line_count(), &line)
-                    .scroll_rows(scroll * self.page as f32)
-                    .show(ui);
             }
         }
         leave
@@ -234,7 +244,7 @@ impl PreviewPanel {
         let Some(shown) = self.preview.shown_mut() else {
             return;
         };
-        let Body::Text(text) = &mut shown.body else {
+        let Some(text) = shown.body.text_mut() else {
             return;
         };
         let Some(syntax) = text.syntax else {
@@ -252,6 +262,27 @@ impl PreviewPanel {
             move || ctx.request_repaint(),
         ));
     }
+}
+
+/// A text's lines under the size cap's banner, scrolled `rows` further. Returns the rows
+/// in view.
+fn text_view(ui: &mut egui::Ui, id: Id, text: &mut Text, rows: f32) -> usize {
+    if let Some(banner) = text.fetched.banner() {
+        ui.add(widgets::warning_message(banner));
+    }
+    if let Some(h) = &mut text.highlighting {
+        h.poll();
+    }
+    let spans = text.highlighting.as_ref().and_then(|h| h.spans());
+    let line = |i: usize| CodeLine {
+        text: text.line(i),
+        spans: spans
+            .and_then(|s| s.get(i))
+            .map_or(&[][..], |s| s.as_slice()),
+    };
+    widgets::code_view(id.with("text"), text.line_count(), &line)
+        .scroll_rows(rows)
+        .show(ui)
 }
 
 /// One row per archive member: size, modified time (in `zone` when the format records
