@@ -16,6 +16,12 @@
 //! view on a directory that no longer exists lists the nearest ancestor that does, with
 //! one line naming the one that went. Each Session refreshes only itself.
 //!
+//! When the connection drops the Session is Disconnected: a strip above the listing says
+//! why and how reconnecting goes ([`Lost`]), the kept listings stay browsable but greyed,
+//! Refresh does nothing and F5 means Reconnect. A reconnect that needs the operator (a
+//! prompt, a changed key) hands over to the same dialogs as opening; one that succeeds
+//! clears the strip and refreshes the Current directory.
+//!
 //! Preview, on the right, shows the Focused entry of either view; Enter on a file and
 //! Tab move the keyboard there.
 
@@ -28,6 +34,7 @@ use egui::{Align, Event, EventFilter, Id, Layout, Sense};
 use crate::download::{self, Queue};
 use crate::download_ui;
 
+use crate::connect::{Outcome, Pending};
 use crate::folder::{
     self, Column, Command, Effect, Folder, Sort, modified_text, permissions_text, size_text,
 };
@@ -35,12 +42,13 @@ use crate::keymap::{Action, KeyMap};
 use crate::kind::Kind;
 use crate::preview::Focused;
 use crate::preview_panel::{Leave, PanelFrame, PreviewPanel};
+use crate::reconnect::Lost;
 use crate::refresh::Timer;
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, ReconnectAttempts};
 use crate::ssh::{self, Entry, Listing, NO_SUCH_FILE, Request, Target};
 use crate::theme::TokensExt as _;
 use crate::tree::{self, Line, Tree};
-use crate::widgets::{self, Glyph, RowLook, Selection, State};
+use crate::widgets::{self, Glyph, RowLook, Selection, State, Tooltip as _};
 
 /// How a Session shows the remote filesystem. The choice belongs to the Session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,6 +118,14 @@ pub struct Session {
     /// The Session's Downloads; dropped, and so cancelled, before the connection.
     downloads: Queue,
     downloads_panel: download_ui::Panel,
+    /// While Disconnected: why, and how reconnecting goes.
+    lost: Option<Lost>,
+    /// The reconnect attempt running.
+    reconnecting: Option<ssh::Opening>,
+    /// A reconnect that needs the operator: a prompt, or a refusal to read.
+    handover: Option<Pending>,
+    /// Directories whose fetch the drop cut short, fetched again on reconnect.
+    refetch: Vec<String>,
     connection: ssh::Session,
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
@@ -149,6 +165,10 @@ impl Session {
             reveal: false,
             downloads: Queue::default(),
             downloads_panel: download_ui::Panel::default(),
+            lost: None,
+            reconnecting: None,
+            handover: None,
+            refetch: Vec::new(),
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
         }
@@ -248,9 +268,10 @@ impl Session {
     }
 
     /// Starts a Refresh, unless one is running: the Current directory, and in Tree view
-    /// every expanded directory below it, fetched again and merged in.
+    /// every expanded directory below it, fetched again and merged in. Nothing while
+    /// Disconnected.
     pub fn refresh(&mut self) {
-        if self.is_refreshing() {
+        if self.is_refreshing() || self.is_disconnected() {
             return;
         }
         match self.view {
@@ -269,6 +290,102 @@ impl Session {
                 });
             }
         }
+    }
+
+    /// Whether the connection has dropped and not come back yet.
+    pub fn is_disconnected(&self) -> bool {
+        self.lost.is_some()
+    }
+
+    /// Why the connection dropped, while Disconnected.
+    pub fn lost_reason(&self) -> Option<&str> {
+        self.lost.as_ref().map(Lost::reason)
+    }
+
+    /// Notices a drop, and runs the reconnect attempts as `attempts` allows. Call it
+    /// every frame, on screen or not; `now` is egui's time. Gives the seconds until the
+    /// strip's countdown next changes, for a repaint.
+    pub fn keep_connected(&mut self, now: f64, attempts: ReconnectAttempts) -> Option<f64> {
+        if self.lost.is_none() {
+            let reason = self.connection.lost()?;
+            self.lost = Some(Lost::new(reason, attempts, now));
+        }
+        if let Some(opening) = self.reconnecting.take() {
+            match opening.try_next() {
+                None => self.reconnecting = Some(opening),
+                Some(ssh::Event::Opened(opened)) => self.reconnected(opened),
+                Some(ssh::Event::Failed(ssh::Failure::Connection(_) | ssh::Failure::Sftp(_))) => {
+                    if let Some(lost) = &mut self.lost {
+                        lost.failed(attempts, now);
+                    }
+                }
+                Some(ssh::Event::Failed(ssh::Failure::Cancelled)) => self.stop_reconnecting(),
+                // A prompt, a changed key or a refused login: the operator takes over.
+                Some(event) => {
+                    self.stop_reconnecting();
+                    let id = self.id.with("reconnect");
+                    let details = self.details.clone();
+                    self.handover = Some(Pending::resume(id, details, opening, event));
+                }
+            }
+        }
+        let lost = self.lost.as_mut()?;
+        if lost.due(now) {
+            self.reconnecting = Some(self.connection.reconnect());
+        }
+        let wait = self.lost.as_ref()?.wait(now)?;
+        // The countdown shows whole seconds.
+        Some(wait.min(wait.fract().max(0.05)))
+    }
+
+    /// Reconnect now, Reconnect, or F5 while Disconnected: an attempt starts at once,
+    /// unless one is running or the operator is being asked.
+    pub fn reconnect_now(&mut self) {
+        if self.reconnecting.is_some() || self.handover.is_some() {
+            return;
+        }
+        if let Some(lost) = &mut self.lost {
+            lost.now();
+            self.reconnecting = Some(self.connection.reconnect());
+        }
+    }
+
+    /// Stop: no more attempts until the operator asks.
+    pub fn stop_reconnecting(&mut self) {
+        // Dropping the attempt cancels whatever it would ask.
+        self.reconnecting = None;
+        if let Some(lost) = &mut self.lost {
+            lost.stop();
+        }
+    }
+
+    /// The connection is back: the strip clears, the Current directory is refreshed and
+    /// the fetches the drop cut short are made again.
+    fn reconnected(&mut self, opened: ssh::Opened) {
+        self.connection = opened.session;
+        self.lost = None;
+        self.reconnecting = None;
+        self.handover = None;
+        let refetch = std::mem::take(&mut self.refetch);
+        self.fetch(refetch);
+        self.refresh();
+    }
+
+    /// Draws the reconnect's prompt, when one needs the operator. Call it every frame.
+    pub fn prompt(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &mut self.handover else {
+            return;
+        };
+        match pending.show(ctx) {
+            Some(Outcome::Opened(opened)) => self.reconnected(opened),
+            Some(Outcome::Ended) => self.handover = None,
+            None => {}
+        }
+    }
+
+    /// Whether the reconnect's prompt is up, which takes the input from the window.
+    pub fn is_asking(&self) -> bool {
+        self.handover.as_ref().is_some_and(Pending::is_modal)
     }
 
     /// Whether a Refresh is running: the toolbar button shows a spinner.
@@ -328,6 +445,8 @@ impl Session {
                 download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel);
             }
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                let attempts = frame.settings.connections.reconnect_attempts;
+                self.lost_strip(ui, now, attempts);
                 ui.add_enabled_ui(!asking, |ui| {
                     let frame = Frame {
                         keys: keys && !asking,
@@ -351,6 +470,40 @@ impl Session {
             &self.downloads,
             &mut self.downloads_panel,
         );
+    }
+
+    /// The strip above the listing while Disconnected: "Connection lost: <reason>", how
+    /// reconnecting goes, and Reconnect now and Stop, or Reconnect once stopped.
+    fn lost_strip(&mut self, ui: &mut egui::Ui, now: f64, attempts: ReconnectAttempts) {
+        let Some(lost) = &self.lost else {
+            return;
+        };
+        let headline = lost.headline();
+        let status = lost.status(now, attempts);
+        let (mut now_clicked, mut stop) = (false, false);
+        ui.horizontal(|ui| {
+            ui.add(widgets::warning_message(&headline));
+            match &status {
+                Some(status) => {
+                    let t = ui.tokens();
+                    ui.label(t.ty.body.rich(status.as_str()).color(t.color.text.muted));
+                    now_clicked = ui.add(widgets::button("Reconnect now").flat()).clicked();
+                    stop = ui.add(widgets::button("Stop").flat()).clicked();
+                }
+                None => {
+                    now_clicked = ui
+                        .add(widgets::button("Reconnect").flat())
+                        .tooltip("Connect again (F5)")
+                        .clicked();
+                }
+            }
+        });
+        if now_clicked {
+            self.reconnect_now();
+        }
+        if stop {
+            self.stop_reconnecting();
+        }
     }
 
     /// The listing in the Session's view.
@@ -440,6 +593,10 @@ impl Session {
         // The Selection is live while the listing holds the keyboard and the window is in
         // front.
         let live = focused && ui.input(|i| i.focused);
+        if self.lost.is_some() {
+            // Kept listings stay browsable while Disconnected, greyed.
+            ui.multiply_opacity(t.opacity.disabled);
+        }
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -793,7 +950,10 @@ impl Session {
         // Preview reloads a Focused file whose size or modified time changed on its own:
         // it compares the merged entry with what it shows on the next frame.
         for (path, answer) in arrived {
-            self.tree.refreshed(&path, answer);
+            // A failure the drop caused leaves the kept listing as it was.
+            if !(answer.is_err() && self.dropped()) {
+                self.tree.refreshed(&path, answer);
+            }
         }
 
         if let Some(answer) = self
@@ -801,6 +961,7 @@ impl Session {
             .as_ref()
             .and_then(|r| r.request.try_take())
             && let Some(FolderRefresh { path, gone, .. }) = self.folder_refresh.take()
+            && !(answer.is_err() && self.dropped())
         {
             self.folder_refreshed(path, gone, answer);
         }
@@ -866,7 +1027,12 @@ impl Session {
                 None => true,
             });
         for (path, answer) in arrived {
-            self.tree.listed(&path, answer);
+            if answer.is_err() && self.dropped() {
+                // Fetched again once the connection is back.
+                self.refetch.push(path);
+            } else {
+                self.tree.listed(&path, answer);
+            }
         }
 
         let Some((request, _)) = &self.listing else {
@@ -883,10 +1049,18 @@ impl Session {
                 self.tree.listed(&listing.path.clone(), Ok(listing.clone()));
                 self.show_folder(listing, focus);
             }
+            // The drop stopped it: Folder view stays where it was.
+            Err(_) if self.dropped() => {}
             Err(reason) => {
                 self.error = Some(format!("Cannot read: {reason}"));
             }
         }
+    }
+
+    /// Whether the connection has dropped, noticed yet or not: a request failing then
+    /// failed because of the drop.
+    fn dropped(&self) -> bool {
+        self.lost.is_some() || self.connection.lost().is_some()
     }
 }
 

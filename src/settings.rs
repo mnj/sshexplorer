@@ -186,12 +186,65 @@ pub struct Connections {
     /// operator's OpenSSH config.
     #[serde(deserialize_with = "lenient_true")]
     pub use_ssh_config: bool,
+    /// How often a Disconnected Session tries to reconnect by itself.
+    #[serde(deserialize_with = "lenient")]
+    pub reconnect_attempts: ReconnectAttempts,
 }
 
 impl Default for Connections {
     fn default() -> Self {
         Connections {
             use_ssh_config: true,
+            reconnect_attempts: ReconnectAttempts::default(),
+        }
+    }
+}
+
+/// How many times a Disconnected Session tries to reconnect before it waits for the
+/// operator.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum ReconnectAttempts {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "3")]
+    Three,
+    #[default]
+    #[serde(rename = "5")]
+    Five,
+    #[serde(rename = "10")]
+    Ten,
+    #[serde(rename = "unlimited")]
+    Unlimited,
+}
+
+impl ReconnectAttempts {
+    /// In the order the Connections page lists them.
+    pub const ALL: [ReconnectAttempts; 5] = [
+        ReconnectAttempts::Off,
+        ReconnectAttempts::Three,
+        ReconnectAttempts::Five,
+        ReconnectAttempts::Ten,
+        ReconnectAttempts::Unlimited,
+    ];
+
+    /// The number of attempts; `None` for no limit.
+    pub fn limit(self) -> Option<u32> {
+        match self {
+            ReconnectAttempts::Off => Some(0),
+            ReconnectAttempts::Three => Some(3),
+            ReconnectAttempts::Five => Some(5),
+            ReconnectAttempts::Ten => Some(10),
+            ReconnectAttempts::Unlimited => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ReconnectAttempts::Off => "Off",
+            ReconnectAttempts::Three => "3",
+            ReconnectAttempts::Five => "5",
+            ReconnectAttempts::Ten => "10",
+            ReconnectAttempts::Unlimited => "Unlimited",
         }
     }
 }

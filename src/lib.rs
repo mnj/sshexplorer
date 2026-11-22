@@ -32,6 +32,7 @@ pub mod markdown;
 pub mod openssh_config;
 pub mod preview;
 pub mod preview_panel;
+pub mod reconnect;
 pub mod refresh;
 pub mod scratch;
 pub mod session;

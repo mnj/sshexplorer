@@ -7,13 +7,18 @@
 //! call to the wake function (`egui::Context::request_repaint` in the app). A question
 //! for the operator (trust this host key? the password?) is an event carrying a prompt;
 //! answering it, or dropping it to cancel, lets the connection go on.
+//!
+//! An open [`Session`] watches its connection: once it drops, by a transport error or
+//! three unanswered keepalives, [`Session::lost`] says why and the frame is woken.
+//! [`Session::reconnect`] opens it again the same way, sending the secrets it logged in
+//! with before asking anything.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use russh::client;
+use russh::client::{self, DisconnectReason};
 use russh::keys::PublicKeyOrCertificate;
 use russh::keys::ssh_key::{Algorithm, PublicKey};
 use russh::{Disconnect, Preferred};
@@ -178,10 +183,16 @@ impl Ssh {
         let out = Events {
             sender,
             wake: self.wake.clone(),
+            watch: Arc::default(),
         };
         let folder = folder.trim().to_owned();
-        self.runtime
-            .spawn(open(target, options, folder, Arc::new(out)));
+        self.runtime.spawn(open(
+            target,
+            options,
+            Some(folder),
+            auth::Held::new(),
+            Arc::new(out),
+        ));
         Opening { events }
     }
 }
@@ -384,9 +395,88 @@ pub struct Session {
     sftp: Arc<SftpSession>,
     runtime: tokio::runtime::Handle,
     wake: Wake,
+    watch: Arc<Watch>,
+    /// How it was opened, to open it again.
+    redial: Arc<Redial>,
+}
+
+/// Why a connection dropped, as the Handler heard it.
+#[derive(Default)]
+struct Watch {
+    reason: Mutex<Option<String>>,
+}
+
+impl Watch {
+    fn set(&self, reason: String) {
+        if let Ok(mut r) = self.reason.lock() {
+            *r = Some(reason);
+        }
+    }
+
+    fn reason(&self) -> Option<String> {
+        self.reason.lock().ok().and_then(|r| r.clone())
+    }
+}
+
+/// What reconnecting needs: where, how, and the secrets that logged in.
+struct Redial {
+    target: Target,
+    options: Options,
+    held: auth::Held,
+}
+
+/// The reason for a drop when the connection gave none.
+const CLOSED: &str = "the host closed the connection";
+
+/// How long [`Session`]'s watch waits between looks at the connection.
+const WATCH_EVERY: Duration = Duration::from_millis(200);
+
+/// A drop as the strip says it.
+fn drop_reason(reason: &DisconnectReason<russh::Error>) -> String {
+    match reason {
+        DisconnectReason::ReceivedDisconnect(_) => CLOSED.into(),
+        DisconnectReason::Error(e) => match e {
+            russh::Error::KeepaliveTimeout => "the host stopped answering".into(),
+            russh::Error::InactivityTimeout => "the connection was idle too long".into(),
+            russh::Error::Disconnect | russh::Error::HUP => CLOSED.into(),
+            russh::Error::IO(io) if io.kind() == std::io::ErrorKind::UnexpectedEof => CLOSED.into(),
+            other => other.to_string(),
+        },
+    }
 }
 
 impl Session {
+    /// Why the connection dropped, once it has: then the Session is Disconnected.
+    pub fn lost(&self) -> Option<String> {
+        self.handle
+            .is_closed()
+            .then(|| self.watch.reason().unwrap_or_else(|| CLOSED.to_owned()))
+    }
+
+    /// Opens the connection again as it was opened, checking the host key again and
+    /// sending the secrets it logged in with (or the stored ones under Remember) before
+    /// asking. Its [`Opened`] lists nothing: the caller refreshes what it shows.
+    pub fn reconnect(&self) -> Opening {
+        let (sender, events) = mpsc::channel();
+        let out = Arc::new(Events {
+            sender,
+            wake: self.wake.clone(),
+            watch: Arc::default(),
+        });
+        let redial = self.redial.clone();
+        self.runtime.spawn(async move {
+            open(
+                redial.target.clone(),
+                redial.options.clone(),
+                None,
+                redial.held.clone(),
+                out,
+            )
+            .await
+        });
+        Opening { events }
+    }
+
     /// The connection's SFTP side, for work that runs on the SSH runtime, such as a
     /// Download. Start that work with [`Session::spawn`].
     pub fn remote(&self) -> Remote {
@@ -427,13 +517,31 @@ impl Session {
     pub fn list(&self, path: String) -> Request<Listing> {
         let (sender, answer) = mpsc::channel();
         let sftp = self.sftp.clone();
+        let handle = self.handle.clone();
         let wake = self.wake.clone();
         self.runtime.spawn(async move {
-            let listing = list(&sftp, path).await.map_err(|e| reason(&e));
-            let _ = sender.send(listing);
+            let listing = list(&sftp, path).await;
+            if let Err(e) = &listing {
+                settle(&handle, e).await;
+            }
+            let _ = sender.send(listing.map_err(|e| reason(&e)));
             wake();
         });
         Request { answer, task: None }
+    }
+}
+
+/// After a request failed other than by the host's answer, waits briefly for the
+/// connection to report that it closed, so that the failure is seen with the drop.
+async fn settle(handle: &client::Handle<HostCheck>, error: &russh_sftp::client::error::Error) {
+    if matches!(error, russh_sftp::client::error::Error::Status(_)) {
+        return;
+    }
+    for _ in 0..20 {
+        if handle.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -549,6 +657,8 @@ impl Drop for Session {
 struct Events {
     sender: mpsc::Sender<Event>,
     wake: Wake,
+    /// Why the connection being opened dropped, once open.
+    watch: Arc<Watch>,
 }
 
 impl Events {
@@ -558,8 +668,14 @@ impl Events {
     }
 }
 
-async fn open(target: Target, options: Options, folder: String, out: Arc<Events>) {
-    let failure = match connect(&target, options, &folder, &out).await {
+async fn open(
+    target: Target,
+    options: Options,
+    folder: Option<String>,
+    held: auth::Held,
+    out: Arc<Events>,
+) {
+    let failure = match connect(&target, options, folder.as_deref(), &held, &out).await {
         Ok(opened) => {
             out.send(Event::Opened(opened));
             return;
@@ -569,26 +685,36 @@ async fn open(target: Target, options: Options, folder: String, out: Arc<Events>
     out.send(Event::Failed(failure));
 }
 
+/// Opens the connection and lists `folder` (an empty one: the home directory); with no
+/// `folder`, as a reconnect does, nothing is listed.
 async fn connect(
     target: &Target,
     options: Options,
-    folder: &str,
+    folder: Option<&str>,
+    held: &auth::Held,
     out: &Arc<Events>,
 ) -> Result<Opened, Failure> {
     let mut handle = dial(target, &options, out).await?;
-    let kept = auth::authenticate(&mut handle, target, &options, out).await?;
+    let logged_in = auth::authenticate(&mut handle, target, &options, held, out).await?;
+    let kept = logged_in.kept;
 
     let sftp = start_sftp(&handle)
         .await
         .map_err(|e| Failure::Sftp(format!("The SFTP subsystem did not start: {e}")))?;
-    let home = list_folder(&sftp, folder).await.map_err(|e| {
-        let folder = if folder.is_empty() {
-            "the home directory"
-        } else {
-            folder
-        };
-        Failure::Sftp(format!("Could not list {folder}: {e}"))
-    })?;
+    let home = match folder {
+        Some(folder) => list_folder(&sftp, folder).await.map_err(|e| {
+            let folder = if folder.is_empty() {
+                "the home directory"
+            } else {
+                folder
+            };
+            Failure::Sftp(format!("Could not list {folder}: {e}"))
+        })?,
+        None => Listing {
+            path: String::new(),
+            entries: Vec::new(),
+        },
+    };
     // Only now, with the Session open, is a newly entered secret kept.
     let mut note = None;
     if let (Some(remember), Some((kind, secret))) = (&options.remember, kept) {
@@ -599,16 +725,44 @@ async fn connect(
             note = Some(credentials::NOT_KEPT.to_owned());
         }
     }
+    let handle = Arc::new(handle);
+    watch(&handle, out.wake.clone());
     Ok(Opened {
         session: Session {
-            handle: Arc::new(handle),
+            handle,
             sftp: Arc::new(sftp),
             runtime: tokio::runtime::Handle::current(),
             wake: out.wake.clone(),
+            watch: out.watch.clone(),
+            redial: Arc::new(Redial {
+                target: target.clone(),
+                options,
+                held: logged_in.used,
+            }),
         },
         home,
         note,
     })
+}
+
+/// Wakes the frame once the connection closes, however it closes. The watch ends then,
+/// or when the Session is dropped.
+fn watch(handle: &Arc<client::Handle<HostCheck>>, wake: Wake) {
+    let handle = Arc::downgrade(handle);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(WATCH_EVERY).await;
+            let Some(handle) = handle.upgrade() else {
+                return;
+            };
+            if handle.is_closed() {
+                // The Handler may still be noting why.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                wake();
+                return;
+            }
+        }
+    });
 }
 
 /// Connects to `target` and checks its host key: everything before logging in.
@@ -796,6 +950,18 @@ impl HostCheck {
 
 impl client::Handler for HostCheck {
     type Error = russh::Error;
+
+    async fn disconnected(
+        &mut self,
+        reason: DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        self.out.watch.set(drop_reason(&reason));
+        (self.out.wake)();
+        match reason {
+            DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            DisconnectReason::Error(e) => Err(e),
+        }
+    }
 
     async fn check_server_key(
         &mut self,
