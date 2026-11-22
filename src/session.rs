@@ -15,6 +15,9 @@
 //! ([`Tree::refreshed`], [`Folder::refreshed`]); the old rows stay until then. Folder
 //! view on a directory that no longer exists lists the nearest ancestor that does, with
 //! one line naming the one that went. Each Session refreshes only itself.
+//!
+//! Preview, on the right, shows the Focused entry of either view; Enter on a file and
+//! Tab move the keyboard there.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +33,8 @@ use crate::folder::{
 };
 use crate::keymap::{Action, KeyMap};
 use crate::kind::Kind;
+use crate::preview::Focused;
+use crate::preview_panel::{Leave, PanelFrame, PreviewPanel};
 use crate::refresh::Timer;
 use crate::settings::AppSettings;
 use crate::ssh::{self, Entry, Listing, NO_SUCH_FILE, Request, Target};
@@ -95,6 +100,10 @@ pub struct Session {
     focus_listing: bool,
     /// The Focused entry moved by key; scroll it into view.
     reveal: bool,
+    /// The Preview panel, dropped before the connection its read uses.
+    preview: PreviewPanel,
+    /// Preview takes the keyboard on the next frame: Enter on a file.
+    focus_preview: bool,
     /// The Session's Downloads; dropped, and so cancelled, before the connection.
     downloads: Queue,
     downloads_panel: download_ui::Panel,
@@ -108,6 +117,7 @@ impl Session {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let sort = Sort::default();
+        let id = Id::NULL.with("sshexplorer-listing").with(n);
         let mut tree = Tree::new(sort, false);
         let fetches = tree
             .open_at(opened.home.clone())
@@ -129,7 +139,9 @@ impl Session {
             refreshed: false,
             notice: None,
             timer: Timer::default(),
-            id: Id::NULL.with("sshexplorer-listing").with(n),
+            id,
+            preview: PreviewPanel::new(id.with("preview")),
+            focus_preview: false,
             focus_listing: true,
             reveal: false,
             downloads: Queue::default(),
@@ -349,6 +361,33 @@ impl Session {
             self.tree.arrange(self.sort, show_hidden);
         }
 
+        let t = ui.tokens();
+        let focused_entry = self.focused();
+        let leave = widgets::splitter(ui, t.space.gap, |ui| {
+            egui::Panel::right(self.id.with("preview-panel"))
+                .resizable(true)
+                .default_size(PREVIEW_WIDTH)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    self.preview.ui(
+                        ui,
+                        PanelFrame {
+                            connection: &self.connection,
+                            focused: focused_entry,
+                            keymap: frame.keymap,
+                            settings: frame.settings,
+                            keys: frame.keys,
+                            zone: &self.zone,
+                        },
+                    )
+                })
+                .inner
+        });
+        // TODO(#31): Tab and Shift+Tab pass through the search field too.
+        if leave != Leave::Stay {
+            ui.memory_mut(|m| m.request_focus(self.id));
+        }
+
         // The listing's focus target sits under the rows, so they still take the pointer.
         let area = ui.available_rect_before_wrap();
         ui.interact(area, self.id, Sense::focusable_noninteractive());
@@ -361,6 +400,7 @@ impl Session {
                 m.set_focus_lock_filter(
                     self.id,
                     EventFilter {
+                        tab: true,
                         horizontal_arrows: true,
                         vertical_arrows: true,
                         ..EventFilter::default()
@@ -368,12 +408,17 @@ impl Session {
                 )
             });
         }
-        let t = ui.tokens();
         let page = ((area.height() / t.row_height()).floor() as usize)
             .saturating_sub(2)
             .max(1);
         let nothing_focused = ui.memory(|m| m.focused().is_none());
         if frame.keys && (focused || nothing_focused) {
+            // TODO(#31): the search field comes between the listing and Preview.
+            let cycle = ui.input_mut(|i| {
+                let next = frame.keymap.take(i, Action::CycleFocus);
+                next | frame.keymap.take(i, Action::CycleFocusBack)
+            });
+            self.focus_preview |= cycle;
             self.keys(ui, frame.keymap, page);
         }
 
@@ -472,6 +517,51 @@ impl Session {
             let now = ui.input(|i| i.time);
             self.apply(command, now);
         }
+        if std::mem::take(&mut self.focus_preview) {
+            ui.memory_mut(|m| m.request_focus(self.preview.id));
+        }
+    }
+
+    /// The Focused entry, as Preview shows it.
+    fn focused(&self) -> Option<Focused> {
+        if self.view == View::Tree {
+            let row = self.tree.row(self.tree.focus()?);
+            return match row.line {
+                tree::Line::Entry {
+                    name, path, entry, ..
+                } => Some(Focused {
+                    path: path.to_owned(),
+                    name: name.to_owned(),
+                    entry: entry.cloned(),
+                }),
+                _ => None,
+            };
+        }
+        if self.folder.is_empty() {
+            return None;
+        }
+        let i = self.folder.focus();
+        let path = self.folder.path();
+        Some(match self.folder.line(i) {
+            folder::Line::Here => Focused {
+                path: path.to_owned(),
+                name: ".".into(),
+                entry: None,
+            },
+            folder::Line::Up => Focused {
+                path: folder::parent(path).map_or_else(|| "/".to_owned(), |(up, _)| up),
+                name: "..".into(),
+                entry: None,
+            },
+            folder::Line::Entry(_) => {
+                let entry = self.folder.entry(i)?.clone();
+                Focused {
+                    path: folder::join(path, &entry.name),
+                    name: entry.name.clone(),
+                    entry: Some(entry),
+                }
+            }
+        })
     }
 
     /// What row `i` of the view shows.
@@ -620,8 +710,7 @@ impl Session {
             View::Tree => match self.tree.apply(command, now) {
                 tree::Effect::None => {}
                 tree::Effect::Fetch(path) => self.fetch(vec![path]),
-                // TODO(#33): Preview takes the keyboard.
-                tree::Effect::Preview => {}
+                tree::Effect::Preview => self.focus_preview = true,
             },
         }
     }
@@ -629,9 +718,10 @@ impl Session {
     fn carry_out(&mut self, effect: Effect) {
         match effect {
             Effect::None => {}
-            Effect::List { path, focus } => self.list(path, focus),
-            // TODO(#33): Preview takes the keyboard.
-            Effect::Preview => {}
+            Effect::List { path, focus } => {
+                self.listing = Some((self.connection.list(path), focus));
+            }
+            Effect::Preview => self.focus_preview = true,
         }
     }
 
@@ -697,11 +787,10 @@ impl Session {
                 }
                 None => true,
             });
+        // Preview reloads a Focused file whose size or modified time changed on its own:
+        // it compares the merged entry with what it shows on the next frame.
         for (path, answer) in arrived {
-            if self.tree.refreshed(&path, answer) {
-                // TODO(#33): Preview reloads the Focused file, whose size or modified
-                // time changed.
-            }
+            self.tree.refreshed(&path, answer);
         }
 
         if let Some(answer) = self
@@ -731,10 +820,7 @@ impl Session {
             Ok(listing) => match gone {
                 None => {
                     self.error = None;
-                    if self.folder.refreshed(listing) {
-                        // TODO(#33): Preview reloads the Focused file, whose size or
-                        // modified time changed.
-                    }
+                    self.folder.refreshed(listing);
                 }
                 Some(gone) => {
                     self.show_folder(listing, None);
@@ -809,6 +895,8 @@ struct FolderRefresh {
     gone: Option<String>,
 }
 
+/// The Preview panel's width when a Session opens.
+const PREVIEW_WIDTH: f32 = 360.0;
 /// What one row shows, in either view.
 struct Shown<'a> {
     /// The entry's name, or a status row's text: the row's AccessKit label.
