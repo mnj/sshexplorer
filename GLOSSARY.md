@@ -48,7 +48,7 @@ Where Preview keeps the bytes it has fetched from a host: in memory, the system 
 _Avoid_: Cache, temp dir
 
 **Selection**:
-The set of entries a Download acts on. It holds one or more entries and may span directories in Tree view.
+The set of entries a Download acts on. It holds one or more entries that share one parent directory. Selecting an entry under a different parent starts a new Selection.
 _Avoid_: Marked entries, checked entries
 
 **Download**:
