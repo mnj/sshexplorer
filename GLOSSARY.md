@@ -76,5 +76,5 @@ An entry whose name a Search found. Opening a Match ends the Search and moves th
 _Avoid_: Hit, result
 
 **Remember**:
-A setting on a saved Host, off by default, that keeps a password or key passphrase for later Sessions of that Host. While it is off, that secret lasts only for the Session that asked for it.
+A setting on a saved Host, off by default, that keeps a password or key passphrase for later Sessions of that Host. While it is off, that secret lasts only for the Session that asked for it. Saving the Host with it off removes the kept secret.
 _Avoid_: Save password, master password
