@@ -245,3 +245,91 @@ fn a_missing_initial_remote_folder_fails_naming_it() {
     assert!(matches!(failure, Failure::Sftp(_)));
     assert!(failure.to_string().contains("/nowhere"), "{failure}");
 }
+
+/// Opens a Session to `fixture`, its key already known.
+fn opened(ssh: &Ssh, fixture: &Fixture) -> sshexplorer::ssh::Opened {
+    let (_dir, path) = known_hosts(&format!("{}\n", fixture.known_hosts_line()));
+    let opening = ssh.open(target(fixture), path);
+    let Event::Password(prompt) = next(&opening) else {
+        panic!("expected the password prompt");
+    };
+    prompt.enter(fixture::PASSWORD.to_string());
+    let Event::Opened(opened) = next(&opening) else {
+        panic!("expected the Session to open");
+    };
+    opened
+}
+
+#[test]
+fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::start();
+    let srv = fixture.root().join("srv");
+    std::fs::create_dir_all(srv.join("www")).unwrap();
+    std::fs::write(srv.join("data.bin"), [0u8; 1234]).unwrap();
+    std::fs::set_permissions(srv.join("data.bin"), std::fs::Permissions::from_mode(0o640)).unwrap();
+    // Relative: the fixture serves its root as `/`, so an absolute target would leave it.
+    std::os::unix::fs::symlink("www", srv.join("site")).unwrap();
+    std::os::unix::fs::symlink("data.bin", srv.join("latest")).unwrap();
+    std::os::unix::fs::symlink("/nowhere", srv.join("dangling")).unwrap();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let woken = wakes.clone();
+    let ssh = Ssh::new(move || {
+        woken.fetch_add(1, Ordering::SeqCst);
+    });
+    let opened = opened(&ssh, &fixture);
+    let before = wakes.load(Ordering::SeqCst);
+
+    let request = opened.session.list("/srv".to_string());
+    let listing = request
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the listing arrives")
+        .expect("the listing succeeds");
+    assert!(
+        wakes.load(Ordering::SeqCst) > before,
+        "the answer wakes the frame"
+    );
+    assert_eq!(listing.path, "/srv");
+    let entry = |name: &str| {
+        listing
+            .entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .clone()
+    };
+    let data = entry("data.bin");
+    assert_eq!(data.size, Some(1234));
+    assert_eq!(data.permissions.map(|p| p & 0o7777), Some(0o640));
+    assert!(data.modified.is_some());
+    assert!(!data.is_dir);
+    assert_eq!(data.link, None);
+    assert!(entry("www").is_dir);
+    let site = entry("site");
+    assert!(site.is_dir, "a link to a directory is followed");
+    assert_eq!(site.link.as_deref(), Some("www"));
+    let latest = entry("latest");
+    assert!(!latest.is_dir);
+    assert_eq!(latest.link.as_deref(), Some("data.bin"));
+    let dangling = entry("dangling");
+    assert!(!dangling.is_dir);
+    assert_eq!(dangling.link.as_deref(), Some("/nowhere"));
+
+    // Listing through the link lists the target's entries.
+    let through = opened
+        .session
+        .list("/srv/site".to_string())
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    assert_eq!(through.path, "/srv/site");
+    assert!(through.entries.is_empty());
+
+    let missing = opened
+        .session
+        .list("/nope".to_string())
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
+    assert!(missing.is_err());
+}

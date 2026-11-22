@@ -112,9 +112,12 @@ impl BindingEditor {
                 .binding(action)
                 .map_or("Unbound".to_owned(), |b| b.label(mac))
         };
-        let clicked = ui
-            .add(widgets::key_chip_button(chip).recording(recording))
-            .clicked();
+        let chip = ui.add(widgets::key_chip_button(chip).recording(recording));
+        // The page scrolls; a chip reached by the keyboard comes into view.
+        if chip.gained_focus() {
+            chip.scroll_to_me(None);
+        }
+        let clicked = chip.clicked();
         if clicked {
             self.stop();
             if !recording {
