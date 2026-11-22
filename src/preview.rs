@@ -12,8 +12,11 @@
 //! "no NUL and valid UTF-8 in the first [`SNIFF`] bytes" for text. Nothing runs on the
 //! host. Text, source and Markdown (shown as its source until it has its own view) are
 //! the kinds with a body so far; other kinds plug in as further [`Body`] variants and
-//! get the same [`Fetched`] bytes with the size cap's result.
+//! get the same [`Fetched`] bytes with the size cap's result. Zip and tar archives show
+//! their [`archive`] listing; they are read whole, so one over the cap is not fetched
+//! and shows [`too_large`].
 
+use crate::archive::{self, Listing};
 use crate::folder::size_text;
 use crate::kind::Kind;
 use crate::scratch::{Kept, Place};
@@ -85,6 +88,10 @@ pub enum Body {
     Unsupported,
     /// One line, such as "Cannot read: permission denied".
     Failed(String),
+    /// An archive's members.
+    Archive(Listing),
+    /// "Too large to preview (2.3 GiB)": a file that is only shown whole, over the cap.
+    TooLarge(String),
 }
 
 /// A fetch that is due: read up to `len` bytes of `path`, and hand the answer to
@@ -225,6 +232,7 @@ impl Preview {
         let body = match kind {
             Kind::Directory => Body::Header,
             Kind::Text | Kind::Source | Kind::Markdown | Kind::Other => Body::Loading,
+            Kind::Archive if archive::may_list(&focused.name) => Body::Loading,
             _ => Body::Unsupported,
         };
         self.shown = Some(Shown {
@@ -253,10 +261,14 @@ impl Preview {
         if shown.started || !matches!(shown.body, Body::Loading) || now - shown.since < DELAY {
             return None;
         }
+        let size = shown.focused.entry.as_ref().and_then(|e| e.size);
+        if let Some(size) = size.filter(|&s| s > cap && shown.kind == Kind::Archive) {
+            shown.body = Body::TooLarge(too_large(size));
+            return None;
+        }
         self.next_id += 1;
         shown.started = true;
         shown.fetch = Some(self.next_id);
-        let size = shown.focused.entry.as_ref().and_then(|e| e.size);
         Some(Fetch {
             id: self.next_id,
             path: shown.focused.path.clone(),
@@ -291,13 +303,24 @@ impl Preview {
         if shown.kind == Kind::Other {
             shown.kind = sniff(&bytes);
         }
+        let total = shown.focused.entry.as_ref().and_then(|e| e.size);
+        let fetched_len = bytes.len() as u64;
+        let capped = total.is_some_and(|t| t > fetched_len);
+        if shown.kind == Kind::Archive {
+            let listed = archive::list(&shown.focused.name, &bytes);
+            shown.body = match (total.filter(|_| capped), listed) {
+                // Sniffed after a capped fetch: only part of it is here.
+                (Some(total), _) => Body::TooLarge(too_large(total)),
+                (None, None) => Body::Unsupported,
+                (None, Some(Ok(listing))) => Body::Archive(listing),
+                (None, Some(Err(_))) => Body::Failed(archive::CORRUPT.to_owned()),
+            };
+            return;
+        }
         if !matches!(shown.kind, Kind::Text | Kind::Source | Kind::Markdown) {
             shown.body = Body::Unsupported;
             return;
         }
-        let total = shown.focused.entry.as_ref().and_then(|e| e.size);
-        let fetched_len = bytes.len() as u64;
-        let capped = total.is_some_and(|t| t > fetched_len);
         let kept = match place.keep(bytes) {
             Ok(kept) => kept,
             Err(e) => {
@@ -403,6 +426,11 @@ pub fn capped_banner(shown: u64, total: u64) -> String {
         short_size(shown),
         short_size(total)
     )
+}
+
+/// "Too large to preview (2.3 GiB)", for a file shown only whole that is over the cap.
+pub fn too_large(total: u64) -> String {
+    format!("Too large to preview ({})", short_size(total))
 }
 
 /// The one line a failed read shows, from the reason [`crate::ssh::Session::read`]

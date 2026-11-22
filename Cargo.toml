@@ -40,6 +40,11 @@ cbc = "0.2.1"
 des = "0.9.0"
 # The Modified column in the operator's time zone. russh-sftp already depends on it.
 jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# Archive Preview: zip and tar listings, `.tar.gz` through flate2 (issue #37). A listing
+# reads the zip central directory without decompressing, so zip needs no codecs.
+zip = { version = "9.8.1", default-features = false }
+tar = "0.4.46"
+flate2 = "1.1.11"
 
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]

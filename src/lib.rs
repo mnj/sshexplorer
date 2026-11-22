@@ -16,6 +16,7 @@
 //!   Auto-refresh.
 
 pub mod app;
+pub mod archive;
 pub mod binding_editor;
 pub mod connect;
 pub mod download;

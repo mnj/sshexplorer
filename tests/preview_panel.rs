@@ -213,6 +213,53 @@ fn a_large_file_shows_the_first_part_under_a_banner() {
 }
 
 #[test]
+fn an_archive_lists_its_members_and_one_over_the_cap_says_it_is_too_large() {
+    use std::io::Write as _;
+
+    let fixture = Fixture::start();
+    let home = fixture.root().join(HOME);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::from_date_and_time(2024, 5, 1, 12, 30, 0).unwrap());
+    writer.start_file("docs/guide.txt", options).unwrap();
+    writer.write_all(b"hello").unwrap();
+    std::fs::write(
+        home.join("bundle.zip"),
+        writer.finish().unwrap().into_inner(),
+    )
+    .unwrap();
+    // Over the 1 MiB cap whatever is inside.
+    std::fs::write(home.join("huge.tgz"), vec![0u8; 2 << 20]).unwrap();
+    std::fs::write(home.join("broken.zip"), b"PK\x03\x04 and then nothing").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = AppSettings::default();
+    settings.preview.size_cap = 1;
+    let mut harness = browsing(&fixture, &dir, settings);
+
+    click_row(&mut harness, "bundle.zip");
+    assert!(detail(&harness, "Kind", "Archive"));
+    until(&mut harness, "the listing", |h| {
+        h.query_by_label_contains("docs/guide.txt").is_some()
+    });
+    assert!(has_label(
+        &harness,
+        "       5 B  2024-05-01 12:30  docs/guide.txt"
+    ));
+
+    click_row(&mut harness, "huge.tgz");
+    until(&mut harness, "the verdict", |h| {
+        has_label(h, "Too large to preview (2 MiB)")
+    });
+    assert!(has_label(&harness, "Download it to open it locally."));
+
+    click_row(&mut harness, "broken.zip");
+    until(&mut harness, "the failure", |h| {
+        has_label(h, "Cannot preview: corrupt archive")
+    });
+}
+
+#[test]
 fn a_file_that_cannot_be_read_shows_one_line() {
     use std::os::unix::fs::PermissionsExt as _;
 
