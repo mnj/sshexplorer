@@ -81,7 +81,7 @@ A zero-copy path exists only for a GPU texture the app already owns: `egui_wgpu:
 - **Audio output, rodio** 0.23.0 (2026-10-11) **and cpal** 0.18.2 (2026-08-16), both MIT/Apache-2.0:
   - `rodio::Decoder` is built over any `Read + Seek + Send + Sync`, with `DecoderBuilder::with_data`, `with_byte_len` and `with_seekable` (`src/decoder/builder.rs`). Its default features include flac, mp3, mp4, vorbis and wav.
   - Playback goes through cpal. On Linux the default `pulseaudio` feature is on. cpal also has ALSA, WASAPI and CoreAudio backends.
-  - The sink handles pause, volume and seeking (`try_seek`).
+  - rodio's `Player` handles pause, volume and seeking (`Player::try_seek`, `src/player.rs:246`).
   - This is the audio path for audio-only files, and the output path under candidate 1.
 - **Video, codec-only crates:** there is no maintained pure-Rust demuxer-plus-decoder that covers the common formats. Codec crates exist, but each needs a separate demuxer (for example `mp4` or `matroska-demuxer`), sync and colour conversion:
   - `openh264` 0.9.10 (2026-11-10, BSD-2): H.264 only. By default it compiles the bundled Cisco source with `cc`. The optional `libloading` feature uses Cisco's prebuilt library instead (README; the patent reasoning is in openh264-rs issue 43).
