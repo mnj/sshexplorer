@@ -64,6 +64,13 @@ jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-sys
 zip = { version = "9.8.1", default-features = false }
 tar = "0.4.46"
 flate2 = "1.1.11"
+# Audio and video Preview (issue #38, decided in docs/adr/0004): GStreamer plays a remote
+# file through an `appsrc` that reads it in ranges over SFTP, hands RGBA video frames to
+# an `appsink`, and owns timing, the sound output, volume and mute. Needs the GStreamer
+# 1.14+ runtime with its base and good plugins (and libav or bad for H.264 and AAC).
+gstreamer = "0.25.4"
+gstreamer-app = "0.25.2"
+gstreamer-video = "0.25.4"
 
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -108,11 +108,13 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomFit,
+    /// Plays or pauses Preview's audio or video while Preview has the keyboard.
+    PlayPause,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -145,6 +147,7 @@ impl Action {
         Action::ZoomIn,
         Action::ZoomOut,
         Action::ZoomFit,
+        Action::PlayPause,
         Action::UiScaleUp,
         Action::UiScaleDown,
         Action::UiScaleReset,
@@ -162,7 +165,7 @@ impl Action {
             | Action::HostDialog
             | Action::CycleFocus
             | Action::CycleFocusBack => Area::Sessions,
-            Action::ZoomIn | Action::ZoomOut | Action::ZoomFit => Area::Preview,
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomFit | Action::PlayPause => Area::Preview,
             Action::MoveUp
             | Action::MoveDown
             | Action::MoveFirst
@@ -228,6 +231,7 @@ impl Action {
             Action::ZoomIn => "Zoom in (or Ctrl+wheel)",
             Action::ZoomOut => "Zoom out (or Ctrl+wheel)",
             Action::ZoomFit => "Zoom to Fit",
+            Action::PlayPause => "Play/Pause (Preview focused)",
         }
     }
 
@@ -277,6 +281,7 @@ impl Action {
             Action::ZoomIn => Binding::new(cmd, Key::Equals),
             Action::ZoomOut => Binding::new(cmd, Key::Minus),
             Action::ZoomFit => Binding::new(cmd, Key::Num0),
+            Action::PlayPause => Binding::new(none, Key::Space),
         })
     }
 }

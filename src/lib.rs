@@ -30,6 +30,8 @@ pub mod keymap;
 pub mod kind;
 pub mod known_hosts;
 pub mod markdown;
+pub mod media;
+pub mod media_view;
 pub mod openssh_config;
 pub mod picture;
 pub mod preview;
