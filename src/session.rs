@@ -9,7 +9,10 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use egui::{Event, EventFilter, Id, Sense};
+use egui::{Align, Event, EventFilter, Id, Layout, Sense};
+
+use crate::download::{self, Queue};
+use crate::download_ui;
 
 use crate::folder::{
     Column, Command, Effect, Folder, Sort, modified_text, permissions_text, size_text,
@@ -56,6 +59,9 @@ pub struct Session {
     focus_listing: bool,
     /// The Focused entry moved by key; scroll it into view.
     reveal: bool,
+    /// The Session's Downloads; dropped, and so cancelled, before the connection.
+    downloads: Queue,
+    downloads_panel: download_ui::Panel,
     connection: ssh::Session,
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
@@ -76,6 +82,8 @@ impl Session {
             id: Id::NULL.with("sshexplorer-listing").with(n),
             focus_listing: true,
             reveal: false,
+            downloads: Queue::default(),
+            downloads_panel: download_ui::Panel::default(),
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
         }
@@ -85,8 +93,90 @@ impl Session {
         &self.details.label
     }
 
-    /// The Folder view of the listed directory.
+    /// Queues a Download of the Selection into the Local folder. Nothing when the
+    /// Selection is empty.
+    pub fn download(&mut self, options: download::Options) {
+        let entries: Vec<ssh::Entry> = (0..self.folder.len())
+            .filter(|i| self.folder.is_selected(*i))
+            .filter_map(|i| self.folder.entry(i).cloned())
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let job = download::Job {
+            dir: self.folder.path().to_owned(),
+            entries,
+            local_folder: self.details.local_folder.clone(),
+            options,
+        };
+        self.downloads.push(&self.connection, job);
+    }
+
+    /// Whether there is a Selection to download.
+    pub fn can_download(&self) -> bool {
+        (0..self.folder.len()).any(|i| self.folder.is_selected(i))
+    }
+
+    /// Whether a Download is running or queued.
+    pub fn is_downloading(&self) -> bool {
+        self.downloads.is_busy()
+    }
+
+    /// Whether a Download waits for the operator to answer a conflict.
+    pub fn needs_attention(&self) -> bool {
+        self.downloads.conflict.is_some()
+    }
+
+    /// Takes what the Downloads have said and starts the next queued one. Call it every
+    /// frame, on screen or not; `now` is egui's time.
+    pub fn poll(&mut self, now: f64) {
+        if self.downloads.poll(&self.connection) {
+            self.downloads_panel.ended(now);
+        }
+    }
+
+    /// The Session: its Folder view, the Download strip along the bottom, and the
+    /// Download prompt, modal to this Session only.
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
+        let ctx = ui.ctx().clone();
+        let now = ui.input(|i| i.time);
+        let strip =
+            download_ui::has_strip(&mut self.downloads, &mut self.downloads_panel, &ctx, now);
+        let asking = self.needs_attention();
+        let area = ui.available_rect_before_wrap();
+        let keys = frame.keys;
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            if strip {
+                download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel);
+            }
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.add_enabled_ui(!asking, |ui| {
+                    let frame = Frame {
+                        keys: keys && !asking,
+                        ..frame
+                    };
+                    self.folder_view(ui, frame);
+                });
+            });
+        });
+        download_ui::conflict(
+            &ctx,
+            self.id.with("conflict"),
+            area,
+            keys,
+            &mut self.downloads,
+            &mut self.downloads_panel,
+        );
+        download_ui::details(
+            &ctx,
+            self.id.with("details"),
+            &self.downloads,
+            &mut self.downloads_panel,
+        );
+    }
+
+    /// The Folder view of the listed directory.
+    fn folder_view(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
         self.receive();
         let show_hidden = frame.settings.browsing.show_hidden;
         if show_hidden != self.show_hidden {

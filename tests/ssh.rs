@@ -333,3 +333,37 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
         .unwrap();
     assert!(missing.is_err());
 }
+
+#[test]
+fn a_session_reads_part_of_a_file_and_says_why_it_cannot() {
+    let fixture = Fixture::start();
+    let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(fixture.root().join("home/tester/data.bin"), &bytes).unwrap();
+    let ssh = Ssh::new(|| {});
+    let opened = opened(&ssh, &fixture);
+    let read = |path: &str, offset: u64, len: usize| {
+        opened
+            .session
+            .read(path.to_string(), offset, len)
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the read answers")
+    };
+
+    assert_eq!(
+        read("/home/tester/notes.txt", 0, 1024),
+        Ok(b"notes\n".to_vec())
+    );
+    assert_eq!(
+        read("/home/tester/data.bin", 70_000, 20_000),
+        Ok(bytes[70_000..90_000].to_vec())
+    );
+    // A read past the end stops at it.
+    assert_eq!(
+        read("/home/tester/data.bin", 99_990, 100),
+        Ok(bytes[99_990..].to_vec())
+    );
+    assert_eq!(
+        read("/home/tester/gone.txt", 0, 10),
+        Err("No such file".to_string())
+    );
+}

@@ -22,7 +22,7 @@ fontdb = "0.24.0"
 # never `ssh-key` directly: russh pins an exact release candidate.
 russh = "0.65.4"
 russh-sftp = "4.0.0"
-tokio = { version = "1.54", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util", "fs"] }
 # Hashed known_hosts entries (`|1|salt|hash`): HMAC-SHA1 of the host name, base64.
 hmac = "0.13"
 sha1 = "0.11"

@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use egui::Id;
+use egui::{Id, LayerId, Order, ViewportCommand};
 
 use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
@@ -19,7 +19,7 @@ use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
 use crate::session::{self, Session};
 use crate::settings::{
-    Animate, AppSettings, Appearance, Browsing, DEFAULT_UI_SCALE, Edge, Store, ThemeChoice,
+    Animate, AppSettings, Appearance, Browsing, DEFAULT_UI_SCALE, Edge, Search, Store, ThemeChoice,
     UI_SCALES,
 };
 use crate::ssh::Ssh;
@@ -129,6 +129,17 @@ pub struct App {
     active: usize,
     ssh: Option<Ssh>,
     next_id: u64,
+    /// "A Download is running. Close anyway?", while it asks.
+    confirm: Option<Closing>,
+    /// The operator confirmed quitting during a Download.
+    quitting: bool,
+}
+
+/// What waits on "A Download is running. Close anyway?".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Closing {
+    Session(usize),
+    Quit,
 }
 
 impl Default for App {
@@ -171,6 +182,8 @@ impl App {
             active: 0,
             ssh: None,
             next_id: 0,
+            confirm: None,
+            quitting: false,
         }
     }
 
@@ -249,7 +262,15 @@ impl App {
         let ctx = ui.ctx().clone();
         self.apply(&ctx);
         let before = self.settings.clone();
-        let modal = self.host_dialog.is_some() || self.pending.iter().any(Pending::is_modal);
+        // Every Session's Downloads go on, on screen or not.
+        let now = ui.input(|i| i.time);
+        for session in &mut self.sessions {
+            session.poll(now);
+        }
+        self.quit_requested(&ctx);
+        let modal = self.host_dialog.is_some()
+            || self.pending.iter().any(Pending::is_modal)
+            || self.confirm.is_some();
         // A binding being recorded takes the keys before any action sees them.
         if let Some(dialog) = &mut self.dialog {
             dialog.keys.record(&ctx, &mut self.settings.keys);
@@ -263,6 +284,7 @@ impl App {
             self.dialog = Some(SettingsDialog::open(&ctx));
         }
         self.dialogs(&ctx);
+        self.confirm_close(&ctx);
         self.settings_dialog(&ctx);
         if self.settings != before {
             self.save();
@@ -273,12 +295,30 @@ impl App {
     /// The toolbar, the tab strip and the active Session; whether the gear was clicked.
     fn window(&mut self, ui: &mut egui::Ui) -> bool {
         let mut hosts = false;
+        let mut download = false;
         let mut open_settings = false;
-        let active = self.sessions.get(self.active).map(|s| &s.details);
+        let session = self.sessions.get(self.active);
+        let active = session.map(|s| &s.details);
+        let can_download = session.is_some_and(Session::can_download);
+        let download_key = self
+            .settings
+            .keys
+            .binding(Action::Download)
+            .map(|b| b.label(cfg!(target_os = "macos")));
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
+                if session.is_some() {
+                    let tip = match &download_key {
+                        Some(key) => format!("Download the Selection ({key})"),
+                        None => "Download the Selection".to_owned(),
+                    };
+                    download = ui
+                        .add_enabled(can_download, widgets::button("Download").flat())
+                        .tooltip(&tip)
+                        .clicked();
+                }
                 if let Some(details) = active {
                     if details.readonly {
                         ui.add(widgets::badge("Readonly"))
@@ -299,6 +339,9 @@ impl App {
         );
         if hosts {
             self.open_host_dialog();
+        }
+        if download {
+            self.download();
         }
         if self.sessions.is_empty() {
             return open_settings;
@@ -346,9 +389,19 @@ impl App {
                     } else {
                         TabKind::Back
                     };
-                    let mut tab = widgets::tab(session.label()).kind(kind).show(ui);
-                    if let Some(tooltip) = &session.details.tooltip {
-                        tab.response = tab.response.tooltip(tooltip);
+                    // A Session off screen whose Download waits for an answer is marked.
+                    let attention = i != self.active && session.needs_attention();
+                    let mut tab = widgets::tab(session.label())
+                        .kind(kind)
+                        .out_of_sync(attention)
+                        .show(ui);
+                    let tooltip = match (&session.details.tooltip, attention) {
+                        (Some(tip), true) => Some(format!("{tip}\n{WAITING}")),
+                        (None, true) => Some(WAITING.to_owned()),
+                        (tip, false) => tip.clone(),
+                    };
+                    if let Some(tooltip) = tooltip {
+                        tab.response = tab.response.tooltip(&tooltip);
                     }
                     if tab.close.is_some_and(|c| c.clicked()) {
                         close = Some(i);
@@ -426,7 +479,86 @@ impl App {
         }
     }
 
+    /// Queues a Download of the active Session's Selection.
+    fn download(&mut self) {
+        let options = crate::download::Options {
+            keep_modified: self.settings.download.keep_modified,
+            keep_executable: self.settings.download.keep_executable,
+            follow_links: self.settings.search.follow_links,
+        };
+        if let Some(session) = self.sessions.get_mut(self.active) {
+            session.download(options);
+        }
+    }
+
+    /// Closes Session `i`, first asking when a Download is running in it.
     fn close(&mut self, i: usize) {
+        if self.sessions.get(i).is_some_and(Session::is_downloading) {
+            self.confirm = Some(Closing::Session(i));
+        } else {
+            self.close_now(i);
+        }
+    }
+
+    /// When the window is asked to close during a Download, holds it open to ask first.
+    fn quit_requested(&mut self, ctx: &egui::Context) {
+        let asked = ctx.input(|i| i.viewport().close_requested());
+        if asked && !self.quitting && self.sessions.iter().any(Session::is_downloading) {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.confirm = Some(Closing::Quit);
+        }
+    }
+
+    /// "A Download is running. Close anyway?"
+    fn confirm_close(&mut self, ctx: &egui::Context) {
+        let Some(closing) = self.confirm else {
+            return;
+        };
+        let id = Id::NULL.with("sshexplorer-close-anyway");
+        let mut answer = None;
+        widgets::scrim(ctx, LayerId::new(Order::Middle, id));
+        let shown = widgets::window(id, "Close anyway?")
+            .closable()
+            .centred()
+            .show(ctx, |ui| {
+                let t = ui.tokens();
+                ui.label(
+                    t.ty.body
+                        .rich("A Download is running. Close anyway?")
+                        .color(t.color.text.primary),
+                );
+                widgets::button_row(ui, |ui| {
+                    if ui.add(widgets::button("Close anyway").danger()).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.add(widgets::button("Cancel")).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if shown.is_some_and(|s| s.close_clicked) || escape {
+            answer = Some(false);
+        }
+        match answer {
+            Some(true) => {
+                self.confirm = None;
+                match closing {
+                    Closing::Session(i) => self.close_now(i),
+                    Closing::Quit => {
+                        // Dropping the Sessions cancels their Downloads.
+                        self.sessions.clear();
+                        self.quitting = true;
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                }
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
+    }
+
+    fn close_now(&mut self, i: usize) {
         if i < self.sessions.len() {
             self.sessions.remove(i);
             self.active = self.active.min(self.sessions.len().saturating_sub(1));
@@ -444,6 +576,7 @@ impl App {
             Action::PreviousSession,
             Action::HostDialog,
             Action::ShowHidden,
+            Action::Download,
         ];
         let [
             settings,
@@ -455,6 +588,7 @@ impl App {
             previous,
             host_dialog,
             hidden,
+            download,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -466,6 +600,7 @@ impl App {
                 Action::PreviousSession,
                 Action::HostDialog,
                 Action::ShowHidden,
+                Action::Download,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
@@ -475,6 +610,9 @@ impl App {
         }
         if close {
             self.close(self.active);
+        }
+        if download {
+            self.download();
         }
         let count = self.sessions.len();
         if count > 0 {
@@ -530,6 +668,7 @@ impl App {
                     appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
                 }
                 Page::Browsing => browsing(ui, &mut settings.browsing),
+                Page::Download => download_page(ui, settings),
                 Page::Keys => editor.ui(ui, &mut settings.keys),
                 _ => {
                     ui.add(widgets::form_name("Nothing to set here yet."));
@@ -539,6 +678,10 @@ impl App {
             match page {
                 Page::Appearance => settings.appearance = Appearance::default(),
                 Page::Browsing => settings.browsing = Browsing::default(),
+                Page::Download => {
+                    settings.download = crate::settings::Download::default();
+                    settings.search.follow_links = Search::default().follow_links;
+                }
                 Page::Keys => {
                     settings.keys.reset_all();
                     editor.stop();
@@ -551,6 +694,9 @@ impl App {
         }
     }
 }
+
+/// The tooltip line of a Session tab whose Download waits for an answer.
+const WAITING: &str = "A Download is waiting for an answer";
 
 const THEMES: [(ThemeChoice, &str); 3] = [
     (ThemeChoice::System, "Follow system"),
@@ -663,6 +809,36 @@ fn browsing(ui: &mut egui::Ui, b: &mut Browsing) {
         widgets::form_row(ui, "Show hidden entries", |ui| {
             ui.add(widgets::switch(&mut b.show_hidden, "").name("Show hidden entries"));
         });
+    });
+}
+
+/// The Download page, with the Follow setting it shares with Search.
+fn download_page(ui: &mut egui::Ui, s: &mut AppSettings) {
+    let switch = |ui: &mut egui::Ui, on: &mut bool, name: &str, hint: Option<&str>| {
+        widgets::form_row(ui, name, |ui| {
+            ui.vertical(|ui| {
+                ui.add(widgets::switch(on, "").name(name));
+                if let Some(hint) = hint {
+                    ui.add(widgets::form_hint(hint));
+                }
+            });
+        });
+    };
+    widgets::form("download").show(ui, |ui| {
+        let d = &mut s.download;
+        switch(ui, &mut d.keep_modified, "Keep modification time", None);
+        switch(
+            ui,
+            &mut d.keep_executable,
+            "Keep executable bit",
+            Some("No effect on Windows"),
+        );
+        switch(
+            ui,
+            &mut s.search.follow_links,
+            "Follow symlinked directories",
+            Some("Shared with Search"),
+        );
     });
 }
 

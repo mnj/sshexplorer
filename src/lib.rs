@@ -5,6 +5,8 @@
 //!   sshexplorer one; `tests/source_scan` enforces it.
 //! - [`app`] is the window: the toolbar and the Sessions as tabs. [`connect`] holds the
 //!   Host dialog and the prompts while a Session opens; [`session`] an open Session.
+//! - [`download`] copies a Selection into the Local folder in the background, and
+//!   [`download_ui`] is its strip and prompts in the Session.
 //! - [`ssh`] is the SSH stack (russh, ADR-0003) on its own runtime, off the frame
 //!   thread; [`known_hosts`] checks host keys against the operator's `known_hosts`.
 //! - [`settings`] holds the app settings saved between runs, and [`keymap`] every key
@@ -13,6 +15,8 @@
 pub mod app;
 pub mod binding_editor;
 pub mod connect;
+pub mod download;
+pub mod download_ui;
 pub mod folder;
 pub mod hosts;
 pub mod icons;
