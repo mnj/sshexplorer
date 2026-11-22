@@ -194,3 +194,54 @@ fn an_unreachable_host_fails_with_the_reason() {
         Event::Failed(Failure::Connection(_))
     ));
 }
+
+/// Opens a Session to the fixture in `folder`, with the key known, and returns what arrives
+/// after the password.
+fn open_in(fixture: &Fixture, folder: &str) -> Event {
+    let (_dir, path) = known_hosts(&format!("{}\n", fixture.known_hosts_line()));
+    let ssh = Ssh::new(|| {});
+    let opening = ssh.open_in(target(fixture), path, folder);
+    let Event::Password(prompt) = next(&opening) else {
+        panic!("expected the password prompt");
+    };
+    prompt.enter(fixture::PASSWORD.to_string());
+    next(&opening)
+}
+
+#[test]
+fn a_session_opens_in_its_initial_remote_folder() {
+    let fixture = Fixture::start();
+    std::fs::write(fixture.root().join("home/tester/docs/plan.txt"), "plan\n").unwrap();
+    // A relative folder is under the home directory.
+    let Event::Opened(opened) = open_in(&fixture, "docs") else {
+        panic!("expected the Session to open");
+    };
+    assert_eq!(opened.home.path, "/home/tester/docs");
+    let names: Vec<&str> = opened
+        .home
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(names, ["plan.txt"]);
+    // An absolute one is itself.
+    let Event::Opened(opened) = open_in(&fixture, "/home") else {
+        panic!("expected the Session to open");
+    };
+    assert_eq!(opened.home.path, "/home");
+    // Empty means the home directory.
+    let Event::Opened(opened) = open_in(&fixture, "") else {
+        panic!("expected the Session to open");
+    };
+    assert_eq!(opened.home.path, fixture::HOME);
+}
+
+#[test]
+fn a_missing_initial_remote_folder_fails_naming_it() {
+    let fixture = Fixture::start();
+    let Event::Failed(failure) = open_in(&fixture, "/nowhere") else {
+        panic!("expected the Session to fail");
+    };
+    assert!(matches!(failure, Failure::Sftp(_)));
+    assert!(failure.to_string().contains("/nowhere"), "{failure}");
+}
