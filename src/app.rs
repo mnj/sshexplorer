@@ -134,6 +134,9 @@ pub struct App {
     /// Where remembered secrets are kept: the OS credential store in the app, a store in
     /// memory unless [`App::credentials_at`] says otherwise.
     credentials: Arc<dyn credentials::Store>,
+    /// Where Preview sends audio: the system's output in the app, nowhere unless
+    /// [`App::audio_out`] says otherwise, so tests need no sound device.
+    audio: crate::media::AudioOut,
     /// Removals from the credential store still running, each answering once.
     forgetting: Vec<mpsc::Receiver<Result<(), credentials::Refused>>>,
     pending: Vec<Pending>,
@@ -199,6 +202,7 @@ impl App {
             host_store: None,
             host_dialog: None,
             credentials: Arc::new(credentials::MemoryStore::default()),
+            audio: crate::media::AudioOut::Silent,
             forgetting: Vec::new(),
             pending: Vec::new(),
             sessions: Vec::new(),
@@ -238,6 +242,13 @@ impl App {
     /// the app, a [`credentials::MemoryStore`] in tests.
     pub fn credentials_at(mut self, store: Arc<dyn credentials::Store>) -> App {
         self.credentials = store;
+        self
+    }
+
+    /// The same app, sending Preview's audio to `out`: the system's output in the app,
+    /// [`crate::media::AudioOut::Silent`] in tests.
+    pub fn audio_out(mut self, out: crate::media::AudioOut) -> App {
+        self.audio = out;
         self
     }
 
@@ -554,6 +565,7 @@ impl App {
                 keymap: &self.settings.keys,
                 settings: &self.settings,
                 keys,
+                audio: self.audio,
             };
             session.ui(ui, frame);
         }

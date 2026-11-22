@@ -120,6 +120,7 @@ pub fn slider(value: &mut f64, range: RangeInclusive<f64>) -> Slider<'_> {
         suffix: String::new(),
         formatter: None,
         text: String::new(),
+        name: String::new(),
         width: None,
         show_value: true,
         state: State::Live,
@@ -137,6 +138,8 @@ pub struct Slider<'a> {
     suffix: String,
     formatter: Option<Formatter<'a>>,
     text: String,
+    /// The screen reader's name when there is no label.
+    name: String,
     width: Option<f32>,
     show_value: bool,
     state: State,
@@ -171,6 +174,12 @@ impl<'a> Slider<'a> {
     /// The label after the value, which also names the slider to a screen reader.
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text = text.into();
+        self
+    }
+
+    /// Names the slider to a screen reader without drawing a label.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -332,7 +341,12 @@ impl Widget for Slider<'_> {
                 response.mark_changed();
             }
             let enabled = ui.is_enabled();
-            response.widget_info(|| WidgetInfo::slider(enabled, value, &self.text));
+            let name = if self.text.is_empty() {
+                &self.name
+            } else {
+                &self.text
+            };
+            response.widget_info(|| WidgetInfo::slider(enabled, value, name));
             ui.ctx().accesskit_node_builder(id, |node| {
                 node.set_min_numeric_value(lo);
                 node.set_max_numeric_value(hi);

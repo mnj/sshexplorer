@@ -98,6 +98,21 @@ pub enum Body {
     Image(Image),
     /// A PDF: the panel renders its pages.
     Pdf(Pdf),
+    /// Audio or video: the panel streams it in ranged reads, whatever its size.
+    Media(Stream),
+}
+
+/// Audio or video to stream: never fetched whole, so exempt from the size cap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stream {
+    pub path: String,
+    /// The file's size, when the host said.
+    pub size: Option<u64>,
+}
+
+/// Whether `kind` streams instead of being fetched.
+pub fn streams(kind: Kind) -> bool {
+    matches!(kind, Kind::Audio | Kind::Video)
 }
 
 /// An image's bytes, fetched whole.
@@ -283,6 +298,7 @@ impl Preview {
             Kind::Directory => Body::Header,
             Kind::Text | Kind::Source | Kind::Markdown | Kind::Other => Body::Loading,
             Kind::Image | Kind::Pdf => Body::Loading,
+            Kind::Audio | Kind::Video => Body::Loading,
             Kind::Archive if archive::may_list(&focused.name) => Body::Loading,
             _ => Body::Unsupported,
         };
@@ -313,6 +329,14 @@ impl Preview {
             return None;
         }
         let size = shown.focused.entry.as_ref().and_then(|e| e.size);
+        if streams(shown.kind) {
+            shown.started = true;
+            shown.body = Body::Media(Stream {
+                path: shown.focused.path.clone(),
+                size,
+            });
+            return None;
+        }
         if let Some(size) = size.filter(|&s| s > cap && whole(shown.kind)) {
             shown.body = Body::TooLarge(too_large(size));
             return None;
@@ -360,6 +384,13 @@ impl Preview {
         let picture = matches!(shown.kind, Kind::Image | Kind::Pdf);
         if let Some(total) = total.filter(|_| capped && picture) {
             shown.body = Body::TooLarge(too_large(total));
+            return;
+        }
+        if streams(shown.kind) {
+            shown.body = Body::Media(Stream {
+                path: shown.focused.path.clone(),
+                size: total,
+            });
             return;
         }
         if picture {

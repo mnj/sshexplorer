@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use sshexplorer::app::{self, App};
 use sshexplorer::credentials;
+use sshexplorer::media;
 use sshexplorer::scratch;
 use sshexplorer::settings::Store;
 use sshexplorer::theme::fonts;
@@ -15,7 +16,8 @@ fn main() -> eframe::Result {
     };
     let mut app = Store::platform()
         .map_or_else(App::default, App::with_store)
-        .credentials_at(Arc::new(credentials::OsStore));
+        .credentials_at(Arc::new(credentials::OsStore))
+        .audio_out(media::AudioOut::Device);
     // Preview files a crash left in the Scratch folder.
     scratch::clear_leftovers(&app.settings().preview);
     let installed = fonts::Installed::load();

@@ -15,6 +15,7 @@ use crate::archive::{Listing, Stamp};
 use crate::folder::{modified_text, permissions_text, size_text};
 use crate::image_view::ImageView;
 use crate::keymap::{Action, KeyMap};
+use crate::media_view::{MediaFrame, MediaView};
 use crate::pdf_view::PdfView;
 use crate::preview::{self, Body, Focused, MarkdownView, Preview, Text, UNSUPPORTED};
 use crate::scratch::Place;
@@ -33,6 +34,8 @@ pub struct PanelFrame<'a> {
     /// Whether the panel may take keys: no dialog is up.
     pub keys: bool,
     pub zone: &'a jiff::tz::TimeZone,
+    /// Where audio and video send their sound.
+    pub audio: crate::media::AudioOut,
 }
 
 /// What the panel asks of its Session after a frame.
@@ -57,6 +60,8 @@ pub struct PreviewPanel {
     image: ImageView,
     /// The shown PDF's renderer, textures, zoom and scroll; new for each preview.
     pdf: PdfView,
+    /// The shown audio or video's playback; new for each preview.
+    media: MediaView,
     /// The rendered Markdown view's state.
     markdown: egui_commonmark::CommonMarkCache,
     /// The shown archive listing's rows, made on first draw.
@@ -77,6 +82,7 @@ impl PreviewPanel {
             page: 1,
             image: ImageView::default(),
             pdf: PdfView::default(),
+            media: MediaView::default(),
             markdown: egui_commonmark::CommonMarkCache::default(),
             archive_rows: None,
         }
@@ -92,6 +98,7 @@ impl PreviewPanel {
             self.reading = None;
             self.image = ImageView::default();
             self.pdf = PdfView::default();
+            self.media = MediaView::default();
             self.archive_rows = None;
         }
         self.receive(&Place::of(&frame.settings.preview));
@@ -135,6 +142,18 @@ impl PreviewPanel {
             ui.memory_mut(|m| m.request_focus(self.id));
         }
 
+        // Whether the keyboard is in Preview (on the panel or one of its controls), or
+        // `None` when nothing has it, as after a click on a control.
+        let inside = ui.memory(|m| m.focused()).map(|id| {
+            id == self.id
+                || ui
+                    .ctx()
+                    .read_response(id)
+                    .is_some_and(|r| area.contains(r.rect.center()))
+        });
+        let toggle =
+            focused && frame.keys && ui.input_mut(|i| frame.keymap.take(i, Action::PlayPause));
+
         let Some(shown) = self.preview.shown_mut() else {
             return leave;
         };
@@ -167,6 +186,19 @@ impl PreviewPanel {
                     shown.body = Body::Failed(line);
                 }
                 self.page = self.pdf.rows();
+            }
+            Body::Media(stream) => {
+                let media = MediaFrame {
+                    connection: frame.connection,
+                    keymap: frame.keys.then_some(frame.keymap),
+                    autoplay: frame.settings.preview.autoplay,
+                    audio: frame.audio,
+                    inside,
+                    toggle,
+                };
+                if let Some(line) = self.media.ui(ui, stream, media) {
+                    shown.body = Body::Failed(line);
+                }
             }
             Body::TooLarge(line) => {
                 ui.add(widgets::warning_message(line.as_str()));
