@@ -16,8 +16,20 @@
 //! view on a directory that no longer exists lists the nearest ancestor that does, with
 //! one line naming the one that went. Each Session refreshes only itself.
 //!
+//! When the connection drops the Session is Disconnected: a strip above the listing says
+//! why and how reconnecting goes ([`Lost`]), the kept listings stay browsable but greyed,
+//! Refresh does nothing and F5 means Reconnect. A reconnect that needs the operator (a
+//! prompt, a changed key) hands over to the same dialogs as opening; one that succeeds
+//! clears the strip and refreshes the Current directory.
+//!
 //! Preview, on the right, shows the Focused entry of either view; Enter on a file and
 //! Tab move the keyboard there.
+//!
+//! A Search (the toolbar's search field, Ctrl+F then Enter) runs from the Current
+//! directory, and its [`Matches`] replace the listing until it is cleared: they focus,
+//! select, preview and download like the listing, and Enter on one ends the Search and
+//! goes there. While it runs, Refresh does nothing; once it has ended, Refresh runs it
+//! again. Auto-refresh waits while Matches show.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,19 +40,23 @@ use egui::{Align, Event, EventFilter, Id, Layout, Sense};
 use crate::download::{self, Queue};
 use crate::download_ui;
 
+use crate::connect::{Outcome, Pending};
 use crate::folder::{
     self, Column, Command, Effect, Folder, Sort, modified_text, permissions_text, size_text,
 };
 use crate::keymap::{Action, KeyMap};
 use crate::kind::Kind;
+use crate::matches::{self, Matches};
 use crate::preview::Focused;
 use crate::preview_panel::{Leave, PanelFrame, PreviewPanel};
+use crate::reconnect::Lost;
 use crate::refresh::Timer;
-use crate::settings::AppSettings;
+use crate::search::{self, How, Query};
+use crate::settings::{AppSettings, ReconnectAttempts};
 use crate::ssh::{self, Entry, Listing, NO_SUCH_FILE, Request, Target};
 use crate::theme::TokensExt as _;
 use crate::tree::{self, Line, Tree};
-use crate::widgets::{self, Glyph, RowLook, Selection, State};
+use crate::widgets::{self, Glyph, RowLook, Selection, State, Tooltip as _};
 
 /// How a Session shows the remote filesystem. The choice belongs to the Session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -112,9 +128,29 @@ pub struct Session {
     /// The Session's Downloads; dropped, and so cancelled, before the connection.
     downloads: Queue,
     downloads_panel: download_ui::Panel,
+    /// While Disconnected: why, and how reconnecting goes.
+    lost: Option<Lost>,
+    /// The reconnect attempt running.
+    reconnecting: Option<ssh::Opening>,
+    /// A reconnect that needs the operator: a prompt, or a refusal to read.
+    handover: Option<Pending>,
+    /// Directories whose fetch the drop cut short, fetched again on reconnect.
+    refetch: Vec<String>,
     connection: ssh::Session,
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
+    /// What the search field holds.
+    search_text: String,
+    /// The Search's Matches, shown in place of the listing, and the Search while it runs.
+    search: Option<Searching>,
+    /// The search field takes the keyboard on the next frame.
+    focus_search: bool,
+}
+
+/// A Search and its Matches. The Search is dropped, and so stopped, when it ends.
+struct Searching {
+    matches: Matches,
+    running: Option<search::Search>,
 }
 
 impl Session {
@@ -151,8 +187,15 @@ impl Session {
             reveal: false,
             downloads: Queue::default(),
             downloads_panel: download_ui::Panel::default(),
+            lost: None,
+            reconnecting: None,
+            handover: None,
+            refetch: Vec::new(),
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
+            search_text: String::new(),
+            search: None,
+            focus_search: false,
         }
     }
 
@@ -177,6 +220,9 @@ impl Session {
 
     /// Whether there is a Selection to download.
     pub fn can_download(&self) -> bool {
+        if let Some(searching) = &self.search {
+            return searching.matches.selection().is_some();
+        }
         match self.view {
             View::Tree => !self.tree.selection().is_empty(),
             View::Folder => (0..self.folder.len()).any(|i| self.folder.is_selected(i)),
@@ -186,6 +232,9 @@ impl Session {
     /// The Selection in the Session's view: the directory its entries share, and the
     /// entries as listed. `None` when nothing is selected.
     fn selection(&self) -> Option<(String, Vec<ssh::Entry>)> {
+        if let Some(searching) = &self.search {
+            return searching.matches.selection();
+        }
         let (dir, entries) = match self.view {
             View::Folder => {
                 let entries = (0..self.folder.len())
@@ -249,10 +298,18 @@ impl Session {
         }
     }
 
-    /// Starts a Refresh, unless one is running: the Current directory, and in Tree view
-    /// every expanded directory below it, fetched again and merged in.
+    /// Starts a Refresh, unless one or a Search is running: the Current directory, and in
+    /// Tree view every expanded directory below it, fetched again and merged in. While
+    /// the Matches of an ended Search show, the Search runs again instead. Nothing while
+    /// Disconnected.
     pub fn refresh(&mut self) {
-        if self.is_refreshing() {
+        if self.is_refreshing() || self.is_searching() || self.is_disconnected() {
+            return;
+        }
+        if let Some(searching) = &self.search {
+            let matches = searching.matches.rerun();
+            let query = matches.query().clone();
+            self.run_search(matches, query);
             return;
         }
         match self.view {
@@ -273,9 +330,393 @@ impl Session {
         }
     }
 
+    /// Whether the connection has dropped and not come back yet.
+    pub fn is_disconnected(&self) -> bool {
+        self.lost.is_some()
+    }
+
+    /// Why the connection dropped, while Disconnected.
+    pub fn lost_reason(&self) -> Option<&str> {
+        self.lost.as_ref().map(Lost::reason)
+    }
+
+    /// Notices a drop, and runs the reconnect attempts as `attempts` allows. Call it
+    /// every frame, on screen or not; `now` is egui's time. Gives the seconds until the
+    /// strip's countdown next changes, for a repaint.
+    pub fn keep_connected(&mut self, now: f64, attempts: ReconnectAttempts) -> Option<f64> {
+        if self.lost.is_none() {
+            let reason = self.connection.lost()?;
+            self.lost = Some(Lost::new(reason, attempts, now));
+        }
+        if let Some(opening) = self.reconnecting.take() {
+            match opening.try_next() {
+                None => self.reconnecting = Some(opening),
+                Some(ssh::Event::Opened(opened)) => self.reconnected(opened),
+                Some(ssh::Event::Failed(ssh::Failure::Connection(_) | ssh::Failure::Sftp(_))) => {
+                    if let Some(lost) = &mut self.lost {
+                        lost.failed(attempts, now);
+                    }
+                }
+                Some(ssh::Event::Failed(ssh::Failure::Cancelled)) => self.stop_reconnecting(),
+                // A prompt, a changed key or a refused login: the operator takes over.
+                Some(event) => {
+                    self.stop_reconnecting();
+                    let id = self.id.with("reconnect");
+                    let details = self.details.clone();
+                    self.handover = Some(Pending::resume(id, details, opening, event));
+                }
+            }
+        }
+        let lost = self.lost.as_mut()?;
+        if lost.due(now) {
+            self.reconnecting = Some(self.connection.reconnect());
+        }
+        let wait = self.lost.as_ref()?.wait(now)?;
+        // The countdown shows whole seconds.
+        Some(wait.min(wait.fract().max(0.05)))
+    }
+
+    /// Reconnect now, Reconnect, or F5 while Disconnected: an attempt starts at once,
+    /// unless one is running or the operator is being asked.
+    pub fn reconnect_now(&mut self) {
+        if self.reconnecting.is_some() || self.handover.is_some() {
+            return;
+        }
+        if let Some(lost) = &mut self.lost {
+            lost.now();
+            self.reconnecting = Some(self.connection.reconnect());
+        }
+    }
+
+    /// Stop: no more attempts until the operator asks.
+    pub fn stop_reconnecting(&mut self) {
+        // Dropping the attempt cancels whatever it would ask.
+        self.reconnecting = None;
+        if let Some(lost) = &mut self.lost {
+            lost.stop();
+        }
+    }
+
+    /// The connection is back: the strip clears, the Current directory is refreshed and
+    /// the fetches the drop cut short are made again.
+    fn reconnected(&mut self, opened: ssh::Opened) {
+        self.connection = opened.session;
+        self.lost = None;
+        self.reconnecting = None;
+        self.handover = None;
+        let refetch = std::mem::take(&mut self.refetch);
+        self.fetch(refetch);
+        self.refresh();
+    }
+
+    /// Draws the reconnect's prompt, when one needs the operator. Call it every frame.
+    pub fn prompt(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &mut self.handover else {
+            return;
+        };
+        match pending.show(ctx) {
+            Some(Outcome::Opened(opened)) => self.reconnected(opened),
+            Some(Outcome::Ended) => self.handover = None,
+            None => {}
+        }
+    }
+
+    /// Whether the reconnect's prompt is up, which takes the input from the window.
+    pub fn is_asking(&self) -> bool {
+        self.handover.as_ref().is_some_and(Pending::is_modal)
+    }
+
     /// Whether a Refresh is running: the toolbar button shows a spinner.
     pub fn is_refreshing(&self) -> bool {
         !self.refreshes.is_empty() || self.folder_refresh.is_some()
+    }
+
+    /// The search field's text.
+    pub fn search_text(&mut self) -> &mut String {
+        &mut self.search_text
+    }
+
+    /// The search field's id, to give it the keyboard.
+    pub fn search_id(&self) -> Id {
+        self.id.with("search")
+    }
+
+    /// Gives the search field the keyboard on the next frame: Ctrl+F.
+    pub fn focus_search(&mut self) {
+        self.focus_search = true;
+    }
+
+    /// Whether the search field takes the keyboard this frame, and forgets it.
+    pub fn take_focus_search(&mut self) -> bool {
+        std::mem::take(&mut self.focus_search)
+    }
+
+    /// Gives the Matches, or the listing, the keyboard: Down from the search field.
+    pub fn focus_listing(&mut self) {
+        self.focus_listing = true;
+    }
+
+    /// Gives Preview the keyboard: Tab from the search field.
+    pub fn focus_preview(&mut self) {
+        self.focus_preview = true;
+    }
+
+    /// The toolbar's search field, and Stop while a Search runs. Enter starts a Search;
+    /// Down moves into the Matches (or the listing), and the cycle keys move on round
+    /// the Session.
+    pub fn search_field(&mut self, ui: &mut egui::Ui, keymap: &KeyMap, settings: &AppSettings) {
+        let id = self.search_id();
+        if self.take_focus_search() {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        if ui.memory(|m| m.has_focus(id)) {
+            let (down, next, back) = ui.input_mut(|i| {
+                (
+                    keymap.take(i, Action::MoveDown),
+                    keymap.take(i, Action::CycleFocus),
+                    keymap.take(i, Action::CycleFocusBack),
+                )
+            });
+            if down || back {
+                self.focus_listing = true;
+                ui.memory_mut(|m| m.surrender_focus(id));
+            } else if next {
+                self.focus_preview = true;
+                ui.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
+        let field = ui
+            .add(
+                widgets::text_field(&mut self.search_text)
+                    .id(id)
+                    .search()
+                    .hint("Search names"),
+            )
+            .accessible_name("Search");
+        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.search(settings);
+            field.request_focus();
+        }
+        if self.is_searching()
+            && ui
+                .add(widgets::button("Stop").flat())
+                .tooltip("Stop the Search")
+                .clicked()
+        {
+            self.stop_search();
+        }
+    }
+
+    /// Starts a Search for the search field's text from the Current directory, stopping
+    /// one that runs. Nothing when the field is empty.
+    pub fn search(&mut self, settings: &AppSettings) {
+        let text = self.search_text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let query = Query {
+            start: self.place(),
+            text: text.to_owned(),
+            follow: settings.search.follow_links,
+            cap: settings.search.match_cap.max(1) as usize,
+        };
+        self.run_search(Matches::new(query.clone()), query);
+    }
+
+    fn run_search(&mut self, matches: Matches, query: Query) {
+        // A Search still running stops as its handle drops.
+        self.search = Some(Searching {
+            matches,
+            running: Some(search::start(&self.connection, query)),
+        });
+    }
+
+    /// Stops the running Search: the toolbar's Stop, or Escape. Its Matches stay.
+    pub fn stop_search(&mut self) {
+        if let Some(running) = self.search.as_ref().and_then(|s| s.running.as_ref()) {
+            running.stop();
+        }
+    }
+
+    /// Whether a Search is running.
+    pub fn is_searching(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.running.is_some())
+    }
+
+    /// Whether Matches show in place of the listing, running or ended.
+    pub fn shows_matches(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Clears the Search and shows the listing again.
+    pub fn clear_search(&mut self) {
+        self.search = None;
+        self.focus_listing = true;
+    }
+
+    /// Takes what the running Search has said.
+    fn receive_search(&mut self) {
+        let Some(searching) = &mut self.search else {
+            return;
+        };
+        let Some(running) = &searching.running else {
+            return;
+        };
+        while let Some(event) = running.try_next() {
+            match event {
+                search::Event::Found(batch) => searching.matches.found(batch),
+                search::Event::Ended(ended) => {
+                    searching.matches.end(ended);
+                    searching.running = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Opens the Match at the absolute `path`, which ends the Search. A directory
+    /// becomes the Current directory and a file is focused in its parent, which is
+    /// fetched first when its kept listing does not list it.
+    fn open_match(&mut self, path: String, is_dir: bool) {
+        self.search = None;
+        self.focus_listing = true;
+        self.reveal = true;
+        let Some((dir, name)) = folder::parent(&path) else {
+            return;
+        };
+        let stale = self
+            .tree
+            .listing(&dir)
+            .is_some_and(|l| !l.entries.iter().any(|e| e.name == name));
+        match self.view {
+            View::Tree => {
+                let mut fetch = self.tree.reveal(&dir, Some(&name));
+                if stale && !fetch.contains(&dir) {
+                    fetch.push(dir);
+                }
+                self.fetch(fetch);
+            }
+            View::Folder if is_dir => self.list(path, None),
+            View::Folder if stale => {
+                self.listing = Some((self.connection.list(dir), Some(name)));
+            }
+            View::Folder => self.list(dir, Some(name)),
+        }
+    }
+
+    /// The Matches in place of the listing: a status line, then one row per Match with
+    /// its path from the start and its kind.
+    fn matches_view(&mut self, ui: &mut egui::Ui, focused: bool, reveal: bool, show_icons: bool) {
+        let Some(searching) = &self.search else {
+            return;
+        };
+        let matches = &searching.matches;
+        let count = matches.len();
+        let counted = if count == 1 {
+            "1 match".to_owned()
+        } else {
+            format!("{count} matches")
+        };
+        let t = ui.tokens();
+        match matches.ended() {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.add(widgets::spinner());
+                    ui.label(t.ty.body.rich(format!("Searching… {counted}")));
+                });
+            }
+            Some(ended) => {
+                match ended.how {
+                    How::Finished => {
+                        ui.label(t.ty.body.rich(counted).color(t.color.text.muted));
+                    }
+                    How::Stopped => {
+                        ui.label(
+                            t.ty.body
+                                .rich(format!("Search stopped. {counted}"))
+                                .color(t.color.text.muted),
+                        );
+                    }
+                    How::Capped => {
+                        ui.add(widgets::warning_message(format!(
+                            "Stopped at {count} matches. Narrow the search."
+                        )));
+                    }
+                    How::Unavailable => {
+                        ui.add(widgets::warning_message(UNAVAILABLE));
+                    }
+                }
+                match ended.unreadable {
+                    0 => {}
+                    1 => {
+                        ui.add(widgets::warning_message("1 directory could not be read"));
+                    }
+                    n => {
+                        ui.add(widgets::warning_message(format!(
+                            "{n} directories could not be read"
+                        )));
+                    }
+                }
+            }
+        }
+        let live = focused && ui.input(|i| i.focused);
+        let mut command = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                widgets::table(self.id.with("matches"))
+                    .columns([widgets::Column::fill(), widgets::Column::auto()])
+                    .show(ui, |table| {
+                        table.header(|h| {
+                            h.text("Path");
+                            h.text("Kind");
+                        });
+                        let focus = matches.focus();
+                        for i in 0..count {
+                            let m = matches.get(i);
+                            let selection = match (matches.is_selected(i), live) {
+                                (false, _) => Selection::None,
+                                (true, true) => Selection::Live,
+                                (true, false) => Selection::Unfocused,
+                            };
+                            let mut look = RowLook::selected(selection);
+                            if focused && Some(i) == focus {
+                                look = look.forced(State::Focus);
+                            }
+                            let kind = Kind::of(matches::name(&m.path), m.is_dir);
+                            let response = table.row_with(look, |row| {
+                                row.ui(|ui| {
+                                    ui.add(widgets::entry_name(&m.path, kind).icon(show_icons));
+                                });
+                                row.muted(if m.is_dir { "Directory" } else { "File" });
+                            });
+                            let label = m.path.clone();
+                            response.ctx.accesskit_node_builder(response.id, |node| {
+                                node.set_label(label);
+                            });
+                            if reveal && Some(i) == focus {
+                                response.scroll_to_me(None);
+                            }
+                            if response.double_clicked() {
+                                command = Some(Command::DoubleClick(i));
+                            } else if response.clicked() {
+                                let m = response.ctx.input(|i| i.modifiers);
+                                command = Some(if m.command {
+                                    Command::CtrlClick(i)
+                                } else if m.shift {
+                                    Command::ShiftClick(i)
+                                } else {
+                                    Command::Click(i)
+                                });
+                            }
+                        }
+                    });
+            });
+        if let Some(command) = command {
+            ui.memory_mut(|m| m.request_focus(self.id));
+            let now = ui.input(|i| i.time);
+            self.apply(command, now);
+        }
     }
 
     /// Switches to `view`, keeping the place, and gives the listing the keyboard.
@@ -330,6 +771,8 @@ impl Session {
                 download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel);
             }
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                let attempts = frame.settings.connections.reconnect_attempts;
+                self.lost_strip(ui, now, attempts);
                 ui.add_enabled_ui(!asking, |ui| {
                     let frame = Frame {
                         keys: keys && !asking,
@@ -355,9 +798,44 @@ impl Session {
         );
     }
 
+    /// The strip above the listing while Disconnected: "Connection lost: <reason>", how
+    /// reconnecting goes, and Reconnect now and Stop, or Reconnect once stopped.
+    fn lost_strip(&mut self, ui: &mut egui::Ui, now: f64, attempts: ReconnectAttempts) {
+        let Some(lost) = &self.lost else {
+            return;
+        };
+        let headline = lost.headline();
+        let status = lost.status(now, attempts);
+        let (mut now_clicked, mut stop) = (false, false);
+        ui.horizontal(|ui| {
+            ui.add(widgets::warning_message(&headline));
+            match &status {
+                Some(status) => {
+                    let t = ui.tokens();
+                    ui.label(t.ty.body.rich(status.as_str()).color(t.color.text.muted));
+                    now_clicked = ui.add(widgets::button("Reconnect now").flat()).clicked();
+                    stop = ui.add(widgets::button("Stop").flat()).clicked();
+                }
+                None => {
+                    now_clicked = ui
+                        .add(widgets::button("Reconnect").flat())
+                        .tooltip("Connect again (F5)")
+                        .clicked();
+                }
+            }
+        });
+        if now_clicked {
+            self.reconnect_now();
+        }
+        if stop {
+            self.stop_reconnecting();
+        }
+    }
+
     /// The listing in the Session's view.
     fn listing_view(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
         self.receive();
+        self.receive_search();
         self.auto_refresh(ui, frame.settings);
         let show_hidden = frame.settings.browsing.show_hidden;
         if show_hidden != self.show_hidden {
@@ -389,9 +867,11 @@ impl Session {
                 })
                 .inner
         });
-        // TODO(#31): Tab and Shift+Tab pass through the search field too.
-        if leave != Leave::Stay {
-            ui.memory_mut(|m| m.request_focus(self.id));
+        // The cycle runs listing, search field, Preview, and round again.
+        match leave {
+            Leave::Stay => {}
+            Leave::Previous => self.focus_search = true,
+            Leave::Back | Leave::Next => ui.memory_mut(|m| m.request_focus(self.id)),
         }
 
         // The listing's focus target sits under the rows, so they still take the pointer.
@@ -418,14 +898,34 @@ impl Session {
             .saturating_sub(2)
             .max(1);
         let nothing_focused = ui.memory(|m| m.focused().is_none());
+        let in_search = ui.memory(|m| m.has_focus(self.search_id()));
+        if frame.keys && self.search.is_some() && (focused || nothing_focused || in_search) {
+            // Escape stops a running Search, and clears one that has ended.
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                if self.is_searching() {
+                    self.stop_search();
+                } else {
+                    self.clear_search();
+                }
+            }
+        }
         if frame.keys && (focused || nothing_focused) {
-            // TODO(#31): the search field comes between the listing and Preview.
-            let cycle = ui.input_mut(|i| {
+            let (next, back) = ui.input_mut(|i| {
                 let next = frame.keymap.take(i, Action::CycleFocus);
-                next | frame.keymap.take(i, Action::CycleFocusBack)
+                (next, frame.keymap.take(i, Action::CycleFocusBack))
             });
-            self.focus_preview |= cycle;
+            self.focus_search |= next;
+            self.focus_preview |= back;
             self.keys(ui, frame.keymap, page);
+        }
+        if self.search.is_some() {
+            let reveal = std::mem::take(&mut self.reveal);
+            let show_icons = frame.settings.appearance.show_icons;
+            self.matches_view(ui, focused, reveal, show_icons);
+            if std::mem::take(&mut self.focus_preview) {
+                ui.memory_mut(|m| m.request_focus(self.preview.id));
+            }
+            return;
         }
 
         if self.view == View::Folder {
@@ -443,6 +943,10 @@ impl Session {
         // The Selection is live while the listing holds the keyboard and the window is in
         // front.
         let live = focused && ui.input(|i| i.focused);
+        if self.lost.is_some() {
+            // Kept listings stay browsable while Disconnected, greyed.
+            ui.multiply_opacity(t.opacity.disabled);
+        }
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -530,6 +1034,20 @@ impl Session {
 
     /// The Focused entry, as Preview shows it.
     fn focused(&self) -> Option<Focused> {
+        if let Some(searching) = &self.search {
+            let matches = &searching.matches;
+            let m = matches.get(matches.focus()?);
+            let name = matches::name(&m.path).to_owned();
+            return Some(Focused {
+                path: matches.absolute(m),
+                name: name.clone(),
+                entry: Some(Entry {
+                    name,
+                    is_dir: m.is_dir,
+                    ..Entry::default()
+                }),
+            });
+        }
         if self.view == View::Tree {
             let row = self.tree.row(self.tree.focus()?);
             return match row.line {
@@ -708,6 +1226,13 @@ impl Session {
     }
 
     fn apply(&mut self, command: Command, now: f64) {
+        if let Some(searching) = &mut self.search {
+            if let matches::Effect::Open(m) = searching.matches.apply(command) {
+                let path = searching.matches.absolute(&m);
+                self.open_match(path, m.is_dir);
+            }
+            return;
+        }
         match self.view {
             View::Folder => {
                 let effect = self.folder.apply(command, now);
@@ -764,14 +1289,14 @@ impl Session {
 
     /// Starts an Auto-refresh when one is due. This only runs while the Session is
     /// shown; a tick is held back while the window is minimized or a Refresh runs.
-    // Once Search exists, a tick is also held back while Matches show.
+    // A tick is also held back while Matches show.
     fn auto_refresh(&mut self, ui: &egui::Ui, settings: &AppSettings) {
         let now = ui.input(|i| i.time);
         if std::mem::take(&mut self.refreshed) {
             self.timer.restart(now);
         }
         let minimized = ui.input(|i| i.viewport().minimized == Some(true));
-        let ready = !minimized && !self.is_refreshing();
+        let ready = !minimized && !self.is_refreshing() && !self.shows_matches();
         let every = settings.browsing.auto_refresh;
         if self.timer.tick(now, every, ready) {
             self.refresh();
@@ -796,7 +1321,10 @@ impl Session {
         // Preview reloads a Focused file whose size or modified time changed on its own:
         // it compares the merged entry with what it shows on the next frame.
         for (path, answer) in arrived {
-            self.tree.refreshed(&path, answer);
+            // A failure the drop caused leaves the kept listing as it was.
+            if !(answer.is_err() && self.dropped()) {
+                self.tree.refreshed(&path, answer);
+            }
         }
 
         if let Some(answer) = self
@@ -804,6 +1332,7 @@ impl Session {
             .as_ref()
             .and_then(|r| r.request.try_take())
             && let Some(FolderRefresh { path, gone, .. }) = self.folder_refresh.take()
+            && !(answer.is_err() && self.dropped())
         {
             self.folder_refreshed(path, gone, answer);
         }
@@ -869,7 +1398,12 @@ impl Session {
                 None => true,
             });
         for (path, answer) in arrived {
-            self.tree.listed(&path, answer);
+            if answer.is_err() && self.dropped() {
+                // Fetched again once the connection is back.
+                self.refetch.push(path);
+            } else {
+                self.tree.listed(&path, answer);
+            }
         }
 
         let Some((request, _)) = &self.listing else {
@@ -886,10 +1420,18 @@ impl Session {
                 self.tree.listed(&listing.path.clone(), Ok(listing.clone()));
                 self.show_folder(listing, focus);
             }
+            // The drop stopped it: Folder view stays where it was.
+            Err(_) if self.dropped() => {}
             Err(reason) => {
                 self.error = Some(format!("Cannot read: {reason}"));
             }
         }
+    }
+
+    /// Whether the connection has dropped, noticed yet or not: a request failing then
+    /// failed because of the drop.
+    fn dropped(&self) -> bool {
+        self.lost.is_some() || self.connection.lost().is_some()
     }
 }
 
@@ -900,6 +1442,9 @@ struct FolderRefresh {
     path: String,
     gone: Option<String>,
 }
+
+/// What the Matches show when the host cannot run a Search.
+pub const UNAVAILABLE: &str = "Search is not available on this host.";
 
 /// The Preview panel's width when a Session opens.
 const PREVIEW_WIDTH: f32 = 360.0;

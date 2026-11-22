@@ -4,7 +4,7 @@ sshexplorer is a Rust crate (`cargo build --release`). Most of it is pure Rust. 
 
 ## Audio and video Preview: GStreamer
 
-Audio and video Preview uses GStreamer 1.14 or later (ADR-0004). The build links against it through pkg-config, so building needs its development files and running needs its runtime.
+Audio and video Preview uses GStreamer 1.14 or later (ADR-0005). The build links against it through pkg-config, so building needs its development files and running needs its runtime.
 
 Elements sshexplorer uses:
 

@@ -23,7 +23,7 @@ use crate::openssh_config::{Config, IdentityAgent};
 use crate::session::{self, Session, View};
 use crate::settings::{
     Animate, AppSettings, Appearance, AutoRefresh, Browsing, Connections, DEFAULT_UI_SCALE, Edge,
-    PreviewSettings, ScratchChoice, Search, Store, ThemeChoice, UI_SCALES,
+    PreviewSettings, ReconnectAttempts, ScratchChoice, Search, Store, ThemeChoice, UI_SCALES,
 };
 use crate::ssh::{self, Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
@@ -338,12 +338,18 @@ impl App {
         let before = self.settings.clone();
         // Every Session's Downloads go on, on screen or not.
         let now = ui.input(|i| i.time);
+        let attempts = self.settings.connections.reconnect_attempts;
         for session in &mut self.sessions {
             session.poll(now);
+            // Reconnecting goes on whether the Session is shown or not.
+            if let Some(wait) = session.keep_connected(now, attempts) {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            }
         }
         self.quit_requested(&ctx);
         let modal = self.host_dialog.is_some()
             || self.pending.iter().any(Pending::is_modal)
+            || self.sessions.iter().any(Session::is_asking)
             || self.confirm.is_some();
         // A binding being recorded takes the keys before any action sees them.
         if let Some(dialog) = &mut self.dialog {
@@ -373,25 +379,27 @@ impl App {
         let mut open_settings = false;
         let mut dismiss = false;
         let session = self.sessions.get(self.active);
+        let has_session = session.is_some();
         let can_download = session.is_some_and(Session::can_download);
         let download_key = self
             .settings
             .keys
             .binding(Action::Download)
             .map(|b| b.label(cfg!(target_os = "macos")));
-        let active = self.sessions.get(self.active).map(|s| &s.details);
+        let active = self.sessions.get(self.active).map(|s| s.details.clone());
         // The active Session's view and place; the view the switch picks.
-        let place = self
-            .sessions
-            .get(self.active)
-            .map(|s| (s.view(), s.place(), s.is_refreshing()));
+        let place = self.sessions.get(self.active).map(|s| {
+            let busy = s.is_searching() || s.is_disconnected();
+            (s.view(), s.place(), s.is_refreshing(), busy)
+        });
+        let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
         let mut picked = None;
         let mut refresh = false;
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
-                if session.is_some() {
+                if has_session {
                     let tip = match &download_key {
                         Some(key) => format!("Download the Selection ({key})"),
                         None => "Download the Selection".to_owned(),
@@ -401,14 +409,14 @@ impl App {
                         .tooltip(&tip)
                         .clicked();
                 }
-                if let Some((view, place, refreshing)) = &place {
+                if let Some((view, place, refreshing, searching)) = &place {
                     let mut choice = *view;
                     let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
                     if ui.add(widgets::segmented(&mut choice, &views)).changed() {
                         picked = Some(choice);
                     }
                     refresh = ui
-                        .add_enabled(!refreshing, widgets::button("Refresh").flat())
+                        .add_enabled(!refreshing && !searching, widgets::button("Refresh").flat())
                         .tooltip("Fetch the listing again")
                         .clicked();
                     if *refreshing {
@@ -417,7 +425,10 @@ impl App {
                     ui.label(ui.tokens().ty.body.rich(place.as_str()))
                         .tooltip("Current directory");
                 }
-                if let Some(details) = active {
+                if let Some(session) = sessions.get_mut(index) {
+                    session.search_field(ui, &settings.keys, settings);
+                }
+                if let Some(details) = &active {
                     if details.readonly {
                         ui.add(widgets::badge("Readonly"))
                             .tooltip("This Session cannot change the remote filesystem");
@@ -512,12 +523,16 @@ impl App {
                     let mut tab = widgets::tab(session.label())
                         .kind(kind)
                         .out_of_sync(attention)
+                        .disconnected(session.is_disconnected())
                         .show(ui);
-                    let tooltip = match (&session.details.tooltip, attention) {
-                        (Some(tip), true) => Some(format!("{tip}\n{WAITING}")),
-                        (None, true) => Some(WAITING.to_owned()),
-                        (tip, false) => tip.clone(),
-                    };
+                    let mut lines: Vec<String> = session.details.tooltip.iter().cloned().collect();
+                    if attention {
+                        lines.push(WAITING.to_owned());
+                    }
+                    if let Some(reason) = session.lost_reason() {
+                        lines.push(format!("Disconnected: {reason}"));
+                    }
+                    let tooltip = (!lines.is_empty()).then(|| lines.join("\n"));
                     if let Some(tooltip) = tooltip {
                         tab.response = tab.response.tooltip(&tooltip);
                     }
@@ -636,6 +651,10 @@ impl App {
                 }
                 None => i += 1,
             }
+        }
+        // A reconnect that needs the operator asks whether its Session is shown or not.
+        for session in &mut self.sessions {
+            session.prompt(ctx);
         }
     }
 
@@ -759,6 +778,7 @@ impl App {
             Action::TreeView,
             Action::FolderView,
             Action::Refresh,
+            Action::Search,
         ];
         let [
             settings,
@@ -774,6 +794,7 @@ impl App {
             tree_view,
             folder_view,
             refresh,
+            search,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -789,6 +810,7 @@ impl App {
                 Action::TreeView,
                 Action::FolderView,
                 Action::Refresh,
+                Action::Search,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
@@ -804,7 +826,15 @@ impl App {
                 session.set_view(View::Folder);
             }
             if refresh {
-                session.refresh();
+                // F5 means Reconnect while Disconnected.
+                if session.is_disconnected() {
+                    session.reconnect_now();
+                } else {
+                    session.refresh();
+                }
+            }
+            if search {
+                session.focus_search();
             }
         }
         if close {
@@ -871,9 +901,7 @@ impl App {
                 Page::Download => download_page(ui, settings),
                 Page::Keys => editor.ui(ui, &mut settings.keys),
                 Page::Connections => connections(ui, &mut settings.connections),
-                _ => {
-                    ui.add(widgets::form_name("Nothing to set here yet."));
-                }
+                Page::Search => search_page(ui, &mut settings.search),
             });
         if shown.reset {
             match page {
@@ -885,11 +913,11 @@ impl App {
                     settings.search.follow_links = Search::default().follow_links;
                 }
                 Page::Connections => settings.connections = Connections::default(),
+                Page::Search => settings.search = Search::default(),
                 Page::Keys => {
                     settings.keys.reset_all();
                     editor.stop();
                 }
-                _ => {}
             }
         }
         if shown.close {
@@ -1069,6 +1097,30 @@ fn preview(ui: &mut egui::Ui, p: &mut PreviewSettings) {
     });
 }
 
+/// The Search page, with the Follow setting it shares with Download.
+fn search_page(ui: &mut egui::Ui, s: &mut Search) {
+    widgets::form("search").show(ui, |ui| {
+        widgets::form_row(ui, "Follow symlinked directories", |ui| {
+            ui.vertical(|ui| {
+                ui.add(
+                    widgets::switch(&mut s.follow_links, "").name("Follow symlinked directories"),
+                );
+                ui.add(widgets::form_hint("Shared with Download"));
+            });
+        });
+        widgets::form_row(ui, "Match cap", |ui| {
+            let mut cap = i64::from(s.match_cap);
+            ui.add(
+                widgets::stepper_field(&mut cap, 1..=1_000_000)
+                    .step(100)
+                    .suffix("matches"),
+            )
+            .accessible_name("Match cap");
+            s.match_cap = u32::try_from(cap.max(1)).unwrap_or(s.match_cap);
+        });
+    });
+}
+
 /// The Download page, with the Follow setting it shares with Search.
 fn download_page(ui: &mut egui::Ui, s: &mut AppSettings) {
     let switch = |ui: &mut egui::Ui, on: &mut bool, name: &str, hint: Option<&str>| {
@@ -1104,6 +1156,20 @@ fn connections(ui: &mut egui::Ui, c: &mut Connections) {
     widgets::form("connections").show(ui, |ui| {
         widgets::form_row(ui, "Use ~/.ssh/config", |ui| {
             ui.add(widgets::switch(&mut c.use_ssh_config, "").name("Use ~/.ssh/config"));
+        });
+        widgets::form_row(ui, "Reconnect attempts", |ui| {
+            widgets::dropdown("reconnect-attempts", c.reconnect_attempts.name())
+                .name("Reconnect attempts")
+                .show(ui, |ui| {
+                    for attempts in ReconnectAttempts::ALL {
+                        widgets::choice_value(
+                            ui,
+                            &mut c.reconnect_attempts,
+                            attempts,
+                            attempts.name(),
+                        );
+                    }
+                });
         });
     });
 }

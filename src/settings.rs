@@ -40,12 +40,27 @@ pub struct AppSettings {
 }
 
 /// The Search page. Its Follow symlinked directories is shared with Download.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Search {
     /// "Follow symlinked directories", for Search and Download alike. Off by default.
     #[serde(deserialize_with = "lenient")]
     pub follow_links: bool,
+    /// The match cap: a Search stops once it has found this many. At least 1.
+    #[serde(deserialize_with = "match_cap")]
+    pub match_cap: u32,
+}
+
+/// The match cap a new install and a reset have.
+pub const DEFAULT_MATCH_CAP: u32 = 1000;
+
+impl Default for Search {
+    fn default() -> Self {
+        Search {
+            follow_links: false,
+            match_cap: DEFAULT_MATCH_CAP,
+        }
+    }
 }
 
 /// The Download page. It also shows [`Search::follow_links`].
@@ -186,12 +201,65 @@ pub struct Connections {
     /// operator's OpenSSH config.
     #[serde(deserialize_with = "lenient_true")]
     pub use_ssh_config: bool,
+    /// How often a Disconnected Session tries to reconnect by itself.
+    #[serde(deserialize_with = "lenient")]
+    pub reconnect_attempts: ReconnectAttempts,
 }
 
 impl Default for Connections {
     fn default() -> Self {
         Connections {
             use_ssh_config: true,
+            reconnect_attempts: ReconnectAttempts::default(),
+        }
+    }
+}
+
+/// How many times a Disconnected Session tries to reconnect before it waits for the
+/// operator.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum ReconnectAttempts {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "3")]
+    Three,
+    #[default]
+    #[serde(rename = "5")]
+    Five,
+    #[serde(rename = "10")]
+    Ten,
+    #[serde(rename = "unlimited")]
+    Unlimited,
+}
+
+impl ReconnectAttempts {
+    /// In the order the Connections page lists them.
+    pub const ALL: [ReconnectAttempts; 5] = [
+        ReconnectAttempts::Off,
+        ReconnectAttempts::Three,
+        ReconnectAttempts::Five,
+        ReconnectAttempts::Ten,
+        ReconnectAttempts::Unlimited,
+    ];
+
+    /// The number of attempts; `None` for no limit.
+    pub fn limit(self) -> Option<u32> {
+        match self {
+            ReconnectAttempts::Off => Some(0),
+            ReconnectAttempts::Three => Some(3),
+            ReconnectAttempts::Five => Some(5),
+            ReconnectAttempts::Ten => Some(10),
+            ReconnectAttempts::Unlimited => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ReconnectAttempts::Off => "Off",
+            ReconnectAttempts::Three => "3",
+            ReconnectAttempts::Five => "5",
+            ReconnectAttempts::Ten => "10",
+            ReconnectAttempts::Unlimited => "Unlimited",
         }
     }
 }
@@ -351,6 +419,15 @@ fn size_cap<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         .as_integer()
         .filter(|n| (1..=i64::from(u32::MAX)).contains(n))
         .map_or(DEFAULT_SIZE_CAP, |n| n as u32))
+}
+
+/// A match cap: a whole number from 1, or the default.
+fn match_cap<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let value = toml::Value::deserialize(d)?;
+    Ok(value
+        .as_integer()
+        .filter(|n| (1..=i64::from(u32::MAX)).contains(n))
+        .map_or(DEFAULT_MATCH_CAP, |n| n as u32))
 }
 
 /// A UI scale: the nearest step, or the default when it is not a number.

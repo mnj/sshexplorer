@@ -64,7 +64,7 @@ jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-sys
 zip = { version = "9.8.1", default-features = false }
 tar = "0.4.46"
 flate2 = "1.1.11"
-# Audio and video Preview (issue #38, decided in docs/adr/0004): GStreamer plays a remote
+# Audio and video Preview (issue #38, decided in docs/adr/0005): GStreamer plays a remote
 # file through an `appsrc` that reads it in ranges over SFTP, hands RGBA video frames to
 # an `appsink`, and owns timing, the sound output, volume and mute. Needs the GStreamer
 # 1.14+ runtime with its base and good plugins (and libav or bad for H.264 and AAC).
@@ -88,6 +88,8 @@ egui_kittest = "0.37"
 tempfile = "3.27"
 # The test SSH agent (tests/auth.rs) is russh's agent server, which takes a Stream.
 futures = "0.3.34"
+# The test server runs a Search's `find` as a child process (tests/common/fixture.rs).
+tokio = { version = "1.54", features = ["process"] }
 
 [lints.rust]
 unsafe_code = "forbid"

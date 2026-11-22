@@ -1,5 +1,5 @@
 //! Audio and video playback for Preview, apart from egui's widgets: GStreamer plays a
-//! file from any seekable reader (ADR-0004).
+//! file from any seekable reader (ADR-0005).
 //!
 //! A [`Player`] opens paused. Once it is [`Phase::Ready`] a video's first frame is
 //! waiting in [`Player::take_frame`] and an audio file has none. Play, pause, seek,

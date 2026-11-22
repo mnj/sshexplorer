@@ -594,6 +594,8 @@ pub struct Pending {
     /// What the Session takes from its Host once it is open.
     pub details: Details,
     opening: ssh::Opening,
+    /// An event already taken from `opening`, handled before the next.
+    first: Option<Event>,
     prompt: Option<Prompt>,
     /// What is typed into the secret dialog: one entry per field.
     answers: Vec<String>,
@@ -626,20 +628,34 @@ impl Pending {
             id,
             details,
             opening,
+            first: None,
             prompt: None,
             answers: Vec::new(),
         }
     }
 
+    /// An opening, such as a reconnect, whose `first` event needs the operator: it was
+    /// taken from `opening` before the operator was asked.
+    pub fn resume(id: Id, details: Details, opening: ssh::Opening, first: Event) -> Self {
+        Pending {
+            first: Some(first),
+            ..Pending::new(id, details, opening)
+        }
+    }
+
     /// Whether it is showing a dialog, which takes the input from the window.
     pub fn is_modal(&self) -> bool {
-        self.prompt.is_some()
+        self.prompt.is_some() || self.first.is_some()
     }
 
     /// Takes in what arrived and draws the prompt, if any, for one frame.
     pub fn show(&mut self, ctx: &Context) -> Option<Outcome> {
         if self.prompt.is_none() {
-            match self.opening.try_next()? {
+            let event = match self.first.take() {
+                Some(event) => event,
+                None => self.opening.try_next()?,
+            };
+            match event {
                 Event::TrustHostKey(prompt) => self.prompt = Some(Prompt::Trust(prompt)),
                 Event::Password(prompt) => {
                     self.answers = vec![String::new()];
