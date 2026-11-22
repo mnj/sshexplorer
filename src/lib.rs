@@ -16,8 +16,10 @@
 //!   Auto-refresh.
 
 pub mod app;
+pub mod archive;
 pub mod binding_editor;
 pub mod connect;
+pub mod credentials;
 pub mod download;
 pub mod download_ui;
 pub mod folder;
@@ -26,6 +28,7 @@ pub mod icons;
 pub mod keymap;
 pub mod kind;
 pub mod known_hosts;
+pub mod markdown;
 pub mod matches;
 pub mod openssh_config;
 pub mod preview;

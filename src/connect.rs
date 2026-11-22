@@ -4,8 +4,9 @@
 //! The Host dialog lists the saved Hosts, New Host and Unsaved Session on the left, and
 //! the picked entry's fields on the right. Up and Down pick an entry, Enter opens a
 //! Session, and Escape, the close control or a backdrop click dismisses it. Save and
-//! Delete change the saved Hosts and keep the dialog open. Remember is kept on the Host
-//! but nothing is remembered yet. An empty Port, Account or Key file shows what the
+//! Delete change the saved Hosts and keep the dialog open; a save or delete that drops
+//! a remembered secret says which entries to remove from the credential store, and the
+//! dialog says when the store did not remove one. An empty Port, Account or Key file shows what the
 //! OpenSSH config gives the Address typed, and a filled Port or Account that differs
 //! from it says so under the field.
 //! Each Session being opened is a [`Pending`], which polls its [`ssh::Opening`] once a
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 
 use egui::{Context, Id, Key, LayerId, Order};
 
+use crate::credentials::{self, Kind};
 use crate::hosts::{self, AuthMethod, Host, PasteError};
 use crate::openssh_config::{CONFIG_NAME, Config, HostFields, NeedsProxy, Resolved};
 use crate::session::{self, Details};
@@ -84,6 +86,7 @@ enum Entry {
 
 /// The fields as typed, for the entry picked.
 struct Fields {
+    id: String,
     display_name: String,
     address: String,
     port: String,
@@ -99,6 +102,7 @@ struct Fields {
 impl Fields {
     fn of(host: &Host) -> Fields {
         Fields {
+            id: host.id.clone(),
             display_name: host.display_name.clone(),
             address: host.address.clone(),
             port: host.port.map(|p| p.to_string()).unwrap_or_default(),
@@ -115,6 +119,7 @@ impl Fields {
     /// The Host the fields describe, with a valid port or none.
     fn host(&self) -> Host {
         Host {
+            id: self.id.clone(),
             display_name: self.display_name.trim().to_owned(),
             address: self.address.trim().to_owned(),
             port: hosts::port_value(&self.port).ok().flatten(),
@@ -138,11 +143,15 @@ pub struct HostDialog {
     /// Why pasted text stayed in Address, since focus last left it.
     pasted: Vec<PasteError>,
     shown_before: bool,
+    /// Credential store entries the last save or delete dropped, for the app to remove.
+    forgotten: Vec<credentials::Key>,
+    /// Why a kept secret may still be in the store.
+    notice: Option<String>,
 }
 
 /// What the operator did in the Host dialog.
 pub enum HostAction {
-    Open(OpenRequest),
+    Open(Box<OpenRequest>),
     /// A Host was saved or deleted: the list is to be written out.
     Changed,
     Dismiss,
@@ -154,6 +163,8 @@ pub struct OpenRequest {
     host: Host,
     /// Whether the tab takes the display name: a saved Host or a named New Host.
     named: bool,
+    /// The saved Host's id, when it remembers its secret.
+    remember: Option<String>,
 }
 
 /// A Session to open, once the OpenSSH config is applied to its request.
@@ -164,6 +175,8 @@ pub struct Plan {
     pub folder: String,
     /// The Host's Authentication method.
     pub auth: AuthMethod,
+    /// The saved Host's id, when it remembers its secret.
+    pub remember: Option<String>,
     pub details: Details,
 }
 
@@ -204,12 +217,14 @@ impl OpenRequest {
             resolved,
             folder: host.initial_folder.clone(),
             auth: host.auth,
+            remember: self.remember,
             details: Details {
                 label,
                 tooltip,
                 readonly: host.readonly,
                 local_folder: host.local_folder,
                 note: config.note(),
+                dismissible: None,
             },
         }
     }
@@ -234,11 +249,37 @@ impl HostDialog {
             config,
             pasted: Vec::new(),
             shown_before: false,
+            forgotten: Vec::new(),
+            notice: None,
         };
         if !hosts.is_empty() {
             dialog.pick(Entry::Saved(0), hosts);
         }
         dialog
+    }
+
+    /// The credential store entries that the saves and deletes since the last call
+    /// dropped: the app removes them, off the frame thread.
+    pub fn take_forgotten(&mut self) -> Vec<credentials::Key> {
+        std::mem::take(&mut self.forgotten)
+    }
+
+    /// Shows `text` under the buttons, such as "did not remove the saved secret".
+    pub fn set_notice(&mut self, text: impl Into<String>) {
+        self.notice = Some(text.into());
+    }
+
+    /// Notes the entries that saving `old` as `new` (or deleting it) drops.
+    fn forget(&mut self, old: &Host, new: Option<&Host>) {
+        let kinds: Vec<Kind> = credentials::forgotten(old, new);
+        if old.id.is_empty() {
+            return;
+        }
+        self.forgotten.extend(
+            kinds
+                .into_iter()
+                .map(|kind| credentials::Key::new(old.id.clone(), kind)),
+        );
     }
 
     /// Picks `entry` and shows its fields; unsaved changes to the last one are dropped.
@@ -340,6 +381,9 @@ impl HostDialog {
                             clicked = Some(Clicked::Delete);
                         }
                     });
+                    if let Some(notice) = &self.notice {
+                        ui.add(widgets::warning_message(notice.as_str()));
+                    }
                 });
             });
         });
@@ -352,11 +396,17 @@ impl HostDialog {
         }
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
         match clicked {
-            Some(Clicked::Open) => return Some(HostAction::Open(self.request())),
+            Some(Clicked::Open) => return Some(HostAction::Open(Box::new(self.request(hosts)))),
             Some(Clicked::Save) => {
+                if self.fields.id.is_empty() {
+                    self.fields.id = hosts::new_id();
+                }
                 let host = self.fields.host();
                 match self.entry {
-                    Entry::Saved(i) => hosts[i] = host,
+                    Entry::Saved(i) => {
+                        let old = std::mem::replace(&mut hosts[i], host.clone());
+                        self.forget(&old, Some(&host));
+                    }
                     _ => {
                         hosts.push(host);
                         self.entry = Entry::Saved(hosts.len() - 1);
@@ -366,7 +416,8 @@ impl HostDialog {
             }
             Some(Clicked::Delete) => {
                 if let Entry::Saved(i) = self.entry {
-                    hosts.remove(i);
+                    let old = hosts.remove(i);
+                    self.forget(&old, None);
                     let next = match hosts.len() {
                         0 => Entry::NewHost,
                         n => Entry::Saved(i.min(n - 1)),
@@ -375,7 +426,9 @@ impl HostDialog {
                 }
                 return Some(HostAction::Changed);
             }
-            None if enter && filled => return Some(HostAction::Open(self.request())),
+            None if enter && filled => {
+                return Some(HostAction::Open(Box::new(self.request(hosts))));
+            }
             None => {}
         }
         let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
@@ -511,11 +564,19 @@ impl HostDialog {
         });
     }
 
-    /// The Session the fields describe.
-    fn request(&self) -> OpenRequest {
+    /// The Session the fields describe. It remembers its secret only for a saved Host
+    /// with Remember on.
+    fn request(&self, hosts: &[Host]) -> OpenRequest {
+        let remember = match self.entry {
+            Entry::Saved(i) if self.fields.remember && hosts[i].remember => {
+                Some(hosts[i].id.clone()).filter(|id| !id.is_empty())
+            }
+            _ => None,
+        };
         OpenRequest {
             host: self.fields.host(),
             named: self.entry != Entry::UnsavedSession,
+            remember,
         }
     }
 }
@@ -640,7 +701,10 @@ impl Pending {
 
     fn show_password(&mut self, ctx: &Context, prompt: PasswordPrompt) -> Option<Outcome> {
         let intro = vec![format!("Password for {}", prompt.account)];
-        let rejected = prompt.rejected.then_some("The password was rejected.");
+        let saved = prompt.saved.line(Kind::Password);
+        let rejected = saved
+            .as_deref()
+            .or(prompt.rejected.then_some("The password was rejected."));
         let fields = [Field {
             label: "Password".into(),
             hidden: true,
@@ -655,9 +719,10 @@ impl Pending {
 
     fn show_passphrase(&mut self, ctx: &Context, prompt: PassphrasePrompt) -> Option<Outcome> {
         let intro = vec![format!("Passphrase for the key {}", prompt.key.display())];
-        let rejected = prompt
+        let saved = prompt.saved.line(Kind::Passphrase);
+        let rejected = saved.as_deref().or(prompt
             .rejected
-            .then_some("The key passphrase was rejected.");
+            .then_some("The key passphrase was rejected."));
         let fields = [Field {
             label: "Passphrase".into(),
             hidden: true,

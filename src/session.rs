@@ -76,6 +76,9 @@ pub struct Details {
     pub local_folder: PathBuf,
     /// Why the OpenSSH config was not applied, naming the file and line.
     pub note: Option<String>,
+    /// A note the operator can dismiss, such as the credential store not keeping the
+    /// secret.
+    pub dismissible: Option<String>,
 }
 
 pub struct Session {
