@@ -270,3 +270,27 @@ fn an_in_flight_preview_load_shows_connection_lost() {
     reconnect(h);
     until(h, "the text", |h| h.query_by_label("notes").is_some());
 }
+
+#[test]
+fn audio_cut_short_by_the_drop_reloads_after_reconnect() {
+    let fixture = Fixture::start();
+    let home = fixture.root().join("home/tester");
+    std::fs::copy("tests/media/tone.ogg", home.join("tone.ogg")).unwrap();
+    let mut w = window(&fixture);
+    let h = &mut w.harness;
+    assert!(has_row(h, "tone.ogg"));
+    // The player waits on its first read while the connection drops.
+    fixture.slow_reads(Duration::from_secs(5));
+    h.get_by_role_and_label(Role::Row, "tone.ogg").click();
+    h.run_ok();
+    wait(h, Duration::from_millis(500));
+    assert!(has(h, "Loading preview"));
+
+    drop_connection(&fixture, h);
+    until(h, "the line", |h| has(h, "Cannot read: connection lost"));
+    fixture.slow_reads(Duration::ZERO);
+    reconnect(h);
+    until(h, "the player", |h| {
+        h.query_by_role_and_label(Role::Button, "Play").is_some()
+    });
+}

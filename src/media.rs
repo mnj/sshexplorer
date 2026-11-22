@@ -482,6 +482,9 @@ pub const CHUNK: usize = 256 * 1024;
 /// [`CHUNK`] from there, so seeking costs one round trip and nothing is read whole.
 /// The file opens on the first read and closes when the reader is dropped. Errors are
 /// the reason as the operator reads it ("No such file", "Permission denied").
+/// A read the connection's drop stopped.
+const LOST: &str = "connection lost";
+
 pub struct RangedReader {
     asks: tokio::sync::mpsc::UnboundedSender<(Ask, std::sync::mpsc::Sender<Answer>)>,
     at: u64,
@@ -512,6 +515,7 @@ impl RangedReader {
                     match remote.open(path.clone()).await {
                         Ok(opened) => file = Some(opened),
                         Err(e) => {
+                            let e = if remote.closed().await { LOST.to_owned() } else { e };
                             let _ = answer.send(match ask {
                                 Ask::Read { .. } => Answer::Data(Err(e)),
                                 Ask::Size => Answer::Size(Err(e)),
@@ -546,6 +550,17 @@ impl RangedReader {
                             .map_err(|e| e.to_string()),
                     ),
                 };
+                // A read the drop cut short reads as the connection lost, not as
+                // whatever russh says about its channel.
+                let reply = match reply {
+                    Answer::Data(Err(_)) if remote.closed().await => {
+                        Answer::Data(Err(LOST.to_owned()))
+                    }
+                    Answer::Size(Err(_)) if remote.closed().await => {
+                        Answer::Size(Err(LOST.to_owned()))
+                    }
+                    reply => reply,
+                };
                 let _ = answer.send(reply);
             }
         });
@@ -558,7 +573,7 @@ impl RangedReader {
 
     fn ask(&self, ask: Ask) -> std::io::Result<Answer> {
         let (answer, answered) = std::sync::mpsc::channel();
-        let gone = || std::io::Error::other("connection lost");
+        let gone = || std::io::Error::other(LOST);
         self.asks.send((ask, answer)).map_err(|_| gone())?;
         answered.recv().map_err(|_| gone())
     }

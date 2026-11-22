@@ -82,6 +82,16 @@ pub struct Shown {
     lost: bool,
 }
 
+impl Shown {
+    /// What was showing cannot go on, as `line` says: a picture that would not decode,
+    /// or a stream whose reads failed. One the drop stopped ([`CONNECTION_LOST`]) loads
+    /// again on [`Preview::resume`].
+    pub fn fail(&mut self, line: String) {
+        self.lost = line == CONNECTION_LOST;
+        self.body = Body::Failed(line);
+    }
+}
+
 /// What shows under the details header.
 pub enum Body {
     /// Nothing: a directory, `.` or `..`.

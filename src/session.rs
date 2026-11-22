@@ -284,6 +284,12 @@ impl Session {
         self.downloads.conflict.is_some()
     }
 
+    /// The Session's tab is not shown this frame: Preview's playback pauses, as moving
+    /// focus away does.
+    pub fn hidden(&mut self) {
+        self.preview.hidden();
+    }
+
     /// Takes what the Downloads have said and starts the next queued one. Call it every
     /// frame, on screen or not; `now` is egui's time.
     pub fn poll(&mut self, now: f64) {

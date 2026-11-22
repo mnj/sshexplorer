@@ -339,7 +339,10 @@ impl App {
         // Every Session's Downloads go on, on screen or not.
         let now = ui.input(|i| i.time);
         let attempts = self.settings.connections.reconnect_attempts;
-        for session in &mut self.sessions {
+        for (i, session) in self.sessions.iter_mut().enumerate() {
+            if i != self.active {
+                session.hidden();
+            }
             session.poll(now);
             // Reconnecting goes on whether the Session is shown or not.
             if let Some(wait) = session.keep_connected(now, attempts) {

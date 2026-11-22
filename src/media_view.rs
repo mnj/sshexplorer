@@ -50,6 +50,13 @@ pub struct MediaFrame<'a> {
 }
 
 impl MediaView {
+    /// Pauses playback, if anything plays.
+    pub fn pause(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.pause();
+        }
+    }
+
     /// Draws `stream`. Returns the failure line when it cannot be played.
     pub fn ui(
         &mut self,
