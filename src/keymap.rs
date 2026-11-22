@@ -55,12 +55,21 @@ pub enum Action {
     UiScaleReset,
     /// Closes the active Session.
     CloseSession,
+    /// Brings the next Session's tab to the front, wrapping round.
+    NextSession,
+    /// Brings the previous Session's tab to the front, wrapping round.
+    PreviousSession,
+    /// Opens the Host dialog.
+    HostDialog,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 5] = [
+    pub const ALL: [Action; 8] = [
+        Action::NextSession,
+        Action::PreviousSession,
         Action::CloseSession,
+        Action::HostDialog,
         Action::UiScaleUp,
         Action::UiScaleDown,
         Action::UiScaleReset,
@@ -72,7 +81,10 @@ impl Action {
             Action::Settings | Action::UiScaleUp | Action::UiScaleDown | Action::UiScaleReset => {
                 Area::Appearance
             }
-            Action::CloseSession => Area::Sessions,
+            Action::CloseSession
+            | Action::NextSession
+            | Action::PreviousSession
+            | Action::HostDialog => Area::Sessions,
         }
     }
 
@@ -84,6 +96,9 @@ impl Action {
             Action::UiScaleDown => "UI scale down",
             Action::UiScaleReset => "UI scale reset",
             Action::CloseSession => "Close Session",
+            Action::NextSession => "Next Session",
+            Action::PreviousSession => "Previous Session",
+            Action::HostDialog => "Host dialog",
         }
     }
 
@@ -100,6 +115,9 @@ impl Action {
             Action::UiScaleDown => Binding::new(shift_cmd, Key::Minus),
             Action::UiScaleReset => Binding::new(shift_cmd, Key::Num0),
             Action::CloseSession => Binding::new(cmd, Key::W),
+            Action::NextSession => Binding::new(cmd, Key::Tab),
+            Action::PreviousSession => Binding::new(shift_cmd, Key::Tab),
+            Action::HostDialog => Binding::new(cmd, Key::O),
         })
     }
 }

@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod connect;
+pub mod hosts;
 pub mod icons;
 pub mod keymap;
 pub mod known_hosts;
