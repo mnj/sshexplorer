@@ -9,8 +9,20 @@ The person who runs sshexplorer on their own machine and connects to hosts they 
 _Avoid_: User, client
 
 **Host**:
-A target the operator can save. It records a display name, an address, an account, an optional key file, whether its Sessions are readonly, whether it remembers a password or key passphrase, the local folder where downloads are written, and the initial remote folder its Sessions open in. A Host runs Linux, macOS, or a BSD. Several Sessions may be opened from one Host. The same fields can open a Session that is not saved.
+A target the operator can save. It records a display name, an address, a port, an account, an authentication method, an optional key file, whether its Sessions are readonly, whether it remembers a password or key passphrase, the local folder where downloads are written, and the initial remote folder its Sessions open in. A Host runs Linux, macOS, or a BSD. Several Sessions may be opened from one Host. The same fields can open a Session that is not saved.
 _Avoid_: Server, machine, connection
+
+**Authentication method**:
+How a Host's Sessions log in: Automatic, Password, Key file, or Agent. Automatic tries the key file, then the agent's other keys, then a password. The other choices use only that one. A new Host uses Automatic.
+_Avoid_: Auth type, login mode
+
+**OpenSSH config**:
+The operator's own `ssh` client configuration. A Session looks up its address there as `ssh` would, and the config supplies any account, key file, or port the Host leaves empty. A value set on the Host wins.
+_Avoid_: ssh_config, SSH settings
+
+**Known hosts**:
+The operator's record of host keys they have trusted, shared with `ssh`. A Session to a host whose key is not there asks the operator to trust it. A Session to a host whose key has changed does not open.
+_Avoid_: Fingerprint store, trusted hosts
 
 **Key file**:
 A path on a Host to a private key. When the path is set, a Session offers that key.
