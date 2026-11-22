@@ -114,6 +114,9 @@ impl PreviewPanel {
             self.fresh();
         }
         self.receive(&Place::of(&frame.settings.preview), frame.connection);
+        if self.preview.poll() {
+            self.archive_rows = None;
+        }
         if frame.disconnected {
             self.reading = None;
             self.preview.lost();
@@ -224,6 +227,9 @@ impl PreviewPanel {
                 ui.label(t.ty.body.rich(TOO_LARGE_HINT).color(t.color.text.muted));
             }
             Body::Archive(listing) => {
+                if listing.partial {
+                    ui.add(widgets::warning_message(crate::archive::PARTIAL));
+                }
                 if listing.members.is_empty() {
                     ui.label(t.ty.body.rich(EMPTY_ARCHIVE).color(t.color.text.muted));
                 }
