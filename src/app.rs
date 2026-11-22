@@ -362,25 +362,27 @@ impl App {
         let mut open_settings = false;
         let mut dismiss = false;
         let session = self.sessions.get(self.active);
+        let has_session = session.is_some();
         let can_download = session.is_some_and(Session::can_download);
         let download_key = self
             .settings
             .keys
             .binding(Action::Download)
             .map(|b| b.label(cfg!(target_os = "macos")));
-        let active = self.sessions.get(self.active).map(|s| &s.details);
+        let active = self.sessions.get(self.active).map(|s| s.details.clone());
         // The active Session's view and place; the view the switch picks.
         let place = self
             .sessions
             .get(self.active)
-            .map(|s| (s.view(), s.place(), s.is_refreshing()));
+            .map(|s| (s.view(), s.place(), s.is_refreshing(), s.is_searching()));
+        let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
         let mut picked = None;
         let mut refresh = false;
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
-                if session.is_some() {
+                if has_session {
                     let tip = match &download_key {
                         Some(key) => format!("Download the Selection ({key})"),
                         None => "Download the Selection".to_owned(),
@@ -390,14 +392,14 @@ impl App {
                         .tooltip(&tip)
                         .clicked();
                 }
-                if let Some((view, place, refreshing)) = &place {
+                if let Some((view, place, refreshing, searching)) = &place {
                     let mut choice = *view;
                     let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
                     if ui.add(widgets::segmented(&mut choice, &views)).changed() {
                         picked = Some(choice);
                     }
                     refresh = ui
-                        .add_enabled(!refreshing, widgets::button("Refresh").flat())
+                        .add_enabled(!refreshing && !searching, widgets::button("Refresh").flat())
                         .tooltip("Fetch the listing again")
                         .clicked();
                     if *refreshing {
@@ -406,7 +408,10 @@ impl App {
                     ui.label(ui.tokens().ty.body.rich(place.as_str()))
                         .tooltip("Current directory");
                 }
-                if let Some(details) = active {
+                if let Some(session) = sessions.get_mut(index) {
+                    session.search_field(ui, &settings.keys, settings);
+                }
+                if let Some(details) = &active {
                     if details.readonly {
                         ui.add(widgets::badge("Readonly"))
                             .tooltip("This Session cannot change the remote filesystem");
@@ -747,6 +752,7 @@ impl App {
             Action::TreeView,
             Action::FolderView,
             Action::Refresh,
+            Action::Search,
         ];
         let [
             settings,
@@ -762,6 +768,7 @@ impl App {
             tree_view,
             folder_view,
             refresh,
+            search,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -777,6 +784,7 @@ impl App {
                 Action::TreeView,
                 Action::FolderView,
                 Action::Refresh,
+                Action::Search,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
@@ -793,6 +801,9 @@ impl App {
             }
             if refresh {
                 session.refresh();
+            }
+            if search {
+                session.focus_search();
             }
         }
         if close {
@@ -859,9 +870,7 @@ impl App {
                 Page::Download => download_page(ui, settings),
                 Page::Keys => editor.ui(ui, &mut settings.keys),
                 Page::Connections => connections(ui, &mut settings.connections),
-                _ => {
-                    ui.add(widgets::form_name("Nothing to set here yet."));
-                }
+                Page::Search => search_page(ui, &mut settings.search),
             });
         if shown.reset {
             match page {
@@ -873,11 +882,11 @@ impl App {
                     settings.search.follow_links = Search::default().follow_links;
                 }
                 Page::Connections => settings.connections = Connections::default(),
+                Page::Search => settings.search = Search::default(),
                 Page::Keys => {
                     settings.keys.reset_all();
                     editor.stop();
                 }
-                _ => {}
             }
         }
         if shown.close {
@@ -1053,6 +1062,30 @@ fn preview(ui: &mut egui::Ui, p: &mut PreviewSettings) {
                     });
                 }
             });
+        });
+    });
+}
+
+/// The Search page, with the Follow setting it shares with Download.
+fn search_page(ui: &mut egui::Ui, s: &mut Search) {
+    widgets::form("search").show(ui, |ui| {
+        widgets::form_row(ui, "Follow symlinked directories", |ui| {
+            ui.vertical(|ui| {
+                ui.add(
+                    widgets::switch(&mut s.follow_links, "").name("Follow symlinked directories"),
+                );
+                ui.add(widgets::form_hint("Shared with Download"));
+            });
+        });
+        widgets::form_row(ui, "Match cap", |ui| {
+            let mut cap = i64::from(s.match_cap);
+            ui.add(
+                widgets::stepper_field(&mut cap, 1..=1_000_000)
+                    .step(100)
+                    .suffix("matches"),
+            )
+            .accessible_name("Match cap");
+            s.match_cap = u32::try_from(cap.max(1)).unwrap_or(s.match_cap);
         });
     });
 }
