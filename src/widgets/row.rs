@@ -437,3 +437,37 @@ impl Widget for Row<'_> {
         self.show(ui).response
     }
 }
+
+/// The lead of a tree row drawn in a table cell: the indent for `depth`, then a
+/// disclosure chevron when the row can be `expanded` (open or not), or an empty slot of
+/// the same width when it cannot.
+pub fn tree_lead(depth: usize, expanded: Option<bool>) -> TreeLead {
+    TreeLead { depth, expanded }
+}
+
+#[must_use = "add it with ui.add"]
+pub struct TreeLead {
+    depth: usize,
+    expanded: Option<bool>,
+}
+
+impl egui::Widget for TreeLead {
+    fn ui(self, ui: &mut Ui) -> Response {
+        ui.horizontal(|ui| {
+            ui.add_space(TREE_INDENT * self.depth as f32);
+            match self.expanded {
+                Some(open) => {
+                    let glyph = if open {
+                        Glyph::ChevronDown
+                    } else {
+                        Glyph::ChevronRight
+                    };
+                    let ink = ui.tokens().color.text.muted;
+                    ui.add(glyph::glyph(glyph).color(ink));
+                }
+                None => ui.add_space(TREE_INDENT),
+            }
+        })
+        .response
+    }
+}

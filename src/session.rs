@@ -56,7 +56,7 @@ use crate::settings::{AppSettings, ReconnectAttempts};
 use crate::ssh::{self, Entry, Listing, NO_SUCH_FILE, Request, Target};
 use crate::theme::TokensExt as _;
 use crate::tree::{self, Line, Tree};
-use crate::widgets::{self, Glyph, RowLook, Tooltip as _};
+use crate::widgets::{self, RowLook, Tooltip as _};
 
 /// How a Session shows the remote filesystem. The choice belongs to the Session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1187,19 +1187,7 @@ impl Session {
         let target = entry.and_then(|e| e.link.as_deref());
         row.ui(|ui| {
             if let Some(depth) = shown.depth {
-                ui.add_space(widgets::TREE_INDENT * depth as f32);
-                match shown.expanded {
-                    Some(open) => {
-                        let glyph = if open {
-                            Glyph::ChevronDown
-                        } else {
-                            Glyph::ChevronRight
-                        };
-                        let ink = ui.tokens().color.text.muted;
-                        ui.add(widgets::glyph(glyph).color(ink));
-                    }
-                    None => ui.add_space(widgets::TREE_INDENT),
-                }
+                ui.add(widgets::tree_lead(depth, shown.expanded));
             }
             if shown.status {
                 ui.add(widgets::muted(&shown.label));

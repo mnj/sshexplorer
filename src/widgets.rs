@@ -91,7 +91,9 @@ pub use menu::{
 pub use pages::{PAGE_HEIGHT, PAGE_LIST_WIDTH, PAGE_WIDTH, PagesDialog, PagesShown, pages_dialog};
 pub use paint::{State, drew_focus};
 pub use range::{PROGRESS_RAIL, Progress, SLIDER_KNOB, SLIDER_RAIL, Slider, progress, slider};
-pub use row::{Highlight, Row, RowResponse, TREE_INDENT, list_row, rows, tree_row};
+pub use row::{
+    Highlight, Row, RowResponse, TREE_INDENT, TreeLead, list_row, rows, tree_lead, tree_row,
+};
 pub use section::{Section, SectionHeader, SectionResponse, section, section_header};
 pub use segmented::{Segmented, segmented};
 pub use splitter::splitter;
