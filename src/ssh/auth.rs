@@ -6,6 +6,7 @@
 //! other identities, unless `IdentitiesOnly`; (3) the password. Key file, Agent and
 //! Password each keep to their own step. A method the host does not offer is skipped.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,8 +17,10 @@ use russh::keys::ssh_key::{HashAlg, PrivateKey, PublicKey};
 use russh::keys::{self, PrivateKeyWithHashAlg};
 use russh::{AgentAuthError, Disconnect, MethodKind, MethodSet};
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
-use super::{Event, Events, Failure, HostCheck, Options, PasswordPrompt, Target};
+use super::{Event, Events, Failure, HostCheck, Options, PasswordPrompt, Saved, Target};
+use crate::credentials::{self, Kind, Lookup};
 use crate::hosts::AuthMethod;
 
 /// The message when the Agent method finds no agent.
@@ -41,6 +44,8 @@ pub struct PassphrasePrompt {
     pub key: PathBuf,
     /// Whether the passphrase entered before did not unlock the key.
     pub rejected: bool,
+    /// What to say of the credential store.
+    pub saved: Saved,
     answer: oneshot::Sender<Option<String>>,
 }
 
@@ -92,35 +97,63 @@ impl QuestionsPrompt {
 
 type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin + 'static>>;
 
-/// Logs `target.account` in by `options.auth`, asking the operator through `out`.
+/// A secret the operator entered that logged in, to keep when Remember is on.
+pub(super) type Kept = (Kind, Zeroizing<String>);
+
+/// A secret, and whether it came from the credential store rather than the operator.
+struct Secret {
+    text: Zeroizing<String>,
+    saved: bool,
+}
+
+/// How far a Session has got with the store's secret of one kind.
+enum Stage {
+    /// Read and sent; asking for this kind again after a rejection means the store's
+    /// secret was rejected.
+    Tried(Zeroizing<String>),
+    /// No more from the store; the next prompt says `Saved`.
+    Done(Saved),
+}
+
+/// Logs `target.account` in by `options.auth`, asking the operator through `out`. A
+/// host that closes the connection after its own attempt limit is reconnected to
+/// quietly. Gives the secret the operator entered that logged in, if any.
 pub(super) async fn authenticate(
     handle: &mut Handle<HostCheck>,
     target: &Target,
     options: &Options,
-    out: &Events,
-) -> Result<(), Failure> {
-    let result = Login {
+    out: &Arc<Events>,
+) -> Result<Option<Kept>, Failure> {
+    let mut login = Login {
         handle,
         target,
+        options,
         out,
         methods: MethodSet::empty(),
-    }
-    .run(options)
-    .await;
+        stages: HashMap::new(),
+        kept: None,
+    };
+    let result = login.run(options).await;
+    let kept = login.kept.take();
     if matches!(result, Err(Failure::Cancelled)) {
         let _ = handle
             .disconnect(Disconnect::ByApplication, "Cancelled", "en")
             .await;
     }
-    result
+    result.map(|()| kept)
 }
 
 struct Login<'a> {
     handle: &'a mut Handle<HostCheck>,
     target: &'a Target,
-    out: &'a Events,
+    options: &'a Options,
+    out: &'a Arc<Events>,
     /// What the host last said it would accept.
     methods: MethodSet,
+    /// The store's secrets, once looked up.
+    stages: HashMap<Kind, Stage>,
+    /// The entered secret that logged in.
+    kept: Option<Kept>,
 }
 
 /// A key file read from disk, and its public key when that is known without unlocking.
@@ -187,8 +220,8 @@ impl Login<'_> {
             if !files {
                 continue;
             }
-            let key = match self.unlock(&file).await? {
-                Ok(key) => key,
+            let (key, passphrase) = match self.unlock(&file).await? {
+                Ok(unlocked) => unlocked,
                 Err(reason) => {
                     unreadable.get_or_insert(reason);
                     continue;
@@ -196,6 +229,7 @@ impl Login<'_> {
             };
             tried.push(key.public_key().clone());
             if self.offer_key(&user, key).await? {
+                self.keep(Kind::Passphrase, passphrase);
                 return Ok(());
             }
         }
@@ -291,28 +325,126 @@ impl Login<'_> {
         }
     }
 
-    /// The key in `file`, asking for its passphrase until one unlocks it. The inner
-    /// error says why the file cannot be used at all.
-    async fn unlock(&self, file: &KeyFile) -> Result<Result<PrivateKey, String>, Failure> {
+    /// Notes `secret` as the one that logged in, when the operator entered it.
+    fn keep(&mut self, kind: Kind, secret: Option<Secret>) {
+        if let Some(secret) = secret
+            && !secret.saved
+        {
+            self.kept = Some((kind, secret.text));
+        }
+    }
+
+    /// The secret of `kind`: the store's, the first time it is asked for, else the
+    /// operator's through the prompt `ask` makes. `rejected` says the last one sent was
+    /// rejected.
+    async fn secret(
+        &mut self,
+        kind: Kind,
+        rejected: bool,
+        ask: impl FnOnce(Saved, oneshot::Sender<Option<String>>) -> Event,
+    ) -> Result<Secret, Failure> {
+        let mut saved = Saved::Nothing;
+        if let Some(remember) = &self.options.remember {
+            let stage = match self.stages.remove(&kind) {
+                Some(stage) => stage,
+                None => {
+                    let store = remember.store.clone();
+                    let key = credentials::Key::new(remember.host.clone(), kind);
+                    match tokio::task::spawn_blocking(move || store.get(&key)).await {
+                        Ok(Lookup::Found(text)) => Stage::Tried(text),
+                        Ok(Lookup::NoEntry) => Stage::Done(Saved::Nothing),
+                        _ => Stage::Done(Saved::Unavailable),
+                    }
+                }
+            };
+            match stage {
+                // The first request, or another key file asking: the store's secret.
+                Stage::Tried(text) if !rejected => {
+                    self.stages.insert(kind, Stage::Tried(text.clone()));
+                    return Ok(Secret { text, saved: true });
+                }
+                Stage::Tried(_) => saved = Saved::Rejected,
+                Stage::Done(first) => saved = first,
+            }
+            self.stages.insert(kind, Stage::Done(Saved::Nothing));
+        }
+        let (answer, reply) = oneshot::channel();
+        self.out.send(ask(saved, answer));
+        match reply.await {
+            Ok(Some(text)) => Ok(Secret {
+                text: Zeroizing::new(text),
+                saved: false,
+            }),
+            _ => Err(Failure::Cancelled),
+        }
+    }
+
+    /// The key in `file`, asking for its passphrase until one unlocks it, and the
+    /// passphrase that did. The inner error says why the file cannot be used at all.
+    async fn unlock(
+        &mut self,
+        file: &KeyFile,
+    ) -> Result<Result<(PrivateKey, Option<Secret>), String>, Failure> {
         if !is_locked(&file.text) {
-            return Ok(decode_key(&file.text, None).map_err(|e| unusable(&file.path, e)));
+            return Ok(decode_key(&file.text, None)
+                .map(|key| (key, None))
+                .map_err(|e| unusable(&file.path, e)));
         }
         let mut rejected = false;
         loop {
-            let (answer, reply) = oneshot::channel();
-            self.out.send(Event::Passphrase(PassphrasePrompt {
-                key: file.path.clone(),
-                rejected,
-                answer,
-            }));
-            let Ok(Some(passphrase)) = reply.await else {
-                return Err(Failure::Cancelled);
-            };
-            match decode_key(&file.text, Some(&passphrase)) {
-                Ok(key) => return Ok(Ok(key)),
+            let path = file.path.clone();
+            let passphrase = self
+                .secret(Kind::Passphrase, rejected, |saved, answer| {
+                    Event::Passphrase(PassphrasePrompt {
+                        key: path,
+                        rejected,
+                        saved,
+                        answer,
+                    })
+                })
+                .await?;
+            match decode_key(&file.text, Some(&passphrase.text)) {
+                Ok(key) => return Ok(Ok((key, Some(passphrase)))),
                 Err(_) => rejected = true,
             }
         }
+    }
+
+    /// Connects again after the host closed the connection mid-login, as it does past
+    /// its own attempt limit. Whether the host let the account in without asking.
+    async fn redial(&mut self) -> Result<bool, Failure> {
+        let mut handle = super::dial(self.target, self.options, self.out).await?;
+        let user = self.target.account.clone();
+        let logged_in = match handle.authenticate_none(&user).await.map_err(lost)? {
+            AuthResult::Success => true,
+            AuthResult::Failure {
+                remaining_methods, ..
+            } => {
+                self.methods = remaining_methods;
+                false
+            }
+        };
+        *self.handle = handle;
+        Ok(logged_in)
+    }
+
+    /// Sends `password` by the password method, reconnecting once if the host closed
+    /// the connection.
+    async fn send_password(&mut self, password: &str) -> Result<bool, Failure> {
+        let user = self.target.account.clone();
+        let result = match self.handle.authenticate_password(&user, password).await {
+            Ok(result) => result,
+            Err(_) => {
+                if self.redial().await? {
+                    return Ok(true);
+                }
+                self.handle
+                    .authenticate_password(&user, password)
+                    .await
+                    .map_err(lost)?
+            }
+        };
+        Ok(self.accepted(result))
     }
 
     /// Asks for the password, by keyboard-interactive when the host offers it, else by the
@@ -326,50 +458,70 @@ impl Login<'_> {
                 "The host accepted no key and does not take a password.".into(),
             ));
         }
-        let user = self.target.account.clone();
         let mut rejected = false;
         loop {
             let password = self.ask_password(rejected).await?;
-            let result = self
-                .handle
-                .authenticate_password(&user, password)
-                .await
-                .map_err(lost)?;
-            if self.accepted(result) {
+            if self.send_password(&password.text).await? {
+                self.keep(Kind::Password, Some(password));
                 return Ok(());
             }
             rejected = true;
         }
     }
 
-    async fn ask_password(&self, rejected: bool) -> Result<String, Failure> {
-        let (answer, reply) = oneshot::channel();
-        self.out.send(Event::Password(PasswordPrompt {
-            account: format!("{}@{}", self.target.account, self.target.address),
-            rejected,
-            answer,
-        }));
-        match reply.await {
-            Ok(Some(password)) => Ok(password),
-            _ => Err(Failure::Cancelled),
+    async fn ask_password(&mut self, rejected: bool) -> Result<Secret, Failure> {
+        let account = format!("{}@{}", self.target.account, self.target.address);
+        self.secret(Kind::Password, rejected, |saved, answer| {
+            Event::Password(PasswordPrompt {
+                account,
+                rejected,
+                saved,
+                answer,
+            })
+        })
+        .await
+    }
+
+    /// Starts a keyboard-interactive round, reconnecting once if the host closed the
+    /// connection. `None` when the reconnection let the account in.
+    async fn start_keyboard(&mut self) -> Result<Option<KeyboardInteractiveAuthResponse>, Failure> {
+        let user = self.target.account.clone();
+        match self
+            .handle
+            .authenticate_keyboard_interactive_start(&user, None)
+            .await
+        {
+            Ok(response) => Ok(Some(response)),
+            Err(_) => {
+                if self.redial().await? {
+                    return Ok(None);
+                }
+                self.handle
+                    .authenticate_keyboard_interactive_start(&user, None)
+                    .await
+                    .map(Some)
+                    .map_err(lost)
+            }
         }
     }
 
     /// Runs keyboard-interactive rounds until the host accepts (true), or refuses before
     /// anything was asked (false: it is not really on offer).
     async fn keyboard(&mut self) -> Result<bool, Failure> {
-        let user = self.target.account.clone();
         let mut rejected = false;
         loop {
-            let mut response = self
-                .handle
-                .authenticate_keyboard_interactive_start(&user, None)
-                .await
-                .map_err(lost)?;
+            let Some(mut response) = self.start_keyboard().await? else {
+                return Ok(true);
+            };
             let mut asked = false;
+            // The password this round was answered with, when it asked for one.
+            let mut password = None;
             loop {
                 match response {
-                    KeyboardInteractiveAuthResponse::Success => return Ok(true),
+                    KeyboardInteractiveAuthResponse::Success => {
+                        self.keep(Kind::Password, password);
+                        return Ok(true);
+                    }
                     KeyboardInteractiveAuthResponse::Failure {
                         remaining_methods, ..
                     } => {
@@ -388,7 +540,12 @@ impl Login<'_> {
                     } => {
                         let answers = match prompts.as_slice() {
                             [] => Vec::new(),
-                            [only] if !only.echo => vec![self.ask_password(rejected).await?],
+                            [only] if !only.echo && asks_password(&only.prompt) => {
+                                let secret = self.ask_password(rejected).await?;
+                                let answer = secret.text.to_string();
+                                password = Some(secret);
+                                vec![answer]
+                            }
                             _ => {
                                 let questions = prompts
                                     .into_iter()
@@ -437,6 +594,12 @@ impl Login<'_> {
             _ => Err(Failure::Cancelled),
         }
     }
+}
+
+/// Whether a keyboard-interactive prompt asks for the password (/password/i): the only
+/// prompt whose answer is remembered.
+fn asks_password(prompt: &str) -> bool {
+    prompt.to_lowercase().contains("password")
 }
 
 fn lost(e: russh::Error) -> Failure {

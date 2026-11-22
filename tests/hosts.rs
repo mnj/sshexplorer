@@ -129,6 +129,7 @@ fn saved_hosts_load_again_in_order() {
         initial_folder: "/var/www".into(),
         readonly: false,
         remember: true,
+        ..Host::default()
     };
     let db = Host {
         display_name: "DB".into(),
