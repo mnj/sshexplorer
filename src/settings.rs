@@ -23,6 +23,17 @@ use crate::theme::{self, Accent, Density, fonts};
 pub struct AppSettings {
     #[serde(deserialize_with = "lenient")]
     pub appearance: Appearance,
+    #[serde(deserialize_with = "lenient")]
+    pub browsing: Browsing,
+}
+
+/// The Browsing page.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Browsing {
+    /// Whether dot-names are listed, in every Session. Ctrl+H toggles it.
+    #[serde(deserialize_with = "lenient")]
+    pub show_hidden: bool,
 }
 
 /// Light, dark, or whatever the OS uses.

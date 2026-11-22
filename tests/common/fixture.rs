@@ -14,9 +14,10 @@
 //! - **Files.** The filesystem is `root()`, a temp directory; the remote path `/x` is
 //!   `root()/x`. The account's home is `/home/tester` and starts with [`HOME_ENTRIES`].
 //!   Add files with `std::fs` under `root()`.
-//! - **Limits.** SFTP semantics are the fixture's own (no `longname`, `stat` follows
-//!   links). For real OpenSSH behaviour, run an unprivileged `sshd` on a high port (public
-//!   key only) or a podman container behind `#[ignore]`; see the implementer notes.
+//! - **Limits.** SFTP semantics are the fixture's own (no `longname`; `stat` follows
+//!   links, while `lstat` and `readdir` describe a link itself, as OpenSSH does). For
+//!   real OpenSSH behaviour, run an unprivileged `sshd` on a high port (public key only)
+//!   or a podman container behind `#[ignore]`; see the implementer notes.
 
 #![allow(dead_code)]
 
@@ -223,7 +224,8 @@ impl russh::server::Handler for SshHandler {
     }
 }
 
-/// SFTP over the served directory: enough for listing (realpath, stat, opendir, readdir).
+/// SFTP over the served directory: enough for listing (realpath, stat, lstat, readlink,
+/// opendir, readdir).
 struct SftpHandler {
     root: PathBuf,
     /// Open directory handles: the entries still to send, or None once sent.
@@ -312,11 +314,20 @@ impl russh_sftp::server::Handler for SftpHandler {
         })
     }
 
+    async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        let target = std::fs::read_link(self.local(&path)).map_err(status)?;
+        Ok(Name {
+            id,
+            files: vec![File::dummy(target.to_string_lossy().into_owned())],
+        })
+    }
+
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(self.local(&path)).map_err(status)? {
             let entry = entry.map_err(status)?;
-            let metadata = entry.metadata().map_err(status)?;
+            // As OpenSSH does, a link is described by itself, not its target.
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(status)?;
             let name = entry.file_name().to_string_lossy().into_owned();
             files.push(File::new(name, FileAttributes::from(&metadata)));
         }

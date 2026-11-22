@@ -138,3 +138,68 @@ fn a_rebound_action_answers_to_its_new_keys_and_resets_to_its_default() {
         [Action::Settings]
     );
 }
+
+#[test]
+fn the_browsing_keys_are_registered_under_browsing() {
+    let none = Modifiers::NONE;
+    let shift = Modifiers::SHIFT;
+    let alt = Modifiers::ALT;
+    let expected = [
+        (Action::MoveUp, "Move up", Some((none, Key::ArrowUp))),
+        (Action::MoveDown, "Move down", Some((none, Key::ArrowDown))),
+        (Action::MoveFirst, "Move to first", Some((none, Key::Home))),
+        (Action::MoveLast, "Move to last", Some((none, Key::End))),
+        (Action::PageUp, "Page up", Some((none, Key::PageUp))),
+        (Action::PageDown, "Page down", Some((none, Key::PageDown))),
+        (Action::Open, "Open", Some((none, Key::Enter))),
+        (Action::Parent, "Parent", Some((none, Key::Backspace))),
+        (
+            Action::ParentFolder,
+            "Parent (Folder view)",
+            Some((alt, Key::ArrowUp)),
+        ),
+        (
+            Action::ExtendUp,
+            "Extend Selection up",
+            Some((shift, Key::ArrowUp)),
+        ),
+        (
+            Action::ExtendDown,
+            "Extend Selection down",
+            Some((shift, Key::ArrowDown)),
+        ),
+        (Action::FocusUp, "Move focus up", Some((CTRL, Key::ArrowUp))),
+        (
+            Action::FocusDown,
+            "Move focus down",
+            Some((CTRL, Key::ArrowDown)),
+        ),
+        (
+            Action::ToggleSelected,
+            "Toggle Focused entry in Selection",
+            Some((CTRL, Key::Space)),
+        ),
+        (Action::SelectAll, "Select all", Some((CTRL, Key::A))),
+        (
+            Action::ShowHidden,
+            "Show hidden entries",
+            Some((CTRL, Key::H)),
+        ),
+        (Action::Sort, "Sort", None),
+    ];
+    let map = KeyMap::default();
+    for (action, name, binding) in expected {
+        assert!(Action::ALL.contains(&action), "{name} is in ALL");
+        assert_eq!(action.area(), Area::Browsing, "{name}");
+        assert_eq!(action.name(), name);
+        let binding = binding.map(|(m, k)| Binding::new(m, k));
+        assert_eq!(map.binding(action), binding, "{name}");
+    }
+    assert_eq!(
+        taken(&map, Key::ArrowUp, Key::ArrowUp, Modifiers::SHIFT),
+        [Action::ExtendUp]
+    );
+    // Arrows read by name: the bundled fonts have no arrow symbols.
+    let extend = map.binding(Action::ExtendUp).unwrap();
+    assert_eq!(extend.label(false), "Shift+Up");
+}

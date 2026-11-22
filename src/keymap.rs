@@ -55,11 +55,52 @@ pub enum Action {
     UiScaleReset,
     /// Closes the active Session.
     CloseSession,
+    // Browsing: the listing's keys, taken while it holds the keyboard.
+    MoveUp,
+    MoveDown,
+    MoveFirst,
+    MoveLast,
+    PageUp,
+    PageDown,
+    /// Lists a directory or `..`; on a file, moves to Preview.
+    Open,
+    /// Lists the parent and selects the directory just left.
+    Parent,
+    /// Parent's second key, which only Folder view answers to.
+    ParentFolder,
+    ExtendUp,
+    ExtendDown,
+    /// Moves the focus without changing the Selection.
+    FocusUp,
+    FocusDown,
+    ToggleSelected,
+    SelectAll,
+    /// Toggles the "Show hidden entries" setting, for every Session.
+    ShowHidden,
+    /// Sorts the active Session by the next column. Unbound by default.
+    Sort,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 5] = [
+    pub const ALL: [Action; 22] = [
+        Action::MoveUp,
+        Action::MoveDown,
+        Action::MoveFirst,
+        Action::MoveLast,
+        Action::PageUp,
+        Action::PageDown,
+        Action::Open,
+        Action::Parent,
+        Action::ParentFolder,
+        Action::ExtendUp,
+        Action::ExtendDown,
+        Action::FocusUp,
+        Action::FocusDown,
+        Action::ToggleSelected,
+        Action::SelectAll,
+        Action::ShowHidden,
+        Action::Sort,
         Action::CloseSession,
         Action::UiScaleUp,
         Action::UiScaleDown,
@@ -73,6 +114,23 @@ impl Action {
                 Area::Appearance
             }
             Action::CloseSession => Area::Sessions,
+            Action::MoveUp
+            | Action::MoveDown
+            | Action::MoveFirst
+            | Action::MoveLast
+            | Action::PageUp
+            | Action::PageDown
+            | Action::Open
+            | Action::Parent
+            | Action::ParentFolder
+            | Action::ExtendUp
+            | Action::ExtendDown
+            | Action::FocusUp
+            | Action::FocusDown
+            | Action::ToggleSelected
+            | Action::SelectAll
+            | Action::ShowHidden
+            | Action::Sort => Area::Browsing,
         }
     }
 
@@ -84,6 +142,23 @@ impl Action {
             Action::UiScaleDown => "UI scale down",
             Action::UiScaleReset => "UI scale reset",
             Action::CloseSession => "Close Session",
+            Action::MoveUp => "Move up",
+            Action::MoveDown => "Move down",
+            Action::MoveFirst => "Move to first",
+            Action::MoveLast => "Move to last",
+            Action::PageUp => "Page up",
+            Action::PageDown => "Page down",
+            Action::Open => "Open",
+            Action::Parent => "Parent",
+            Action::ParentFolder => "Parent (Folder view)",
+            Action::ExtendUp => "Extend Selection up",
+            Action::ExtendDown => "Extend Selection down",
+            Action::FocusUp => "Move focus up",
+            Action::FocusDown => "Move focus down",
+            Action::ToggleSelected => "Toggle Focused entry in Selection",
+            Action::SelectAll => "Select all",
+            Action::ShowHidden => "Show hidden entries",
+            Action::Sort => "Sort",
         }
     }
 
@@ -94,7 +169,26 @@ impl Action {
             shift: true,
             ..Modifiers::COMMAND
         };
+        let none = Modifiers::NONE;
+        let shift = Modifiers::SHIFT;
         Some(match self {
+            Action::Sort => return None,
+            Action::MoveUp => Binding::new(none, Key::ArrowUp),
+            Action::MoveDown => Binding::new(none, Key::ArrowDown),
+            Action::MoveFirst => Binding::new(none, Key::Home),
+            Action::MoveLast => Binding::new(none, Key::End),
+            Action::PageUp => Binding::new(none, Key::PageUp),
+            Action::PageDown => Binding::new(none, Key::PageDown),
+            Action::Open => Binding::new(none, Key::Enter),
+            Action::Parent => Binding::new(none, Key::Backspace),
+            Action::ParentFolder => Binding::new(Modifiers::ALT, Key::ArrowUp),
+            Action::ExtendUp => Binding::new(shift, Key::ArrowUp),
+            Action::ExtendDown => Binding::new(shift, Key::ArrowDown),
+            Action::FocusUp => Binding::new(cmd, Key::ArrowUp),
+            Action::FocusDown => Binding::new(cmd, Key::ArrowDown),
+            Action::ToggleSelected => Binding::new(cmd, Key::Space),
+            Action::SelectAll => Binding::new(cmd, Key::A),
+            Action::ShowHidden => Binding::new(cmd, Key::H),
             Action::Settings => Binding::new(cmd, Key::Comma),
             Action::UiScaleUp => Binding::new(shift_cmd, Key::Equals),
             Action::UiScaleDown => Binding::new(shift_cmd, Key::Minus),
@@ -116,7 +210,8 @@ impl Binding {
         Binding { modifiers, key }
     }
 
-    /// How a key chip shows it: "Ctrl+Shift+=", or "⇧⌘=" on macOS.
+    /// How a key chip shows it: "Ctrl+Shift+=", or "⇧⌘=" on macOS; "Shift+Up" for an
+    /// arrow.
     pub fn label(self, mac: bool) -> String {
         let names = if mac {
             ModifierNames::SYMBOLS
@@ -127,7 +222,12 @@ impl Binding {
         if !label.is_empty() {
             label += names.concat;
         }
-        label + self.key.symbol_or_name()
+        // The arrows by name: egui's arrow symbols are not in the bundled fonts.
+        let key = match self.key {
+            Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight => self.key.name(),
+            key => key.symbol_or_name(),
+        };
+        label + key
     }
 
     /// Whether a key event with `key`, `physical` and `modifiers` is this binding.

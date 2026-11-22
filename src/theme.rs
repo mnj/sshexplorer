@@ -23,9 +23,9 @@ use egui::{Color32, Theme};
 pub use style::style;
 pub use tokens::BODY_SIZE;
 pub use tokens::{
-    Accent, Colors, Density, Easing, Elevation, Families, Fill, IconSize, Motion, Opacity, Radius,
-    Settings, Size, Space, StrokeColor, StrokeWidth, Surface, Text, TextColor, Tokens, Tone,
-    Transition, Type,
+    Accent, Colors, Density, Easing, Elevation, Families, Fill, IconSize, KindColors, Motion,
+    Opacity, Radius, Settings, Size, Space, StrokeColor, StrokeWidth, Surface, Text, TextColor,
+    Tokens, Tone, Transition, Type,
 };
 
 /// `top`, which may be translucent, laid over `under`: how a hover or press fill goes over

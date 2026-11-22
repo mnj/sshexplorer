@@ -35,6 +35,7 @@ mod field;
 mod form;
 pub mod glyph;
 mod key_list;
+mod kind;
 mod mark;
 mod menu;
 mod pages;
@@ -75,6 +76,7 @@ pub use field::{
 pub use form::{Form, FormName, form, form_name, form_row};
 pub use glyph::{Glyph, GlyphMark, glyph};
 pub use key_list::key_list;
+pub use kind::{EntryName, entry_name, kind_color};
 pub use mark::{SWATCH, Status, StatusMark, Swatch, status_mark, swatch, swatch_none, swatch_rgb};
 pub use menu::{
     Menu, MenuButton, MenuItem, context_menu, menu, menu_bar, menu_below, menu_button, menu_frame,

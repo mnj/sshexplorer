@@ -2289,6 +2289,7 @@ dependencies = [
  "portable-atomic-util",
  "serde_core",
  "wasm-bindgen",
+ "windows-link",
 ]
 
 [[package]]
@@ -4420,6 +4421,7 @@ dependencies = [
  "egui_kittest",
  "fontdb",
  "hmac",
+ "jiff",
  "objc2-app-kit 0.3.2",
  "russh",
  "russh-sftp",

@@ -221,10 +221,20 @@ pub struct Listing {
     pub entries: Vec<Entry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One entry of a directory. A symlink is described by what it points at: a link to a
+/// directory is a directory, with its target in `link`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
+    /// In bytes; `None` when the host did not say.
+    pub size: Option<u64>,
+    /// Seconds since the Unix epoch.
+    pub modified: Option<u32>,
+    /// The mode bits, file type included, as `st_mode`.
+    pub permissions: Option<u32>,
+    /// The link's target as the host stores it, when the entry is a symlink.
+    pub link: Option<String>,
 }
 
 /// An open Session's connection. Dropping it closes the connection.
@@ -232,6 +242,40 @@ pub struct Session {
     handle: Arc<client::Handle<HostCheck>>,
     sftp: Arc<SftpSession>,
     runtime: tokio::runtime::Handle,
+    wake: Wake,
+}
+
+impl Session {
+    /// Starts listing the directory at the absolute `path`. A symlinked directory is
+    /// followed. The answer arrives on the returned request, and wakes the frame.
+    pub fn list(&self, path: String) -> Request<Listing> {
+        let (sender, answer) = mpsc::channel();
+        let sftp = self.sftp.clone();
+        let wake = self.wake.clone();
+        self.runtime.spawn(async move {
+            let listing = list(&sftp, path).await.map_err(|e| e.to_string());
+            let _ = sender.send(listing);
+            wake();
+        });
+        Request { answer }
+    }
+}
+
+/// A request to the host: its answer, or why there is none.
+pub struct Request<T> {
+    answer: mpsc::Receiver<Result<T, String>>,
+}
+
+impl<T> Request<T> {
+    /// The answer, if it has arrived. Never blocks.
+    pub fn try_take(&self) -> Option<Result<T, String>> {
+        self.answer.try_recv().ok()
+    }
+
+    /// Waits up to `timeout` for the answer: for tests, not the frame thread.
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<T, String>> {
+        self.answer.recv_timeout(timeout).ok()
+    }
 }
 
 impl Drop for Session {
@@ -329,6 +373,7 @@ async fn connect(
             handle: Arc::new(handle),
             sftp: Arc::new(sftp),
             runtime: tokio::runtime::Handle::current(),
+            wake: out.wake.clone(),
         },
         home,
     })
@@ -378,18 +423,33 @@ async fn list_home(sftp: &SftpSession) -> Result<Listing, russh_sftp::client::er
     list(sftp, path).await
 }
 
+/// The entries of the directory at `path`. A symlink is described by its target, which
+/// is looked up with `stat`; a link whose target cannot be read is not a directory.
 async fn list(
     sftp: &SftpSession,
     path: String,
 ) -> Result<Listing, russh_sftp::client::error::Error> {
-    let entries = sftp
-        .read_dir(path.clone())
-        .await?
-        .map(|entry| Entry {
-            name: entry.file_name(),
-            is_dir: entry.file_type().is_dir(),
-        })
-        .collect();
+    let mut entries = Vec::new();
+    for dir_entry in sftp.read_dir(path.clone()).await? {
+        let name = dir_entry.file_name();
+        let mut attrs = dir_entry.metadata();
+        let mut link = None;
+        if attrs.is_symlink() {
+            let at = crate::folder::join(&path, &name);
+            link = sftp.read_link(at.clone()).await.ok();
+            if let Ok(target) = sftp.metadata(at).await {
+                attrs = target;
+            }
+        }
+        entries.push(Entry {
+            name,
+            is_dir: attrs.is_dir(),
+            size: attrs.size,
+            modified: attrs.mtime,
+            permissions: attrs.permissions,
+            link,
+        });
+    }
     Ok(Listing { path, entries })
 }
 

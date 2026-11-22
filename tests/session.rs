@@ -136,6 +136,146 @@ fn hosts_opens_a_session_that_lists_home_in_folder_view_and_ctrl_w_closes_it() {
     assert!(harness.query_by_label("notes.txt").is_none());
 }
 
+/// A window with a Session open on the fixture's home, its key already trusted.
+fn browsing(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App> {
+    let known_hosts = dir.path().join("known_hosts");
+    std::fs::write(&known_hosts, format!("{}\n", fixture.known_hosts_line())).unwrap();
+    let mut harness = window(known_hosts);
+    open_session(&mut harness, fixture);
+    enter_password(&mut harness, fixture::PASSWORD);
+    until(&mut harness, "the listing", |h| {
+        h.query_by_label("notes.txt").is_some()
+    });
+    harness
+}
+
+fn row_names(harness: &Harness<'static, App>) -> Vec<String> {
+    let mut rows: Vec<_> = harness.get_all_by_role(Role::Row).collect();
+    rows.sort_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y));
+    rows.iter()
+        .map(|r| r.accesskit_node().label().unwrap_or_default())
+        .collect()
+}
+
+fn selected_rows(harness: &Harness<'static, App>) -> Vec<String> {
+    harness
+        .get_all_by_role(Role::Row)
+        .filter(|r| r.accesskit_node().is_selected() == Some(true))
+        .map(|r| r.accesskit_node().label().unwrap_or_default())
+        .collect()
+}
+
+fn press(harness: &mut Harness<'static, App>, key: egui::Key) {
+    harness.key_press(key);
+    harness.run_ok();
+}
+
+#[test]
+fn folder_view_has_sortable_columns_and_lists_dots_and_directories_first() {
+    let fixture = Fixture::start();
+    std::fs::write(fixture.root().join("home/tester/file10"), "x").unwrap();
+    std::fs::write(fixture.root().join("home/tester/file2"), "xyz").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = browsing(&fixture, &dir);
+    for column in ["Name", "Size", "Modified", "Permissions"] {
+        harness.get_by_role_and_label(Role::Button, column);
+    }
+    assert_eq!(
+        row_names(&harness),
+        [
+            ".",
+            "..",
+            "docs",
+            "photos",
+            "file2",
+            "file10",
+            "notes.txt",
+            "readme.md"
+        ]
+    );
+    // A file's size and permissions show; a directory's size is blank.
+    assert!(harness.query_all_by_label("-rw-r--r--").count() >= 4);
+    assert!(harness.query_by_label("3 B").is_some());
+    harness.get_by_role_and_label(Role::Button, "Name").click();
+    harness.run_ok();
+    assert_eq!(
+        row_names(&harness),
+        [
+            ".",
+            "..",
+            "photos",
+            "docs",
+            "readme.md",
+            "notes.txt",
+            "file10",
+            "file2"
+        ]
+    );
+}
+
+#[test]
+fn a_new_session_focuses_the_listing_and_the_keys_browse_it() {
+    let fixture = Fixture::start();
+    std::fs::write(fixture.root().join("home/tester/docs/plan.txt"), "x").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = browsing(&fixture, &dir);
+
+    // Down twice from `.`: `..`, then docs, selected.
+    press(&mut harness, egui::Key::ArrowDown);
+    press(&mut harness, egui::Key::ArrowDown);
+    assert_eq!(selected_rows(&harness), ["docs"]);
+    press(&mut harness, egui::Key::Enter);
+    until(&mut harness, "docs listed", |h| {
+        h.query_by_label("plan.txt").is_some()
+    });
+    assert!(harness.query_by_label("notes.txt").is_none());
+
+    // Backspace goes back up and selects the directory just left.
+    press(&mut harness, egui::Key::Backspace);
+    until(&mut harness, "home listed again", |h| {
+        h.query_by_label("notes.txt").is_some()
+    });
+    assert_eq!(selected_rows(&harness), ["docs"]);
+
+    // Ctrl+A selects every entry but the dots; typing jumps to a prefix.
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.run_ok();
+    assert_eq!(selected_rows(&harness).len(), 4);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text("r".into()));
+    harness.run_ok();
+    assert_eq!(selected_rows(&harness), ["readme.md"]);
+
+    // Ctrl+H shows the hidden entries.
+    assert!(harness.query_by_label(".profile").is_none());
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::H);
+    harness.run_ok();
+    assert!(harness.query_by_label(".profile").is_some());
+
+    // A click chooses a row; Ctrl+click adds one.
+    harness.get_by_role_and_label(Role::Row, "photos").click();
+    harness.run_ok();
+    assert_eq!(selected_rows(&harness), ["photos"]);
+}
+
+#[test]
+fn a_symlinked_directory_is_marked_with_its_target_and_entered() {
+    let fixture = Fixture::start();
+    std::os::unix::fs::symlink("photos", fixture.root().join("home/tester/pics")).unwrap();
+    std::fs::write(fixture.root().join("home/tester/photos/cat.jpg"), "x").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = browsing(&fixture, &dir);
+    assert!(has_label(&harness, "→ photos"));
+    harness.get_by_role_and_label(Role::Row, "pics").click();
+    harness.run_ok();
+    press(&mut harness, egui::Key::Enter);
+    until(&mut harness, "the link's target listed", |h| {
+        h.query_by_label("cat.jpg").is_some()
+    });
+}
+
 #[test]
 fn cancelling_the_password_opens_no_session() {
     let fixture = Fixture::start();

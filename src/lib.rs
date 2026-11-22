@@ -12,8 +12,10 @@
 
 pub mod app;
 pub mod connect;
+pub mod folder;
 pub mod icons;
 pub mod keymap;
+pub mod kind;
 pub mod known_hosts;
 pub mod session;
 pub mod settings;
