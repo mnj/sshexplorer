@@ -10,8 +10,7 @@
 //!
 //! Kind detection is local: the extension first, then the first bytes' signature, then
 //! "no NUL and valid UTF-8 in the first [`SNIFF`] bytes" for text. Nothing runs on the
-//! host. Text, source and Markdown (shown as its source until it has its own view) are
-//! the kinds with a body so far; other kinds plug in as further [`Body`] variants and
+//! host. Text, source and Markdown are the kinds with a body so far; other kinds plug in as further [`Body`] variants and
 //! get the same [`Fetched`] bytes with the size cap's result.
 
 use crate::folder::size_text;
@@ -81,10 +80,39 @@ pub enum Body {
     /// "Loading preview…" and a spinner: waiting for focus to rest, or for the bytes.
     Loading,
     Text(Text),
+    Markdown(Markdown),
     /// [`UNSUPPORTED`].
     Unsupported,
     /// One line, such as "Cannot read: permission denied".
     Failed(String),
+}
+
+impl Body {
+    /// The text a text, source or Markdown body holds, which the panel highlights.
+    pub fn text_mut(&mut self) -> Option<&mut Text> {
+        match self {
+            Body::Text(text) => Some(text),
+            Body::Markdown(markdown) => Some(&mut markdown.text),
+            _ => None,
+        }
+    }
+}
+
+/// A Markdown file: rendered by default, or its highlighted source.
+pub struct Markdown {
+    /// The source, as Source shows it.
+    pub text: Text,
+    /// What Rendered shows: the source with each image replaced by its alt text.
+    pub rendered: String,
+    pub view: MarkdownView,
+}
+
+/// The Rendered / Source switch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownView {
+    #[default]
+    Rendered,
+    Source,
 }
 
 /// A fetch that is due: read up to `len` bytes of `path`, and hand the answer to
@@ -313,7 +341,16 @@ impl Preview {
                     total,
                     capped,
                 };
-                Body::Text(Text::new(&shown.focused.name, fetched, &bytes))
+                let text = Text::new(&shown.focused.name, fetched, &bytes);
+                if shown.kind == Kind::Markdown {
+                    Body::Markdown(Markdown {
+                        rendered: crate::markdown::without_images(&text.text),
+                        text,
+                        view: MarkdownView::Rendered,
+                    })
+                } else {
+                    Body::Text(text)
+                }
             }
             Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
         };

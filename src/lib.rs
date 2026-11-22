@@ -24,6 +24,7 @@ pub mod icons;
 pub mod keymap;
 pub mod kind;
 pub mod known_hosts;
+pub mod markdown;
 pub mod openssh_config;
 pub mod preview;
 pub mod preview_panel;
