@@ -244,6 +244,9 @@ pub struct Entry {
     pub permissions: Option<u32>,
     /// The link's target as the host stores it, when the entry is a symlink.
     pub link: Option<String>,
+    /// The owner's and group's numeric ids. SFTP v3 sends no names.
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
 }
 
 /// An open Session's connection. Dropping it closes the connection.
@@ -266,24 +269,86 @@ impl Session {
             let _ = sender.send(listing);
             wake();
         });
-        Request { answer }
+        Request { answer, task: None }
+    }
+
+    /// Starts reading up to `len` bytes of the file at the absolute `path`, from byte
+    /// `offset`: fewer at the end of the file, none past it. A symlink is followed. The
+    /// answer wakes the frame; dropping the request stops the read.
+    pub fn read(&self, path: String, offset: u64, len: u64) -> Request<Vec<u8>, ReadError> {
+        let (sender, answer) = mpsc::channel();
+        let sftp = self.sftp.clone();
+        let wake = self.wake.clone();
+        let task = self.runtime.spawn(async move {
+            let bytes = read(&sftp, path, offset, len).await;
+            let _ = sender.send(bytes);
+            wake();
+        });
+        Request {
+            answer,
+            task: Some(task.abort_handle()),
+        }
     }
 }
 
-/// A request to the host: its answer, or why there is none.
-pub struct Request<T> {
-    answer: mpsc::Receiver<Result<T, String>>,
+/// Why a file could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadError {
+    /// The path names nothing (any more).
+    NoSuchFile,
+    PermissionDenied,
+    /// Anything else, as the host or the connection put it.
+    Other(String),
 }
 
-impl<T> Request<T> {
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::NoSuchFile => write!(f, "no such file"),
+            ReadError::PermissionDenied => write!(f, "permission denied"),
+            ReadError::Other(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+impl From<russh_sftp::client::error::Error> for ReadError {
+    fn from(error: russh_sftp::client::error::Error) -> Self {
+        use russh_sftp::client::error::Error;
+        use russh_sftp::protocol::StatusCode;
+        match error {
+            Error::Status(s) if s.status_code == StatusCode::NoSuchFile => ReadError::NoSuchFile,
+            Error::Status(s) if s.status_code == StatusCode::PermissionDenied => {
+                ReadError::PermissionDenied
+            }
+            other => ReadError::Other(other.to_string()),
+        }
+    }
+}
+
+/// A request to the host: its answer, or why there is none (`E`).
+pub struct Request<T, E = String> {
+    answer: mpsc::Receiver<Result<T, E>>,
+    /// The task answering it, stopped when the request is dropped.
+    task: Option<tokio::task::AbortHandle>,
+}
+
+impl<T, E> Request<T, E> {
     /// The answer, if it has arrived. Never blocks.
-    pub fn try_take(&self) -> Option<Result<T, String>> {
+    pub fn try_take(&self) -> Option<Result<T, E>> {
         self.answer.try_recv().ok()
     }
 
     /// Waits up to `timeout` for the answer: for tests, not the frame thread.
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<T, String>> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<T, E>> {
         self.answer.recv_timeout(timeout).ok()
+    }
+}
+
+impl<T, E> Drop for Request<T, E> {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -468,9 +533,35 @@ async fn list(
             modified: attrs.mtime,
             permissions: attrs.permissions,
             link,
+            uid: attrs.uid,
+            gid: attrs.gid,
         });
     }
     Ok(Listing { path, entries })
+}
+
+/// Up to `len` bytes of the file at `path` from `offset`.
+async fn read(
+    sftp: &SftpSession,
+    path: String,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, ReadError> {
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
+    let file = sftp.open(path).await?;
+    let mut file = file;
+    if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| ReadError::Other(e.to_string()))?;
+    }
+    let mut bytes = Vec::new();
+    file.take(len)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| ReadError::Other(e.to_string()))?;
+    Ok(bytes)
 }
 
 /// The host-key algorithms to offer: those already recorded for the host first, then the

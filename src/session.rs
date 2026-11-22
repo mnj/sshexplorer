@@ -3,7 +3,8 @@
 //! Folder view is a table of one directory: Name, Size, Modified and Permissions, with
 //! the Kind icons, sorted by clicking a header. What the keys and the pointer do to it is
 //! [`Folder`]'s; this module turns them into [`Command`]s, asks the host for another
-//! directory when a command leaves this one, and draws the result.
+//! directory when a command leaves this one, and draws the result. Preview, on the
+//! right, shows the Focused entry; Enter on a file and Tab move the keyboard there.
 // TODO(#28): Tree view and switching views.
 
 use std::path::PathBuf;
@@ -12,10 +13,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use egui::{Event, EventFilter, Id, Sense};
 
 use crate::folder::{
-    Column, Command, Effect, Folder, Sort, modified_text, permissions_text, size_text,
+    Column, Command, Effect, Folder, Line, Sort, join, modified_text, parent, permissions_text,
+    size_text,
 };
 use crate::keymap::{Action, KeyMap};
 use crate::kind::Kind;
+use crate::preview::Focused;
+use crate::preview_panel::{Leave, PanelFrame, PreviewPanel};
 use crate::settings::AppSettings;
 use crate::ssh::{self, Listing, Request, Target};
 use crate::theme::TokensExt as _;
@@ -56,6 +60,10 @@ pub struct Session {
     focus_listing: bool,
     /// The Focused entry moved by key; scroll it into view.
     reveal: bool,
+    /// The Preview panel, dropped before the connection its read uses.
+    preview: PreviewPanel,
+    /// Preview takes the keyboard on the next frame: Enter on a file.
+    focus_preview: bool,
     connection: ssh::Session,
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
@@ -66,6 +74,7 @@ impl Session {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let sort = Sort::default();
+        let id = Id::NULL.with("sshexplorer-listing").with(n);
         Session {
             details,
             folder: Folder::new(opened.home, sort, false),
@@ -73,7 +82,9 @@ impl Session {
             show_hidden: false,
             listing: None,
             error: None,
-            id: Id::NULL.with("sshexplorer-listing").with(n),
+            id,
+            preview: PreviewPanel::new(id.with("preview")),
+            focus_preview: false,
             focus_listing: true,
             reveal: false,
             connection: opened.session,
@@ -94,6 +105,33 @@ impl Session {
             self.folder.arrange(self.sort, show_hidden);
         }
 
+        let t = ui.tokens();
+        let focused_entry = self.focused();
+        let leave = widgets::splitter(ui, t.space.gap, |ui| {
+            egui::Panel::right(self.id.with("preview-panel"))
+                .resizable(true)
+                .default_size(PREVIEW_WIDTH)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    self.preview.ui(
+                        ui,
+                        PanelFrame {
+                            connection: &self.connection,
+                            focused: focused_entry,
+                            keymap: frame.keymap,
+                            settings: frame.settings,
+                            keys: frame.keys,
+                            zone: &self.zone,
+                        },
+                    )
+                })
+                .inner
+        });
+        // TODO(#31): Tab and Shift+Tab pass through the search field too.
+        if leave != Leave::Stay {
+            ui.memory_mut(|m| m.request_focus(self.id));
+        }
+
         // The listing's focus target sits under the rows, so they still take the pointer.
         let area = ui.available_rect_before_wrap();
         ui.interact(area, self.id, Sense::focusable_noninteractive());
@@ -106,6 +144,7 @@ impl Session {
                 m.set_focus_lock_filter(
                     self.id,
                     EventFilter {
+                        tab: true,
                         horizontal_arrows: true,
                         vertical_arrows: true,
                         ..EventFilter::default()
@@ -113,12 +152,17 @@ impl Session {
                 )
             });
         }
-        let t = ui.tokens();
         let page = ((area.height() / t.row_height()).floor() as usize)
             .saturating_sub(2)
             .max(1);
         let nothing_focused = ui.memory(|m| m.focused().is_none());
         if frame.keys && (focused || nothing_focused) {
+            // TODO(#31): the search field comes between the listing and Preview.
+            let cycle = ui.input_mut(|i| {
+                let next = frame.keymap.take(i, Action::CycleFocus);
+                next | frame.keymap.take(i, Action::CycleFocusBack)
+            });
+            self.focus_preview |= cycle;
             self.keys(ui, frame.keymap, page);
         }
 
@@ -200,6 +244,38 @@ impl Session {
             let effect = self.folder.apply(command, now);
             self.carry_out(effect);
         }
+        if std::mem::take(&mut self.focus_preview) {
+            ui.memory_mut(|m| m.request_focus(self.preview.id));
+        }
+    }
+
+    /// The Focused entry, as Preview shows it.
+    fn focused(&self) -> Option<Focused> {
+        if self.folder.is_empty() {
+            return None;
+        }
+        let i = self.folder.focus();
+        let path = self.folder.path();
+        Some(match self.folder.line(i) {
+            Line::Here => Focused {
+                path: path.to_owned(),
+                name: ".".into(),
+                entry: None,
+            },
+            Line::Up => Focused {
+                path: parent(path).map_or_else(|| "/".to_owned(), |(up, _)| up),
+                name: "..".into(),
+                entry: None,
+            },
+            Line::Entry(_) => {
+                let entry = self.folder.entry(i)?.clone();
+                Focused {
+                    path: join(path, &entry.name),
+                    name: entry.name.clone(),
+                    entry: Some(entry),
+                }
+            }
+        })
     }
 
     fn cells(&self, row: &mut widgets::TableRow<'_>, i: usize, show_icons: bool) {
@@ -285,8 +361,7 @@ impl Session {
             Effect::List { path, focus } => {
                 self.listing = Some((self.connection.list(path), focus));
             }
-            // TODO(#33): Preview takes the keyboard.
-            Effect::Preview => {}
+            Effect::Preview => self.focus_preview = true,
         }
     }
 
@@ -316,6 +391,9 @@ impl Session {
         }
     }
 }
+
+/// The Preview panel's width when a Session opens.
+const PREVIEW_WIDTH: f32 = 360.0;
 
 /// An unsaved Session's tab label: `account@address`, and `:port` off port 22.
 pub fn label(target: &Target) -> String {

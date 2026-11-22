@@ -286,6 +286,11 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
         .recv_timeout(Duration::from_secs(10))
         .expect("the listing arrives")
         .expect("the listing succeeds");
+    // The wake follows the answer from the SSH thread, so it may land a moment later.
+    let start = std::time::Instant::now();
+    while wakes.load(Ordering::SeqCst) <= before && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(
         wakes.load(Ordering::SeqCst) > before,
         "the answer wakes the frame"
@@ -332,4 +337,40 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
         .recv_timeout(Duration::from_secs(10))
         .unwrap();
     assert!(missing.is_err());
+}
+
+#[test]
+fn a_session_reads_part_of_a_file_and_says_why_it_cannot() {
+    use sshexplorer::ssh::ReadError;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::start();
+    let srv = fixture.root().join("srv");
+    std::fs::create_dir_all(&srv).unwrap();
+    let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(srv.join("data.bin"), &bytes).unwrap();
+    std::fs::write(srv.join("secret"), b"no").unwrap();
+    std::fs::set_permissions(srv.join("secret"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let ssh = Ssh::new(|| {});
+    let opened = opened(&ssh, &fixture);
+    let read = |path: &str, offset: u64, len: u64| {
+        opened
+            .session
+            .read(path.to_string(), offset, len)
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the read answers")
+    };
+
+    // The whole file, in more than one SFTP read.
+    assert_eq!(read("/srv/data.bin", 0, 1 << 20).unwrap(), bytes);
+    // A part from an offset; at the end, only what is there.
+    assert_eq!(read("/srv/data.bin", 10, 5).unwrap(), bytes[10..15]);
+    assert_eq!(read("/srv/data.bin", 99_998, 10).unwrap(), bytes[99_998..]);
+    assert_eq!(read("/srv/nope", 0, 10), Err(ReadError::NoSuchFile));
+    // Root reads anything, so the refusal is only checked as an ordinary user.
+    if std::fs::read(srv.join("secret")).is_err() {
+        assert_eq!(read("/srv/secret", 0, 10), Err(ReadError::PermissionDenied));
+    }
+    assert_eq!(ReadError::NoSuchFile.to_string(), "no such file");
+    assert_eq!(ReadError::PermissionDenied.to_string(), "permission denied");
 }

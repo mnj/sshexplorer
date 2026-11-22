@@ -14,6 +14,7 @@
 //! - **Files.** The filesystem is `root()`, a temp directory; the remote path `/x` is
 //!   `root()/x`. The account's home is `/home/tester` and starts with [`HOME_ENTRIES`].
 //!   Add files with `std::fs` under `root()`.
+//! - **Reads.** Files open for reading only; a request to write is refused.
 //! - **Limits.** SFTP semantics are the fixture's own (no `longname`; `stat` follows
 //!   links, while `lstat` and `readdir` describe a link itself, as OpenSSH does). For
 //!   real OpenSSH behaviour, run an unprivileged `sshd` on a high port (public key only)
@@ -30,7 +31,8 @@ use russh::keys::PrivateKey;
 use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Attrs, File, FileAttributes, Handle, Name, SftpHandle, Status, StatusCode, Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, SftpHandle, Status, StatusCode,
+    Version,
 };
 use tokio::sync::Mutex;
 
@@ -214,6 +216,7 @@ impl russh::server::Handler for SshHandler {
                 let sftp = SftpHandler {
                     root: self.root.clone(),
                     dirs: HashMap::new(),
+                    files: HashMap::new(),
                     next: 0,
                 };
                 russh_sftp::server::run(channel.into_stream(), sftp).await;
@@ -225,11 +228,13 @@ impl russh::server::Handler for SshHandler {
 }
 
 /// SFTP over the served directory: enough for listing (realpath, stat, lstat, readlink,
-/// opendir, readdir).
+/// opendir, readdir) and for reading files (open for reading, read). Writing is refused.
 struct SftpHandler {
     root: PathBuf,
     /// Open directory handles: the entries still to send, or None once sent.
     dirs: HashMap<String, Option<Vec<File>>>,
+    /// Open file handles, for reading.
+    files: HashMap<String, std::fs::File>,
     next: u64,
 }
 
@@ -352,9 +357,50 @@ impl russh_sftp::server::Handler for SftpHandler {
         }
     }
 
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, Self::Error> {
+        if pflags.intersects(OpenFlags::WRITE | OpenFlags::APPEND | OpenFlags::CREATE) {
+            return Err(StatusCode::PermissionDenied);
+        }
+        let file = std::fs::File::open(self.local(&filename)).map_err(status)?;
+        self.next += 1;
+        let handle = format!("file{}", self.next);
+        self.files.insert(handle.clone(), file);
+        Ok(Handle {
+            id,
+            handle: SftpHandle::from(&handle),
+        })
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: SftpHandle,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, Self::Error> {
+        use std::os::unix::fs::FileExt as _;
+
+        let key = String::from_utf8_lossy(handle.as_bytes()).into_owned();
+        let file = self.files.get(&key).ok_or(StatusCode::Failure)?;
+        let mut data = vec![0; len as usize];
+        let n = file.read_at(&mut data, offset).map_err(status)?;
+        if n == 0 && len > 0 {
+            return Err(StatusCode::Eof);
+        }
+        data.truncate(n);
+        Ok(Data { id, data })
+    }
+
     async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
-        self.dirs
-            .remove(String::from_utf8_lossy(handle.as_bytes()).as_ref());
+        let key = String::from_utf8_lossy(handle.as_bytes()).into_owned();
+        self.dirs.remove(&key);
+        self.files.remove(&key);
         Ok(Self::ok(id))
     }
 }

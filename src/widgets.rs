@@ -29,6 +29,7 @@ mod badge;
 mod bar;
 mod button;
 mod check;
+mod code;
 mod dialog;
 mod dropdown;
 mod field;
@@ -64,6 +65,7 @@ pub use button::{
 pub use check::{
     Checkbox, MARK, Radio, SWITCH_KNOB, SWITCH_TRACK, Switch, checkbox, radio, switch,
 };
+pub use code::{CodeLine, CodeView, DetailValue, Spinner, code_view, detail_value, spinner};
 pub use dialog::{Shown, Window, button_row, dialog_frame, scrim, title_row, window, window_frame};
 pub use dropdown::{
     Choice, ChoiceRow, Dropdown, FilterDropdown, Picked, choice, choice_value, dropdown,
