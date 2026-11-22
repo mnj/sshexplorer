@@ -24,7 +24,7 @@ _Avoid_: Tab, connection
 The control that selects a Session.
 
 **Tree view**:
-The browsing view that shows the remote filesystem as an expandable tree. A Session opens in Tree view.
+The browsing view that shows the remote filesystem as an expandable tree rooted at `/`. A Session opens in Tree view.
 _Avoid_: Full tree
 
 **Folder view**:
@@ -35,8 +35,16 @@ _Avoid_: List view, current folder
 A setting on a Host that its Sessions inherit. A readonly Session cannot change the remote filesystem. Download stays available. A new Host is readonly.
 _Avoid_: Locked
 
+**Focused entry**:
+The one entry in a listing that the keyboard is on. Preview shows it.
+_Avoid_: Cursor, current entry
+
+**Selection**:
+The set of entries a Download acts on. It holds one or more entries and may span directories in Tree view.
+_Avoid_: Marked entries, checked entries
+
 **Download**:
-A copy of the selected remote file, or of the selected directory and its contents, written into the Host's local folder.
+A copy of each entry in the Selection, with a directory's contents, written into the Host's local folder.
 _Avoid_: Transfer, export
 
 **Local folder**:
@@ -48,7 +56,7 @@ The remote directory a Session opens in. It is set on the Host. The operator can
 _Avoid_: Start folder, remote root
 
 **Current directory**:
-The directory a Session is at. In Folder view it is the listed directory. In Tree view it is the selected directory, or the selected file's parent, or the Initial remote folder when nothing is selected. A Search starts there.
+The directory a Session is at. In Folder view it is the listed directory. In Tree view it is the Focused entry when that is a directory, or the Focused entry's parent, or the Initial remote folder when nothing is focused. A Search starts there.
 _Avoid_: Current place, working directory, cwd
 
 **Search**:
