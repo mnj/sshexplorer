@@ -94,6 +94,19 @@ pub enum Body {
     Archive(Listing),
     /// "Too large to preview (2.3 GiB)": a file that is only shown whole, over the cap.
     TooLarge(String),
+    /// An image: the panel decodes and shows it.
+    Image(Image),
+}
+
+/// An image's bytes, fetched whole.
+pub struct Image {
+    pub fetched: Fetched,
+}
+
+/// Whether `kind` is shown only from the whole file, so that over the size cap it is
+/// [`Body::TooLarge`] and not fetched.
+pub fn whole(kind: Kind) -> bool {
+    matches!(kind, Kind::Image | Kind::Pdf | Kind::Archive)
 }
 
 impl Body {
@@ -262,6 +275,7 @@ impl Preview {
         let body = match kind {
             Kind::Directory => Body::Header,
             Kind::Text | Kind::Source | Kind::Markdown | Kind::Other => Body::Loading,
+            Kind::Image => Body::Loading,
             Kind::Archive if archive::may_list(&focused.name) => Body::Loading,
             _ => Body::Unsupported,
         };
@@ -292,7 +306,7 @@ impl Preview {
             return None;
         }
         let size = shown.focused.entry.as_ref().and_then(|e| e.size);
-        if let Some(size) = size.filter(|&s| s > cap && shown.kind == Kind::Archive) {
+        if let Some(size) = size.filter(|&s| s > cap && whole(shown.kind)) {
             shown.body = Body::TooLarge(too_large(size));
             return None;
         }
@@ -336,6 +350,23 @@ impl Preview {
         let total = shown.focused.entry.as_ref().and_then(|e| e.size);
         let fetched_len = bytes.len() as u64;
         let capped = total.is_some_and(|t| t > fetched_len);
+        if let Some(total) = total.filter(|_| capped && shown.kind == Kind::Image) {
+            shown.body = Body::TooLarge(too_large(total));
+            return;
+        }
+        if shown.kind == Kind::Image {
+            shown.body = match place.keep(bytes) {
+                Ok(kept) => Body::Image(Image {
+                    fetched: Fetched {
+                        kept,
+                        total,
+                        capped,
+                    },
+                }),
+                Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
+            };
+            return;
+        }
         if shown.kind == Kind::Archive {
             let listed = archive::list(&shown.focused.name, &bytes);
             shown.body = match (total.filter(|_| capped), listed) {
