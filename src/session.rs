@@ -707,7 +707,8 @@ impl Session {
                             h.text("Kind");
                         });
                         let focus = matches.focus();
-                        for i in 0..count {
+                        let shown = reveal.then_some(focus).flatten();
+                        table.rows(count, shown, |table, i| {
                             let m = matches.get(i);
                             let selection = match (matches.is_selected(i), live) {
                                 (false, _) => Selection::None,
@@ -744,7 +745,7 @@ impl Session {
                                     Command::Click(i)
                                 });
                             }
-                        }
+                        });
                     });
             });
         if let Some(command) = command {
@@ -1012,7 +1013,8 @@ impl Session {
                             View::Tree => (self.tree.len(), self.tree.focus()),
                             View::Folder => (self.folder.len(), Some(self.folder.focus())),
                         };
-                        for i in 0..len {
+                        let shown = reveal.then_some(focus).flatten();
+                        table.rows(len, shown, |table, i| {
                             let selected = match self.view {
                                 View::Tree => self.tree.is_selected(i),
                                 View::Folder => self.folder.is_selected(i),
@@ -1052,7 +1054,7 @@ impl Session {
                                     Command::Click(i)
                                 });
                             }
-                        }
+                        });
                     });
             });
         if let Some(sort) = sort {
