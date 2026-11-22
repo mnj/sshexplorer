@@ -681,6 +681,9 @@ async fn list_folder(
     list(sftp, path).await
 }
 
+/// The reason [`Session::list`] gives for a directory that does not exist.
+pub const NO_SUCH_FILE: &str = "no such file";
+
 /// Why a request failed, as a listing's reason row says it: "permission denied" for a
 /// status from the host, whose own message often only repeats the status.
 fn reason(error: &russh_sftp::client::error::Error) -> String {

@@ -11,9 +11,10 @@
 
 use egui::{EventFilter, Id, Key, Modifiers, Sense};
 
+use crate::archive::{Listing, Stamp};
 use crate::folder::{modified_text, permissions_text, size_text};
 use crate::keymap::{Action, KeyMap};
-use crate::preview::{self, Body, Focused, Preview, UNSUPPORTED};
+use crate::preview::{self, Body, Focused, MarkdownView, Preview, Text, UNSUPPORTED};
 use crate::scratch::Place;
 use crate::settings::AppSettings;
 use crate::source::Highlighting;
@@ -50,7 +51,16 @@ pub struct PreviewPanel {
     reading: Option<(u64, Request<Vec<u8>>)>,
     /// Rows the text view showed last frame, for paging.
     page: usize,
+    /// The rendered Markdown view's state.
+    markdown: egui_commonmark::CommonMarkCache,
+    /// The shown archive listing's rows, made on first draw.
+    archive_rows: Option<Vec<String>>,
 }
+
+/// Under "Too large to preview (…)".
+pub const TOO_LARGE_HINT: &str = "Download it to open it locally.";
+/// An archive with no members.
+pub const EMPTY_ARCHIVE: &str = "The archive is empty.";
 
 impl PreviewPanel {
     pub fn new(id: Id) -> Self {
@@ -59,6 +69,8 @@ impl PreviewPanel {
             preview: Preview::default(),
             reading: None,
             page: 1,
+            markdown: egui_commonmark::CommonMarkCache::default(),
+            archive_rows: None,
         }
     }
 
@@ -70,6 +82,7 @@ impl PreviewPanel {
         let now = ui.input(|i| i.time);
         if self.preview.focus(frame.focused, now) {
             self.reading = None;
+            self.archive_rows = None;
         }
         self.receive(&Place::of(&frame.settings.preview));
         let cap = frame.settings.preview.size_cap_bytes();
@@ -132,23 +145,49 @@ impl PreviewPanel {
             Body::Failed(line) => {
                 ui.add(widgets::invalid_message(line.as_str()));
             }
-            Body::Text(text) => {
-                if let Some(banner) = text.fetched.banner() {
-                    ui.add(widgets::warning_message(banner));
+            Body::TooLarge(line) => {
+                ui.add(widgets::warning_message(line.as_str()));
+                ui.label(t.ty.body.rich(TOO_LARGE_HINT).color(t.color.text.muted));
+            }
+            Body::Archive(listing) => {
+                if listing.members.is_empty() {
+                    ui.label(t.ty.body.rich(EMPTY_ARCHIVE).color(t.color.text.muted));
                 }
-                if let Some(h) = &mut text.highlighting {
-                    h.poll();
-                }
-                let spans = text.highlighting.as_ref().and_then(|h| h.spans());
+                let rows = self
+                    .archive_rows
+                    .get_or_insert_with(|| archive_rows(listing, frame.zone));
                 let line = |i: usize| CodeLine {
-                    text: text.line(i),
-                    spans: spans
-                        .and_then(|s| s.get(i))
-                        .map_or(&[][..], |s| s.as_slice()),
+                    text: &rows[i],
+                    spans: &[],
                 };
-                self.page = widgets::code_view(self.id.with("text"), text.line_count(), &line)
+                self.page = widgets::code_view(self.id.with("archive"), rows.len(), &line)
                     .scroll_rows(scroll * self.page as f32)
                     .show(ui);
+            }
+            Body::Text(text) => {
+                self.page = text_view(ui, self.id, text, scroll * self.page as f32);
+            }
+            Body::Markdown(markdown) => {
+                let views = [
+                    (MarkdownView::Rendered, "Rendered"),
+                    (MarkdownView::Source, "Source"),
+                ];
+                ui.add(widgets::segmented(&mut markdown.view, &views));
+                ui.add_space(t.space.stack);
+                match markdown.view {
+                    MarkdownView::Source => {
+                        let rows = scroll * self.page as f32;
+                        self.page = text_view(ui, self.id, &mut markdown.text, rows);
+                    }
+                    MarkdownView::Rendered => {
+                        if let Some(banner) = markdown.text.fetched.banner() {
+                            ui.add(widgets::warning_message(banner));
+                        }
+                        let id = self.id.with("markdown");
+                        let rendered = &markdown.rendered;
+                        crate::markdown::show(ui, id, &mut self.markdown, rendered, scroll);
+                    }
+                }
             }
         }
         leave
@@ -195,6 +234,7 @@ impl PreviewPanel {
         };
         let id = *id;
         self.reading = None;
+        self.archive_rows = None;
         self.preview.arrive(id, answer, place);
     }
 
@@ -204,7 +244,7 @@ impl PreviewPanel {
         let Some(shown) = self.preview.shown_mut() else {
             return;
         };
-        let Body::Text(text) = &mut shown.body else {
+        let Some(text) = shown.body.text_mut() else {
             return;
         };
         let Some(syntax) = text.syntax else {
@@ -222,6 +262,57 @@ impl PreviewPanel {
             move || ctx.request_repaint(),
         ));
     }
+}
+
+/// A text's lines under the size cap's banner, scrolled `rows` further. Returns the rows
+/// in view.
+fn text_view(ui: &mut egui::Ui, id: Id, text: &mut Text, rows: f32) -> usize {
+    if let Some(banner) = text.fetched.banner() {
+        ui.add(widgets::warning_message(banner));
+    }
+    if let Some(h) = &mut text.highlighting {
+        h.poll();
+    }
+    let spans = text.highlighting.as_ref().and_then(|h| h.spans());
+    let line = |i: usize| CodeLine {
+        text: text.line(i),
+        spans: spans
+            .and_then(|s| s.get(i))
+            .map_or(&[][..], |s| s.as_slice()),
+    };
+    widgets::code_view(id.with("text"), text.line_count(), &line)
+        .scroll_rows(rows)
+        .show(ui)
+}
+
+/// One row per archive member: size, modified time (in `zone` when the format records
+/// an instant) and path, in columns.
+fn archive_rows(listing: &Listing, zone: &jiff::tz::TimeZone) -> Vec<String> {
+    listing
+        .members
+        .iter()
+        .map(|m| {
+            let size = if m.is_dir {
+                String::new()
+            } else {
+                size_text(m.size)
+            };
+            let modified = match m.modified {
+                Some(Stamp::Unix(s)) => u32::try_from(s)
+                    .map(|s| modified_text(s, zone))
+                    .unwrap_or_default(),
+                Some(Stamp::Civil {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                }) => format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"),
+                None => String::new(),
+            };
+            format!("{size:>10}  {modified:<16}  {}", m.path)
+        })
+        .collect()
 }
 
 /// The details header: name, kind, size, modified, permissions, owner and group, and a
