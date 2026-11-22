@@ -47,6 +47,8 @@ pub struct Match {
     /// The path relative to the start, `/`-separated.
     pub path: String,
     pub is_dir: bool,
+    /// A symlink to a directory: Download follows it only when asked.
+    pub link: bool,
 }
 
 /// What a Search says, in order. The last is [`Event::Ended`].
@@ -166,8 +168,9 @@ fn escape(text: &str) -> String {
 }
 
 /// `find`'s expression: directories in `prunes` (relative, `./…`) are not entered, a
-/// matching name prints its kind and path, and when following, every symlink to a
-/// directory is printed too, `L` when its name matches and `l` when not.
+/// matching name prints its kind and path (`D` for a symlink to a directory), and when
+/// following, every symlink to a directory is printed too, `L` when its name matches and
+/// `l` when not.
 fn expression(pattern: &str, follow: bool, prunes: &[String]) -> Vec<String> {
     fn print(kind: &str) -> [&str; 5] {
         ["-exec", "printf", kind, "{}", ";"]
@@ -196,7 +199,7 @@ fn expression(pattern: &str, follow: bool, prunes: &[String]) -> Vec<String> {
     args.extend(print("d%s\\0"));
     args.push("-o");
     args.extend(is_dir_link);
-    args.extend(print("d%s\\0"));
+    args.extend(print("D%s\\0"));
     args.push("-o");
     args.extend(print("f%s\\0"));
     args.push(")");
@@ -415,6 +418,7 @@ async fn walk(
                     batch.push(Match {
                         path: shown,
                         is_dir: kind != b'f',
+                        link: matches!(kind, b'L' | b'D'),
                     });
                     *counts.found += 1;
                     if *counts.found >= counts.cap {

@@ -100,6 +100,7 @@ fn file(path: &str) -> Match {
     Match {
         path: path.to_string(),
         is_dir: false,
+        link: false,
     }
 }
 
@@ -107,6 +108,15 @@ fn dir(path: &str) -> Match {
     Match {
         path: path.to_string(),
         is_dir: true,
+        link: false,
+    }
+}
+
+fn dir_link(path: &str) -> Match {
+    Match {
+        path: path.to_string(),
+        is_dir: true,
+        link: true,
     }
 }
 
@@ -174,7 +184,7 @@ fn symlinked_directories_are_not_followed_by_default_but_a_matching_link_is_a_ma
 
     let (matches, ended) = s.run(s.query("match"));
 
-    assert_eq!(matches, vec![dir("match-link")]);
+    assert_eq!(matches, vec![dir_link("match-link")]);
     assert_eq!(ended, FINISHED);
 }
 
@@ -192,6 +202,8 @@ fn following_walks_each_link_target_once_and_keeps_matching_links() {
     query.follow = true;
     let (matches, ended) = s.run(query);
 
+    assert!(matches.contains(&dir_link("match-link")), "{matches:?}");
+    assert!(matches.contains(&dir_link("docs/up-match")), "{matches:?}");
     let paths: Vec<&str> = matches.iter().map(|m| m.path.as_str()).collect();
     assert!(paths.contains(&"match-link"), "{paths:?}");
     assert!(paths.contains(&"docs/up-match"), "{paths:?}");
