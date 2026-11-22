@@ -12,6 +12,8 @@
 //!   [`openssh_config`] reads and applies the operator's `~/.ssh/config` (ADR-0002).
 //! - [`settings`] holds the app settings saved between runs, and [`keymap`] every key
 //!   binding; [`binding_editor`] is Settings → Keys, where the operator rebinds them.
+//! - [`folder`] and [`tree`] are the two views apart from egui, and [`refresh`] times
+//!   Auto-refresh.
 
 pub mod app;
 pub mod binding_editor;
@@ -27,6 +29,7 @@ pub mod known_hosts;
 pub mod openssh_config;
 pub mod preview;
 pub mod preview_panel;
+pub mod refresh;
 pub mod scratch;
 pub mod session;
 pub mod settings;

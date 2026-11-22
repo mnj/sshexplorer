@@ -204,6 +204,9 @@ pub struct Folder {
     anchor: Option<String>,
     typed: String,
     typed_at: f64,
+    /// What the lines were last arranged with.
+    sort: Sort,
+    show_hidden: bool,
 }
 
 impl Folder {
@@ -217,9 +220,46 @@ impl Folder {
             anchor: None,
             typed: String::new(),
             typed_at: f64::NEG_INFINITY,
+            sort,
+            show_hidden,
         };
         folder.arrange(sort, show_hidden);
         folder
+    }
+
+    /// Merges a Refresh's `listing` of this directory, and gives whether the Focused
+    /// entry is a file that survived with a changed size or modified time, for Preview to
+    /// reload. Focus and Selection stay by name; a vanished Focused entry moves focus to
+    /// the next line left, else the previous one. Vanished entries leave the Selection,
+    /// and an emptied Selection becomes the Focused entry.
+    pub fn refreshed(&mut self, listing: Listing) -> bool {
+        let names: Vec<String> = (0..self.len()).map(|i| self.name(i).to_owned()).collect();
+        let at = self.focus;
+        let stamp = |f: &Folder| {
+            f.entry(f.focus)
+                .filter(|e| !e.is_dir)
+                .map(|e| (e.name.clone(), e.size, e.modified))
+        };
+        let before = stamp(self);
+        let had_selection = !self.selected.is_empty();
+        self.listing = listing;
+        // The old lines index the old listing: lay out afresh and find the focus by name.
+        self.lines.clear();
+        self.arrange(self.sort, self.show_hidden);
+        let next = || names[at + 1..].iter().find_map(|n| self.find(n));
+        let previous = || names[..at].iter().rev().find_map(|n| self.find(n));
+        self.focus = self
+            .find(&names[at])
+            .or_else(next)
+            .or_else(previous)
+            .unwrap_or(0);
+        if had_selection && self.selected.is_empty() {
+            self.choose(self.focus);
+        }
+        match (before, stamp(self)) {
+            (Some(before), Some(after)) => after.0 == before.0 && after != before,
+            _ => false,
+        }
     }
 
     /// The listed directory's absolute path.
@@ -279,6 +319,8 @@ impl Folder {
     /// Lays the lines out again in `sort`, with or without hidden entries. Focus stays on
     /// its name while that is still listed; entries no longer listed leave the Selection.
     pub fn arrange(&mut self, sort: Sort, show_hidden: bool) {
+        self.sort = sort;
+        self.show_hidden = show_hidden;
         let focused = self
             .lines
             .get(self.focus)
