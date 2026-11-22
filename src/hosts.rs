@@ -21,6 +21,10 @@ pub enum AuthMethod {
 /// A saved Host, or the fields of one being entered.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct Host {
+    /// A stable name for the Host that never changes with its fields: the credential
+    /// store keeps its secret under it. Empty until the Host is first saved.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub display_name: String,
     pub address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,7 +36,7 @@ pub struct Host {
     /// Empty means the account's home directory.
     pub initial_folder: String,
     pub readonly: bool,
-    /// Stored, but nothing is remembered yet.
+    /// Whether its password or key passphrase is kept in the OS credential store.
     pub remember: bool,
 }
 
@@ -40,6 +44,7 @@ impl Default for Host {
     /// A new Host: readonly, not remembering, downloading into Downloads.
     fn default() -> Self {
         Host {
+            id: String::new(),
             display_name: String::new(),
             address: String::new(),
             port: None,
@@ -62,6 +67,21 @@ pub fn downloads_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("Downloads"))
 }
 
+/// A new Host id: 128 random bits in hex.
+pub fn new_id() -> String {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    let half = || {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        hasher.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
+}
+
 impl Host {
     /// The Host read from one `[[host]]` table: a field that is missing or cannot be read
     /// takes a new Host's value, and the others stay as written.
@@ -78,6 +98,7 @@ impl Host {
             )*};
         }
         read!(
+            id,
             display_name,
             address,
             account,
