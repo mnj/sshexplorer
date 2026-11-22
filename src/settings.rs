@@ -40,12 +40,27 @@ pub struct AppSettings {
 }
 
 /// The Search page. Its Follow symlinked directories is shared with Download.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Search {
     /// "Follow symlinked directories", for Search and Download alike. Off by default.
     #[serde(deserialize_with = "lenient")]
     pub follow_links: bool,
+    /// The match cap: a Search stops once it has found this many. At least 1.
+    #[serde(deserialize_with = "match_cap")]
+    pub match_cap: u32,
+}
+
+/// The match cap a new install and a reset have.
+pub const DEFAULT_MATCH_CAP: u32 = 1000;
+
+impl Default for Search {
+    fn default() -> Self {
+        Search {
+            follow_links: false,
+            match_cap: DEFAULT_MATCH_CAP,
+        }
+    }
 }
 
 /// The Download page. It also shows [`Search::follow_links`].
@@ -404,6 +419,15 @@ fn size_cap<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         .as_integer()
         .filter(|n| (1..=i64::from(u32::MAX)).contains(n))
         .map_or(DEFAULT_SIZE_CAP, |n| n as u32))
+}
+
+/// A match cap: a whole number from 1, or the default.
+fn match_cap<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let value = toml::Value::deserialize(d)?;
+    Ok(value
+        .as_integer()
+        .filter(|n| (1..=i64::from(u32::MAX)).contains(n))
+        .map_or(DEFAULT_MATCH_CAP, |n| n as u32))
 }
 
 /// A UI scale: the nearest step, or the default when it is not a number.

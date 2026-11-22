@@ -32,6 +32,12 @@ base64 = "0.22"
 # Source Preview: syntect's default syntaxes and themes with the pure-Rust regex engine
 # (no oniguruma C library), used directly rather than through egui_extras (issue #33).
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# Image Preview (issue #35): the `image` crate's still and animated formats, decoded on a
+# worker thread, without rayon and without AVIF (its decoder needs the dav1d C library).
+image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+# SVG, rasterised on the same worker. 0.45 is the release egui_extras uses; `text` with
+# the system fonts so `<text>` draws.
+resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts"] }
 # Markdown Preview (issue #34), with code blocks highlighted by syntect. No `load-images`:
 # it installs egui_extras' file loader, which would resolve a remote README's relative
 # images against the local disk. pulldown-cmark, its parser, also replaces each image
@@ -75,6 +81,8 @@ egui_kittest = "0.37"
 tempfile = "3.27"
 # The test SSH agent (tests/auth.rs) is russh's agent server, which takes a Stream.
 futures = "0.3.34"
+# The test server runs a Search's `find` as a child process (tests/common/fixture.rs).
+tokio = { version = "1.54", features = ["process"] }
 
 [lints.rust]
 unsafe_code = "forbid"
