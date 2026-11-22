@@ -49,7 +49,9 @@ fn browsing(
 ) -> Harness<'static, App> {
     let known_hosts = dir.path().join("known_hosts");
     std::fs::write(&known_hosts, format!("{}\n", fixture.known_hosts_line())).unwrap();
-    let app = App::with_settings(settings).known_hosts_at(known_hosts);
+    let app = App::with_settings(settings)
+        .known_hosts_at(known_hosts)
+        .agent_at(None);
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 700.0))
         .with_context_setup(app::setup)
@@ -249,7 +251,7 @@ fn an_image_over_the_size_cap_says_so_and_points_to_download() {
     });
     assert!(
         harness
-            .query_by_label_contains("Download it to see it")
+            .query_by_label_contains("Download it to open it locally")
             .is_some()
     );
 

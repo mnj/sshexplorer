@@ -10,10 +10,14 @@
 //!
 //! Kind detection is local: the extension first, then the first bytes' signature, then
 //! "no NUL and valid UTF-8 in the first [`SNIFF`] bytes" for text. Nothing runs on the
-//! host. Text, source and Markdown (shown as its source until it has its own view) are
-//! the kinds with a body so far; other kinds plug in as further [`Body`] variants and
-//! get the same [`Fetched`] bytes with the size cap's result.
+//! host. Text, source, Markdown and archives are the kinds with a body so far; other
+//! kinds plug in as further [`Body`] variants and get the same [`Fetched`] bytes with the
+//! size cap's result. Markdown is rendered, or its source on the Rendered / Source
+//! switch. Zip and tar archives show
+//! their [`archive`] listing; they are read whole, so one over the cap is not fetched
+//! and shows [`too_large`].
 
+use crate::archive::{self, Listing};
 use crate::folder::size_text;
 use crate::kind::Kind;
 use crate::scratch::{Kept, Place};
@@ -81,15 +85,17 @@ pub enum Body {
     /// "Loading preview…" and a spinner: waiting for focus to rest, or for the bytes.
     Loading,
     Text(Text),
+    Markdown(Markdown),
     /// [`UNSUPPORTED`].
     Unsupported,
     /// One line, such as "Cannot read: permission denied".
     Failed(String),
+    /// An archive's members.
+    Archive(Listing),
+    /// "Too large to preview (2.3 GiB)": a file that is only shown whole, over the cap.
+    TooLarge(String),
     /// An image: the panel decodes and shows it.
     Image(Image),
-    /// [`too_large_line`] for a file of this size, which is not fetched, and a hint to
-    /// Download it.
-    TooLarge(u64),
 }
 
 /// An image's bytes, fetched whole.
@@ -103,9 +109,32 @@ pub fn whole(kind: Kind) -> bool {
     matches!(kind, Kind::Image | Kind::Pdf | Kind::Archive)
 }
 
-/// "Too large to preview (2.3 GiB)".
-pub fn too_large_line(size: u64) -> String {
-    format!("Too large to preview ({})", short_size(size))
+impl Body {
+    /// The text a text, source or Markdown body holds, which the panel highlights.
+    pub fn text_mut(&mut self) -> Option<&mut Text> {
+        match self {
+            Body::Text(text) => Some(text),
+            Body::Markdown(markdown) => Some(&mut markdown.text),
+            _ => None,
+        }
+    }
+}
+
+/// A Markdown file: rendered by default, or its highlighted source.
+pub struct Markdown {
+    /// The source, as Source shows it.
+    pub text: Text,
+    /// What Rendered shows: the source with each image replaced by its alt text.
+    pub rendered: String,
+    pub view: MarkdownView,
+}
+
+/// The Rendered / Source switch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownView {
+    #[default]
+    Rendered,
+    Source,
 }
 
 /// A fetch that is due: read up to `len` bytes of `path`, and hand the answer to
@@ -247,6 +276,7 @@ impl Preview {
             Kind::Directory => Body::Header,
             Kind::Text | Kind::Source | Kind::Markdown | Kind::Other => Body::Loading,
             Kind::Image => Body::Loading,
+            Kind::Archive if archive::may_list(&focused.name) => Body::Loading,
             _ => Body::Unsupported,
         };
         self.shown = Some(Shown {
@@ -275,14 +305,14 @@ impl Preview {
         if shown.started || !matches!(shown.body, Body::Loading) || now - shown.since < DELAY {
             return None;
         }
+        let size = shown.focused.entry.as_ref().and_then(|e| e.size);
+        if let Some(size) = size.filter(|&s| s > cap && whole(shown.kind)) {
+            shown.body = Body::TooLarge(too_large(size));
+            return None;
+        }
         self.next_id += 1;
         shown.started = true;
         shown.fetch = Some(self.next_id);
-        let size = shown.focused.entry.as_ref().and_then(|e| e.size);
-        if let Some(size) = size.filter(|&s| s > cap && whole(shown.kind)) {
-            shown.body = Body::TooLarge(size);
-            return None;
-        }
         Some(Fetch {
             id: self.next_id,
             path: shown.focused.path.clone(),
@@ -320,8 +350,8 @@ impl Preview {
         let total = shown.focused.entry.as_ref().and_then(|e| e.size);
         let fetched_len = bytes.len() as u64;
         let capped = total.is_some_and(|t| t > fetched_len);
-        if let Some(total) = total.filter(|_| capped && whole(shown.kind)) {
-            shown.body = Body::TooLarge(total);
+        if let Some(total) = total.filter(|_| capped && shown.kind == Kind::Image) {
+            shown.body = Body::TooLarge(too_large(total));
             return;
         }
         if shown.kind == Kind::Image {
@@ -334,6 +364,17 @@ impl Preview {
                     },
                 }),
                 Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
+            };
+            return;
+        }
+        if shown.kind == Kind::Archive {
+            let listed = archive::list(&shown.focused.name, &bytes);
+            shown.body = match (total.filter(|_| capped), listed) {
+                // Sniffed after a capped fetch: only part of it is here.
+                (Some(total), _) => Body::TooLarge(too_large(total)),
+                (None, None) => Body::Unsupported,
+                (None, Some(Ok(listing))) => Body::Archive(listing),
+                (None, Some(Err(_))) => Body::Failed(archive::CORRUPT.to_owned()),
             };
             return;
         }
@@ -356,7 +397,16 @@ impl Preview {
                     total,
                     capped,
                 };
-                Body::Text(Text::new(&shown.focused.name, fetched, &bytes))
+                let text = Text::new(&shown.focused.name, fetched, &bytes);
+                if shown.kind == Kind::Markdown {
+                    Body::Markdown(Markdown {
+                        rendered: crate::markdown::without_images(&text.text),
+                        text,
+                        view: MarkdownView::Rendered,
+                    })
+                } else {
+                    Body::Text(text)
+                }
             }
             Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
         };
@@ -446,6 +496,11 @@ pub fn capped_banner(shown: u64, total: u64) -> String {
         short_size(shown),
         short_size(total)
     )
+}
+
+/// "Too large to preview (2.3 GiB)", for a file shown only whole that is over the cap.
+pub fn too_large(total: u64) -> String {
+    format!("Too large to preview ({})", short_size(total))
 }
 
 /// The one line a failed read shows, from the reason [`crate::ssh::Session::read`]

@@ -2,7 +2,7 @@
 //! the size cap.
 
 use sshexplorer::kind::Kind;
-use sshexplorer::preview::{self, Body, Focused, Preview};
+use sshexplorer::preview::{Body, Focused, Preview};
 use sshexplorer::scratch::Place;
 use sshexplorer::ssh::Entry;
 
@@ -42,12 +42,10 @@ fn an_image_over_the_cap_is_not_fetched_and_says_it_is_too_large() {
     let size = 2_469_606_195; // 2.3 GiB
     p.focus(Some(file("huge.tiff", size)), 0.0);
     assert_eq!(p.due(1.0, 10 * MIB), None);
-    assert!(matches!(p.shown().unwrap().body, Body::TooLarge(s) if s == size));
-    assert_eq!(p.wait(2.0), None);
-    assert_eq!(
-        preview::too_large_line(size),
-        "Too large to preview (2.3 GiB)"
+    assert!(
+        matches!(&p.shown().unwrap().body, Body::TooLarge(s) if s == "Too large to preview (2.3 GiB)")
     );
+    assert_eq!(p.wait(2.0), None);
     // Exactly at the cap is not over it.
     p.focus(Some(file("edge.png", 10 * MIB)), 3.0);
     assert!(p.due(4.0, 10 * MIB).is_some());
@@ -70,5 +68,7 @@ fn a_file_without_a_known_extension_that_is_an_image_shows_as_one() {
     let mut head = b"\x89PNG\r\n\x1a\n".to_vec();
     head.resize(MIB as usize, 0);
     p.arrive(fetch.id, Ok(head), &Place::Memory);
-    assert!(matches!(p.shown().unwrap().body, Body::TooLarge(s) if s == 40 * MIB));
+    assert!(
+        matches!(&p.shown().unwrap().body, Body::TooLarge(s) if s == "Too large to preview (40 MiB)")
+    );
 }

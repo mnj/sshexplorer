@@ -45,7 +45,9 @@ fn window(fixture: &Fixture, names: &[&str]) -> Window {
     HostStore::beside(store.path()).save(&hosts).unwrap();
     let known_hosts = dir.path().join("known_hosts");
     std::fs::write(&known_hosts, format!("{}\n", fixture.known_hosts_line())).unwrap();
-    let app = App::with_store(store).known_hosts_at(known_hosts);
+    let app = App::with_store(store)
+        .known_hosts_at(known_hosts)
+        .agent_at(None);
     let harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
         .with_context_setup(app::setup)
