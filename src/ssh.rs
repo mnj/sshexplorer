@@ -333,6 +333,7 @@ impl Session {
     pub fn remote(&self) -> Remote {
         Remote {
             sftp: self.sftp.clone(),
+            handle: self.handle.clone(),
         }
     }
 
@@ -384,6 +385,47 @@ impl Session {
 #[derive(Clone)]
 pub struct Remote {
     sftp: Arc<SftpSession>,
+    /// For commands, which run beside SFTP on the same connection.
+    handle: Arc<client::Handle<HostCheck>>,
+}
+
+/// A command running on the host: what it prints, as it prints it, and how it ended.
+/// Dropping it closes its channel.
+pub struct Exec {
+    channel: russh::Channel<client::Msg>,
+}
+
+/// One piece of what a command does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    /// The exit status; a command killed by a signal ends without one.
+    Exit(u32),
+}
+
+impl Exec {
+    /// The next piece of output, or `None` once the channel has closed.
+    pub async fn next(&mut self) -> Option<Output> {
+        loop {
+            match self.channel.wait().await? {
+                russh::ChannelMsg::Data { data } => return Some(Output::Stdout(data.to_vec())),
+                russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
+                    return Some(Output::Stderr(data.to_vec()));
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    return Some(Output::Exit(exit_status));
+                }
+                russh::ChannelMsg::Close => return None,
+                _ => {}
+            }
+        }
+    }
+
+    /// Closes the channel.
+    pub async fn close(self) {
+        let _ = self.channel.close().await;
+    }
 }
 
 /// A remote file open for reading.
@@ -403,6 +445,29 @@ impl Remote {
             .canonicalize(path)
             .await
             .map_err(|e| operator_reason(&e))
+    }
+
+    /// Runs `command` through the account's login shell. Fails when no channel opens or
+    /// the host refuses to run commands.
+    pub async fn exec(&self, command: &str) -> Result<Exec, String> {
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| e.to_string())?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| e.to_string())?;
+        loop {
+            match channel.wait().await {
+                Some(russh::ChannelMsg::Success) => return Ok(Exec { channel }),
+                Some(russh::ChannelMsg::Failure) | None | Some(russh::ChannelMsg::Close) => {
+                    return Err("The host refused to run the command".to_owned());
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Opens the file at `path` for reading.

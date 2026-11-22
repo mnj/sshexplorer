@@ -239,3 +239,19 @@ fn download_keeps_time_and_executable_bit_and_follows_no_links_by_default() {
     store.save(&settings).expect("saved");
     assert_eq!(store.load(), settings);
 }
+
+#[test]
+fn the_match_cap_is_a_thousand_and_a_bad_one_falls_back() {
+    assert_eq!(AppSettings::default().search.match_cap, 1000);
+    let (dir, store) = store();
+    let mut settings = AppSettings::default();
+    settings.search.match_cap = 50;
+    store.save(&settings).expect("saved");
+    assert_eq!(store.load().search.match_cap, 50);
+
+    let path = dir.path().join("config").join("settings.toml");
+    std::fs::write(&path, "[search]\nfollow_links = true\nmatch_cap = 0\n").unwrap();
+    let loaded = store.load();
+    assert_eq!(loaded.search.match_cap, 1000);
+    assert!(loaded.search.follow_links);
+}

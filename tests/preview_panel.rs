@@ -270,11 +270,18 @@ fn enter_moves_the_keyboard_to_preview_escape_returns_and_tab_cycles() {
     press(&mut harness, egui::Key::ArrowUp);
     assert!(!detail(&harness, "Name", "long.txt"));
 
-    // Tab goes to Preview and on round to the listing; Shift+Tab goes back.
+    // Tab goes to the search field, then Preview, and on round to the listing;
+    // Shift+Tab goes back.
+    let search_focused = |h: &Harness<'static, App>| {
+        h.get_by_role_and_label(Role::TextInput, "Search")
+            .is_focused()
+    };
+    press(&mut harness, egui::Key::Tab);
+    assert!(search_focused(&harness));
     press(&mut harness, egui::Key::Tab);
     assert!(preview_focused(&harness));
     press(&mut harness, egui::Key::Tab);
-    assert!(!preview_focused(&harness));
+    assert!(!preview_focused(&harness) && !search_focused(&harness));
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
     harness.run_ok();
     assert!(preview_focused(&harness));

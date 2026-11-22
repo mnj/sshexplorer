@@ -57,6 +57,8 @@ egui_kittest = "0.37"
 tempfile = "3.27"
 # The test SSH agent (tests/auth.rs) is russh's agent server, which takes a Stream.
 futures = "0.3.34"
+# The test server runs a Search's `find` as a child process (tests/common/fixture.rs).
+tokio = { version = "1.54", features = ["process"] }
 
 [lints.rust]
 unsafe_code = "forbid"

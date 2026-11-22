@@ -103,11 +103,13 @@ pub enum Action {
     CycleFocusBack,
     /// Downloads the Selection into the Session's Local folder.
     Download,
+    /// Gives the search field the keyboard.
+    Search,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 34] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -131,6 +133,7 @@ impl Action {
         Action::FolderView,
         Action::Sort,
         Action::Download,
+        Action::Search,
         Action::NextSession,
         Action::PreviousSession,
         Action::CloseSession,
@@ -177,6 +180,7 @@ impl Action {
             | Action::Refresh
             | Action::Sort
             | Action::Download => Area::Browsing,
+            Action::Search => Area::Search,
         }
     }
 
@@ -216,6 +220,7 @@ impl Action {
             Action::CycleFocus => "Cycle focus",
             Action::CycleFocusBack => "Cycle focus back",
             Action::Download => "Download",
+            Action::Search => "Search",
         }
     }
 
@@ -262,6 +267,7 @@ impl Action {
             Action::CycleFocus => Binding::new(none, Key::Tab),
             Action::CycleFocusBack => Binding::new(shift, Key::Tab),
             Action::Download => Binding::new(cmd, Key::S),
+            Action::Search => Binding::new(cmd, Key::F),
         })
     }
 }
