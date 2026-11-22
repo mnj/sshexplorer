@@ -65,6 +65,50 @@ pub enum View {
     Folder,
 }
 
+/// The rows of the view in force, read the same way whichever it is: the one place that
+/// asks which view it is for what both have.
+#[derive(Clone, Copy)]
+enum Rows<'a> {
+    Tree(&'a Tree),
+    Folder(&'a Folder),
+}
+
+impl Rows<'_> {
+    fn len(self) -> usize {
+        match self {
+            Rows::Tree(tree) => tree.len(),
+            Rows::Folder(folder) => folder.len(),
+        }
+    }
+
+    /// The focused row; the tree has none while it is still loading.
+    fn focus(self) -> Option<usize> {
+        match self {
+            Rows::Tree(tree) => tree.focus(),
+            Rows::Folder(folder) => Some(folder.focus()),
+        }
+    }
+
+    fn is_selected(self, i: usize) -> bool {
+        match self {
+            Rows::Tree(tree) => tree.is_selected(i),
+            Rows::Folder(folder) => folder.is_selected(i),
+        }
+    }
+
+    fn any_selected(self) -> bool {
+        (0..self.len()).any(|i| self.is_selected(i))
+    }
+
+    /// The Current directory.
+    fn current_dir(self) -> String {
+        match self {
+            Rows::Tree(tree) => tree.current_dir(),
+            Rows::Folder(folder) => folder.path().to_owned(),
+        }
+    }
+}
+
 /// What the Session needs from the app to draw a frame.
 pub struct Frame<'a> {
     pub keymap: &'a KeyMap,
@@ -229,9 +273,13 @@ impl Session {
         if let Some(searching) = &self.search {
             return searching.matches.selection().is_some();
         }
+        self.rows().any_selected()
+    }
+
+    fn rows(&self) -> Rows<'_> {
         match self.view {
-            View::Tree => !self.tree.selection().is_empty(),
-            View::Folder => (0..self.folder.len()).any(|i| self.folder.is_selected(i)),
+            View::Tree => Rows::Tree(&self.tree),
+            View::Folder => Rows::Folder(&self.folder),
         }
     }
 
@@ -304,10 +352,7 @@ impl Session {
 
     /// The place the toolbar shows: the Current directory.
     pub fn place(&self) -> String {
-        match self.view {
-            View::Tree => self.tree.current_dir(),
-            View::Folder => self.folder.path().to_owned(),
-        }
+        self.rows().current_dir()
     }
 
     /// Starts a Refresh, unless one or a Search is running: the Current directory, and in
@@ -997,16 +1042,11 @@ impl Session {
                                 }
                             }
                         });
-                        let (len, focus) = match self.view {
-                            View::Tree => (self.tree.len(), self.tree.focus()),
-                            View::Folder => (self.folder.len(), Some(self.folder.focus())),
-                        };
+                        let rows = self.rows();
+                        let focus = rows.focus();
                         let shown = reveal.then_some(focus).flatten();
-                        table.rows(len, shown, |table, i| {
-                            let selected = match self.view {
-                                View::Tree => self.tree.is_selected(i),
-                                View::Folder => self.folder.is_selected(i),
-                            };
+                        table.rows(rows.len(), shown, |table, i| {
+                            let selected = rows.is_selected(i);
                             let ringed = focused && Some(i) == focus;
                             let look = RowLook::of(selected, live, ringed);
                             let shown = self.shown(i);
