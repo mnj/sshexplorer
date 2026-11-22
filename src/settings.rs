@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::keymap::KeyMap;
 use crate::theme::{self, Accent, Density, fonts};
 
 /// Every app setting, a section per Settings page. Later pages add their sections here.
@@ -23,6 +24,9 @@ use crate::theme::{self, Accent, Density, fonts};
 pub struct AppSettings {
     #[serde(deserialize_with = "lenient")]
     pub appearance: Appearance,
+    /// The Keys page: the bindings that differ from the defaults.
+    #[serde(deserialize_with = "lenient")]
+    pub keys: KeyMap,
 }
 
 /// Light, dark, or whatever the OS uses.

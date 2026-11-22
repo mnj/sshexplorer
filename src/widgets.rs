@@ -72,9 +72,9 @@ pub use field::{
     InvalidMessage, TextField, WarningMessage, invalid_message, number_field, text_field,
     warning_message,
 };
-pub use form::{Form, FormName, form, form_name, form_row};
+pub use form::{Form, FormName, FormText, form, form_group, form_hint, form_name, form_row};
 pub use glyph::{Glyph, GlyphMark, glyph};
-pub use key_list::key_list;
+pub use key_list::{KeyChipButton, key_chip_button, key_list};
 pub use mark::{SWATCH, Status, StatusMark, Swatch, status_mark, swatch, swatch_none, swatch_rgb};
 pub use menu::{
     Menu, MenuButton, MenuItem, context_menu, menu, menu_bar, menu_below, menu_button, menu_frame,

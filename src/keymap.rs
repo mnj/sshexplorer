@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use egui::{Event, InputState, Key, ModifierNames, Modifiers};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Where an action belongs, as the binding editor groups them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -116,6 +117,59 @@ impl Binding {
         Binding { modifiers, key }
     }
 
+    /// The binding a key press with `modifiers` records: Ctrl (Cmd on macOS) as
+    /// `command`, and on macOS the Control key, which is not Cmd, as `ctrl`.
+    pub fn pressed(modifiers: Modifiers, key: Key) -> Binding {
+        let m = modifiers;
+        Binding::new(
+            Modifiers {
+                alt: m.alt,
+                shift: m.shift,
+                command: m.command,
+                ctrl: m.ctrl && !m.command,
+                mac_cmd: false,
+            },
+            key,
+        )
+    }
+
+    /// The binding as the settings file writes it: "Ctrl+Shift+Equals". Ctrl is Cmd on
+    /// macOS; "Control" is the macOS Control key.
+    fn to_text(self) -> String {
+        let m = self.modifiers;
+        let mut text = String::new();
+        for (on, name) in [
+            (m.command, "Ctrl"),
+            (m.ctrl, "Control"),
+            (m.alt, "Alt"),
+            (m.shift, "Shift"),
+        ] {
+            if on {
+                text += name;
+                text += "+";
+            }
+        }
+        text + self.key.name()
+    }
+
+    /// The binding [`Binding::to_text`] wrote, if `text` is one. Escape is never one.
+    fn from_text(text: &str) -> Option<Binding> {
+        let mut parts: Vec<&str> = text.split('+').collect();
+        let key = parts.pop()?;
+        let key = Key::from_name(key).filter(|k| *k != Key::Escape)?;
+        let mut m = Modifiers::NONE;
+        for name in parts {
+            match name {
+                "Ctrl" => m.command = true,
+                "Control" => m.ctrl = true,
+                "Alt" => m.alt = true,
+                "Shift" => m.shift = true,
+                _ => return None,
+            }
+        }
+        Some(Binding::new(m, key))
+    }
+
     /// How a key chip shows it: "Ctrl+Shift+=", or "⇧⌘=" on macOS.
     pub fn label(self, mac: bool) -> String {
         let names = if mac {
@@ -141,7 +195,11 @@ impl Binding {
 }
 
 /// The bindings in force: each action's default unless it was rebound.
-#[derive(Clone, Debug, Default)]
+///
+/// In the settings file it is the `[keys]` table of the rebound actions only, each by its
+/// variant name: `Settings = "Ctrl+Shift+Comma"`, or `""` for unbound. An entry that names
+/// no action, or no binding, is left out, and that action keeps its default.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct KeyMap {
     /// Actions whose binding is not the default; `None` is unbound.
     changed: BTreeMap<Action, Option<Binding>>,
@@ -204,5 +262,48 @@ impl KeyMap {
             !hit
         });
         found
+    }
+}
+
+impl Action {
+    /// The name the settings file knows the action by: its variant name.
+    fn file_name(self) -> String {
+        format!("{self:?}")
+    }
+}
+
+impl Serialize for KeyMap {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let table: BTreeMap<String, String> = self
+            .changed
+            .iter()
+            .map(|(action, binding)| {
+                let text = binding.map_or(String::new(), Binding::to_text);
+                (action.file_name(), text)
+            })
+            .collect();
+        table.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyMap {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<KeyMap, D::Error> {
+        let table = BTreeMap::<String, toml::Value>::deserialize(d)?;
+        let mut map = KeyMap::default();
+        for (name, value) in table {
+            let action = Action::ALL.into_iter().find(|a| a.file_name() == name);
+            match (action, value.as_str()) {
+                (Some(action), Some("")) if action.default_binding().is_some() => {
+                    map.changed.insert(action, None);
+                }
+                (Some(action), Some(text)) => {
+                    if let Some(binding) = Binding::from_text(text) {
+                        map.set(action, binding);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(map)
     }
 }
