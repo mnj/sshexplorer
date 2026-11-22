@@ -79,6 +79,18 @@ _Avoid_: Start folder, remote root
 The directory a Session is at. In Folder view it is the listed directory. In Tree view it is the Focused entry when that is a directory, or the Focused entry's parent, or the Initial remote folder when nothing is focused. A Search starts there.
 _Avoid_: Current place, working directory, cwd
 
+**Refresh**:
+The operator's request that a Session fetch the Current directory again from the host, and in Tree view the expanded directories below it. A Session's listings change only on a Refresh, an Auto-refresh, or when a Match is opened in a directory that no longer lists it.
+_Avoid_: Reload, sync
+
+**Auto-refresh**:
+A Refresh a Session runs by itself at an interval the operator chooses, off by default. It does not run while the Session is out of view or showing Matches.
+_Avoid_: Polling, watch
+
+**Disconnected**:
+A Session whose connection has dropped. It keeps its tab and its listings, which can be browsed but not refreshed, searched, or downloaded from, and it returns to normal when it reconnects.
+_Avoid_: Offline, dead
+
 **Search**:
 A lookup of file and directory names, run on the host at and below the Session's current directory.
 _Avoid_: find, grep, content search
