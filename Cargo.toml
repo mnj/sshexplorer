@@ -10,6 +10,12 @@ egui = "0.37"
 eframe = "0.37"
 # The font reader egui itself uses: validates a font file before egui gets it.
 skrifa = "=0.44.0"
+# App settings: a TOML file in the platform config directory.
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
+directories = "6.0.0"
+# The installed-font index behind "UI font" and "Monospace font".
+fontdb = "0.24.0"
 
 # The SSH stack (ADR-0002, issue #4): russh and its SFTP client, in process, on a tokio
 # runtime of the app's own off the frame thread. Use russh's `keys::ssh_key` re-export,
@@ -35,7 +41,7 @@ windows = { version = "0.62.2", features = ["UI_ViewManagement", "Foundation"] }
 [dev-dependencies]
 egui_kittest = "0.37"
 # The test SSH/SFTP server (tests/common/fixture.rs) serves a temporary directory.
-tempfile = "3.23"
+tempfile = "3.27"
 
 [lints.rust]
 unsafe_code = "forbid"

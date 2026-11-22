@@ -10,13 +10,20 @@ pub(super) struct Tint {
     pub percent: f32,
 }
 
-/// One hue (the blue accent or a semantic colour) in its strengths.
+/// One hue (an accent preset or a semantic colour) in its strengths.
 #[derive(Clone, Copy)]
 pub(super) struct Hue {
     pub text: u32,
     pub tint: Tint,
     pub solid: u32,
     pub on_solid: u32,
+}
+
+/// One accent preset: its hue, and the focus ring drawn in it.
+#[derive(Clone, Copy)]
+pub(super) struct AccentHue {
+    pub hue: Hue,
+    pub ring: u32,
 }
 
 /// A shadow: its vertical offset, its blur and the alpha of its black, of 255.
@@ -38,11 +45,11 @@ pub(super) struct Palette {
     pub ink_soft: u32,
     pub line: u32,
     pub line_strong: u32,
-    pub ring: u32,
     /// The ink's opacity, in percent, as a control's fill, on hover, on press and on a
     /// selected row whose selection is not live.
     pub ink_fills: [f32; 4],
-    pub blue: Hue,
+    /// The accent presets, in the order of `Accent::ALL`.
+    pub accents: [AccentHue; 7],
     pub red: Hue,
     pub amber: Hue,
     pub green: Hue,
@@ -54,6 +61,18 @@ const WHITE: u32 = 0xffffff;
 
 const fn tint(hex: u32, percent: f32) -> Tint {
     Tint { hex, percent }
+}
+
+const fn accent(text: u32, tint: Tint, solid: u32, ring: u32) -> AccentHue {
+    AccentHue {
+        hue: Hue {
+            text,
+            tint,
+            solid,
+            on_solid: WHITE,
+        },
+        ring,
+    }
 }
 
 const fn soft(y: i8, blur: u8, alpha: u8) -> Soft {
@@ -68,14 +87,17 @@ pub(super) const LIGHT: Palette = Palette {
     ink_soft: 0x59574f,
     line: 0xdedbd0,
     line_strong: 0xc4c0b3,
-    ring: 0x1f5fbf,
     ink_fills: [7.0, 5.5, 11.0, 8.0],
-    blue: Hue {
-        text: 0x1b55ad,
-        tint: tint(0x1f5fbf, 14.0),
-        solid: 0x1f5fbf,
-        on_solid: WHITE,
-    },
+    // In light, the ring is the solid; in dark, the text strength.
+    accents: [
+        accent(0x4b505a, tint(0x5f6673, 14.0), 0x4b505a, 0x4b505a),
+        accent(0x1b55ad, tint(0x1f5fbf, 14.0), 0x1f5fbf, 0x1f5fbf),
+        accent(0x0f5e63, tint(0x14808a, 14.0), 0x0f6e75, 0x0f6e75),
+        accent(0x2f6b1f, tint(0x4c9a2a, 16.0), 0x3a7a25, 0x3a7a25),
+        accent(0x5b3fb0, tint(0x6d4fd0, 13.0), 0x6142c4, 0x6142c4),
+        accent(0x9a4100, tint(0xe06d10, 16.0), 0xb84e00, 0xb84e00),
+        accent(0xa52a6a, tint(0xd0408a, 13.0), 0xb8307a, 0xb8307a),
+    ],
     red: Hue {
         text: 0xa8231b,
         tint: tint(0xc8372d, 13.0),
@@ -105,14 +127,16 @@ pub(super) const DARK: Palette = Palette {
     ink_soft: 0xc2c0b7,
     line: 0x3b3a37,
     line_strong: 0x55534e,
-    ring: 0x8fbaf8,
     ink_fills: [8.0, 7.0, 13.0, 10.0],
-    blue: Hue {
-        text: 0x8fbaf8,
-        tint: tint(0x4f8fe8, 22.0),
-        solid: 0x2458b0,
-        on_solid: WHITE,
-    },
+    accents: [
+        accent(0xb9c0cc, tint(0x8a94a6, 22.0), 0x4f5765, 0xb9c0cc),
+        accent(0x8fbaf8, tint(0x4f8fe8, 22.0), 0x2458b0, 0x8fbaf8),
+        accent(0x6fcfd3, tint(0x3fb0b8, 20.0), 0x146d72, 0x6fcfd3),
+        accent(0x9bd27a, tint(0x6cb44a, 18.0), 0x36702a, 0x9bd27a),
+        accent(0xbfa8f7, tint(0x8d6ff0, 22.0), 0x5e40b8, 0xbfa8f7),
+        accent(0xf5a66a, tint(0xe57a2a, 18.0), 0xa84a0a, 0xf5a66a),
+        accent(0xf59ac6, tint(0xe0559a, 20.0), 0xa8326e, 0xf59ac6),
+    ],
     red: Hue {
         text: 0xf5998c,
         tint: tint(0xe5534a, 20.0),

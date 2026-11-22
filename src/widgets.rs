@@ -37,6 +37,7 @@ pub mod glyph;
 mod key_list;
 mod mark;
 mod menu;
+mod pages;
 mod paint;
 mod range;
 mod row;
@@ -67,7 +68,10 @@ pub use dropdown::{
     Choice, ChoiceRow, Dropdown, FilterDropdown, Picked, choice, choice_value, dropdown,
     filter_dropdown,
 };
-pub use field::{InvalidMessage, TextField, invalid_message, number_field, text_field};
+pub use field::{
+    InvalidMessage, TextField, WarningMessage, invalid_message, number_field, text_field,
+    warning_message,
+};
 pub use form::{Form, FormName, form, form_name, form_row};
 pub use glyph::{Glyph, GlyphMark, glyph};
 pub use key_list::key_list;
@@ -76,6 +80,7 @@ pub use menu::{
     Menu, MenuButton, MenuItem, context_menu, menu, menu_bar, menu_below, menu_button, menu_frame,
     menu_is_open, menu_item, menu_separator, menu_titles_width, row_context_menu,
 };
+pub use pages::{PAGE_HEIGHT, PAGE_LIST_WIDTH, PAGE_WIDTH, PagesDialog, PagesShown, pages_dialog};
 pub use paint::{State, drew_focus};
 pub use range::{PROGRESS_RAIL, Progress, SLIDER_KNOB, SLIDER_RAIL, Slider, progress, slider};
 pub use row::{Row, RowResponse, Selection, TREE_INDENT, list_row, rows, tree_row};

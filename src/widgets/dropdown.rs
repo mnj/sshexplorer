@@ -36,6 +36,7 @@ pub fn dropdown(id_salt: impl egui::AsIdSalt, selected_text: impl Into<String>) 
         max_width: None,
         stay_open: false,
         state: State::Live,
+        name: None,
     }
 }
 
@@ -47,6 +48,7 @@ pub struct Dropdown {
     max_width: Option<f32>,
     stay_open: bool,
     state: State,
+    name: Option<String>,
 }
 
 /// The closed control: what [`Dropdown`] and [`FilterDropdown`] share.
@@ -54,6 +56,7 @@ fn closed(
     ui: &mut Ui,
     t: &Tokens,
     state: State,
+    name: Option<&str>,
     text: &str,
     (min_width, max_width): (Option<f32>, Option<f32>),
     open: bool,
@@ -72,6 +75,7 @@ fn closed(
             let mut info = WidgetInfo::new(Role::ComboBox);
             info.enabled = enabled;
             info.current_text_value = Some(text.to_owned());
+            info.label = name.map(str::to_owned);
             info
         });
         if !ui.is_rect_visible(rect) {
@@ -95,6 +99,11 @@ fn closed(
 }
 
 impl Dropdown {
+    /// What assistive technology calls it, such as the form row's name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
     /// The least width; the dropdown grows to fit its text.
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
@@ -127,7 +136,15 @@ impl Dropdown {
         let popup_id = ui.make_persistent_id(self.id_salt).with("popup");
         let open = Popup::is_id_open(ui.ctx(), popup_id);
         let widths = (self.width, self.max_width);
-        let response = closed(ui, &t, self.state, &self.text, widths, open);
+        let response = closed(
+            ui,
+            &t,
+            self.state,
+            self.name.as_deref(),
+            &self.text,
+            widths,
+            open,
+        );
         let height = LIST_HEIGHT;
         let mut menu = super::menu(&response)
             .id(popup_id)
@@ -227,6 +244,7 @@ pub fn filter_dropdown(
         hint: String::new(),
         none: String::new(),
         state: State::Live,
+        name: None,
     }
 }
 
@@ -238,6 +256,7 @@ pub struct FilterDropdown {
     hint: String,
     none: String,
     state: State,
+    name: Option<String>,
 }
 
 /// What a filterable dropdown remembers while it is open.
@@ -251,6 +270,11 @@ struct Filtering {
 }
 
 impl FilterDropdown {
+    /// What assistive technology calls it, such as the form row's name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
     /// The least width; the dropdown grows to fit its text.
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
@@ -282,7 +306,15 @@ impl FilterDropdown {
         let id = ui.make_persistent_id(self.id_salt);
         let popup_id = id.with("popup");
         let was_open = Popup::is_id_open(ui.ctx(), popup_id);
-        let response = closed(ui, &t, self.state, &self.text, (self.width, None), was_open);
+        let response = closed(
+            ui,
+            &t,
+            self.state,
+            self.name.as_deref(),
+            &self.text,
+            (self.width, None),
+            was_open,
+        );
         let height = LIST_HEIGHT;
         let mut filtering: Filtering = if was_open {
             ui.data(|d| d.get_temp(id)).unwrap_or_default()

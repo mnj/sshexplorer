@@ -333,3 +333,32 @@ impl Widget for InvalidMessage {
         response
     }
 }
+
+/// What goes under a field whose value is in force but not as chosen (a font that is not
+/// installed): the reason in the warning text colour, wrapped to the width there is.
+pub fn warning_message(text: impl Into<String>) -> WarningMessage {
+    WarningMessage { text: text.into() }
+}
+
+#[must_use = "add it with ui.add"]
+pub struct WarningMessage {
+    text: String,
+}
+
+impl Widget for WarningMessage {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let t = ui.tokens();
+        let ink = t.color.warning.text;
+        let job = egui::text::LayoutJob {
+            wrap: egui::text::TextWrapping::wrap_at_width(ui.available_width()),
+            ..t.ty.body.job(&self.text, ink)
+        };
+        let galley = ui.painter().layout_job(job);
+        let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &self.text));
+        if ui.is_rect_visible(rect) {
+            ui.painter().galley(rect.min, galley, ink);
+        }
+        response
+    }
+}
