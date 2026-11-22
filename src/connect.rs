@@ -64,9 +64,6 @@ pub fn local_user() -> String {
         .unwrap_or_default()
 }
 
-/// The left column's width.
-const ENTRY_WIDTH: f32 = 180.0;
-
 /// The Authentication method choices, as the dropdown names them.
 const AUTH_METHODS: [(AuthMethod, &str); 4] = [
     (AuthMethod::Automatic, "Automatic"),
@@ -339,7 +336,7 @@ impl HostDialog {
             let t = ui.tokens();
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(ENTRY_WIDTH);
+                    ui.set_width(t.size.host_list);
                     widgets::rows(ui, |ui| {
                         for entry in Self::entries(hosts) {
                             let name = match entry {
@@ -354,7 +351,7 @@ impl HostDialog {
                             };
                             let row = widgets::list_row(name)
                                 .selection(selection)
-                                .width(ENTRY_WIDTH)
+                                .width(t.size.host_list)
                                 .show(ui);
                             if row.response.clicked() {
                                 picked = Some(entry);

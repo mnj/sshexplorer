@@ -445,11 +445,17 @@ pub struct StrokeWidth {
     pub focus_ring: f32,
 }
 
-/// Widths a control takes when it is given none.
+/// Widths a control or a part of the window takes when it is given none.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Size {
     /// A text field's width.
     pub field: f32,
+    /// The Host dialog's column of saved Hosts.
+    pub host_list: f32,
+    /// The Preview panel's width when a Session opens.
+    pub preview: f32,
+    /// Between stacked PDF pages, in the pages' own points (it scales with the zoom).
+    pub page_gap: f32,
 }
 
 /// Icon sizes. Only UI scale changes them.
@@ -811,7 +817,12 @@ impl Tokens {
                 small: 16.0,
                 bar: 20.0,
             },
-            size: Size { field: 280.0 },
+            size: Size {
+                field: 280.0,
+                host_list: 180.0,
+                preview: 360.0,
+                page_gap: 8.0,
+            },
             opacity: Opacity { disabled: 0.45 },
             motion: motion(settings.animate.unwrap_or(true)),
         }

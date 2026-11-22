@@ -887,7 +887,7 @@ impl Session {
         let leave = widgets::splitter(ui, t.space.gap, |ui| {
             egui::Panel::right(self.id.with("preview-panel"))
                 .resizable(true)
-                .default_size(PREVIEW_WIDTH)
+                .default_size(t.size.preview)
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
                     self.preview.ui(
@@ -1489,8 +1489,6 @@ pub const UNAVAILABLE: &str = "Search is not available on this host.";
 /// What the Matches show when the connection dropped during the Search.
 pub const SEARCH_LOST: &str = "Search stopped: connection lost";
 
-/// The Preview panel's width when a Session opens.
-const PREVIEW_WIDTH: f32 = 360.0;
 /// What one row shows, in either view.
 struct Shown<'a> {
     /// The entry's name, or a status row's text: the row's AccessKit label.
