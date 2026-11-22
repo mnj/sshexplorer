@@ -305,7 +305,7 @@ impl Session {
         let sftp = self.sftp.clone();
         let wake = self.wake.clone();
         self.runtime.spawn(async move {
-            let listing = list(&sftp, path).await.map_err(|e| e.to_string());
+            let listing = list(&sftp, path).await.map_err(|e| reason(&e));
             let _ = sender.send(listing);
             wake();
         });
@@ -489,6 +489,17 @@ async fn list_folder(
     let folder = if folder.is_empty() { "." } else { folder };
     let path = sftp.canonicalize(folder).await?;
     list(sftp, path).await
+}
+
+/// Why a request failed, as a listing's reason row says it: "permission denied" for a
+/// status from the host, whose own message often only repeats the status.
+fn reason(error: &russh_sftp::client::error::Error) -> String {
+    match error {
+        russh_sftp::client::error::Error::Status(status) => {
+            status.status_code.to_string().to_lowercase()
+        }
+        other => other.to_string(),
+    }
 }
 
 /// The entries of the directory at `path`. A symlink is described by its target, which
