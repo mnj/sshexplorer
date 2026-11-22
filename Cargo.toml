@@ -4,3 +4,28 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# egui and eframe move together. eframe's defaults give the glow renderer, Wayland, X11
+# and AccessKit on Linux, and the native backends on macOS and Windows.
+egui = "0.37"
+eframe = "0.37"
+# The font reader egui itself uses: validates a font file before egui gets it.
+skrifa = "=0.44.0"
+
+# The OS reduced-motion read (theme/motion/system.rs), one platform each.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["UI_ViewManagement", "Foundation"] }
+
+[dev-dependencies]
+egui_kittest = "0.37"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
