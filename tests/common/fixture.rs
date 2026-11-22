@@ -7,7 +7,10 @@
 //! separate from the app's, which stops when the fixture is dropped.
 //!
 //! - **Accounts.** One account, [`ACCOUNT`], with the password [`PASSWORD`]. Every other
-//!   password is rejected at once (no rejection delay).
+//!   password is rejected at once (no rejection delay). [`Fixture::start_accepting`]
+//!   chooses the methods instead: authorized public keys, the password, and
+//!   keyboard-interactive rounds ([`Keyboard`]). [`Fixture::attempts`] lists what the
+//!   client tried, in order.
 //! - **Host key.** [`HOST_KEY`] by default; [`Fixture::start_with`] takes another, such as
 //!   [`OTHER_KEY`], and a test that wants a changed key records the other key in its
 //!   `known_hosts`.
@@ -23,15 +26,19 @@
 
 #![allow(dead_code)]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use russh::keys::PrivateKey;
-use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::keys::{PrivateKey, PublicKey};
+use russh::server::{
+    Auth, ChannelOpenHandle, Msg, PublicKeyOffer, Response, Session, VerifiedPublicKey,
+};
 use russh::{Channel, ChannelId};
+use russh::{MethodKind, MethodSet};
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, SftpHandle, Status, StatusCode,
     Version,
@@ -68,6 +75,31 @@ Py8jQmt6l40b5P6FcwW0AAAAAAECAwQF
 /// [`OTHER_KEY`]'s fingerprint, as `ssh-keygen -lf` printed it.
 pub const OTHER_KEY_FINGERPRINT: &str = "SHA256:GNYCzvgTWmWZ+F5IPHky4My19zkrk8cFjh2/AN16Osw";
 
+/// The one-time code the [`Keyboard::PasswordAndCode`] round asks for.
+pub const CODE: &str = "424242";
+
+/// What the server accepts.
+#[derive(Clone, Default)]
+pub struct Accepts {
+    /// [`PASSWORD`] by the "password" method.
+    pub password: bool,
+    /// Public keys authorized for [`ACCOUNT`].
+    pub keys: Vec<PublicKey>,
+    pub keyboard: Keyboard,
+}
+
+/// The keyboard-interactive rounds the server runs.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Keyboard {
+    #[default]
+    Off,
+    /// One round with one echo-off prompt, "Password: ", answered by [`PASSWORD`].
+    Password,
+    /// One round with two prompts, "Password: " (echo off) and "Verification code: "
+    /// (echoed), answered by [`PASSWORD`] and [`CODE`].
+    PasswordAndCode,
+}
+
 /// A running test server. Dropping it stops the server.
 pub struct Fixture {
     port: u16,
@@ -76,7 +108,12 @@ pub struct Fixture {
     runtime: Option<tokio::runtime::Runtime>,
     /// How long each SFTP read waits before answering, in milliseconds.
     read_delay: Arc<AtomicU64>,
+    attempts: Attempts,
 }
+
+/// What clients tried, in order: "password", "keyboard-interactive", or "publickey "
+/// and the key's `SHA256:` fingerprint.
+type Attempts = Arc<std::sync::Mutex<Vec<String>>>;
 
 impl Fixture {
     /// Starts a server with [`HOST_KEY`].
@@ -84,8 +121,23 @@ impl Fixture {
         Self::start_with(HOST_KEY)
     }
 
+    /// Starts a server with [`HOST_KEY`] that accepts what `accepts` says.
+    pub fn start_accepting(accepts: Accepts) -> Self {
+        Self::serve(HOST_KEY, accepts)
+    }
+
     /// Starts a server whose host key is the OpenSSH private key `host_key`.
     pub fn start_with(host_key: &str) -> Self {
+        Self::serve(
+            host_key,
+            Accepts {
+                password: true,
+                ..Accepts::default()
+            },
+        )
+    }
+
+    fn serve(host_key: &str, accepts: Accepts) -> Self {
         let host_key = PrivateKey::from_openssh(host_key).expect("fixture host key");
         let root = tempfile::tempdir().expect("fixture root");
         let home = root.path().join(HOME.trim_start_matches('/'));
@@ -105,7 +157,19 @@ impl Fixture {
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
         let port = listener.local_addr().unwrap().port();
+        let mut methods = Vec::new();
+        if !accepts.keys.is_empty() {
+            methods.push(MethodKind::PublicKey);
+        }
+        if accepts.keyboard != Keyboard::Off {
+            methods.push(MethodKind::KeyboardInteractive);
+        }
+        if accepts.password {
+            methods.push(MethodKind::Password);
+        }
+        let offered = MethodSet::from(methods.as_slice());
         let config = Arc::new(russh::server::Config {
+            methods: offered.clone(),
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             keys: vec![host_key.clone()],
@@ -114,12 +178,17 @@ impl Fixture {
         let served = root.path().to_path_buf();
         let read_delay = Arc::new(AtomicU64::new(0));
         let delay = read_delay.clone();
+        let attempts = Attempts::default();
+        let tried = attempts.clone();
         runtime.spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let handler = SshHandler {
                     root: served.clone(),
                     channels: Arc::default(),
                     read_delay: delay.clone(),
+                    accepts: accepts.clone(),
+                    methods: offered.clone(),
+                    attempts: tried.clone(),
                 };
                 let config = config.clone();
                 tokio::spawn(async move {
@@ -135,6 +204,7 @@ impl Fixture {
             root,
             runtime: Some(runtime),
             read_delay,
+            attempts,
         }
     }
 
@@ -143,6 +213,11 @@ impl Fixture {
     pub fn slow_reads(&self, delay: Duration) {
         self.read_delay
             .store(delay.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// What clients have tried so far, in order (see [`Attempts`]).
+    pub fn attempts(&self) -> Vec<String> {
+        self.attempts.lock().unwrap().clone()
     }
 
     pub fn address(&self) -> &'static str {
@@ -186,16 +261,105 @@ struct SshHandler {
     root: PathBuf,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     read_delay: Arc<AtomicU64>,
+    accepts: Accepts,
+    /// The methods offered, which every refusal offers again, as OpenSSH does.
+    methods: MethodSet,
+    attempts: Attempts,
+}
+
+impl SshHandler {
+    fn reject(&self) -> Auth {
+        Auth::Reject {
+            proceed_with_methods: Some(self.methods.clone()),
+            partial_success: false,
+        }
+    }
+
+    fn tried(&self, what: String) {
+        self.attempts.lock().unwrap().push(what);
+    }
+
+    fn authorized(&self, user: &str, key: &PublicKey) -> bool {
+        user == ACCOUNT
+            && self
+                .accepts
+                .keys
+                .iter()
+                .any(|k| k.key_data() == key.key_data())
+    }
 }
 
 impl russh::server::Handler for SshHandler {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        if user == ACCOUNT && password == PASSWORD {
+        self.tried("password".into());
+        if self.accepts.password && user == ACCOUNT && password == PASSWORD {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::reject())
+            Ok(self.reject())
+        }
+    }
+
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        offer: PublicKeyOffer<'_>,
+    ) -> Result<Auth, Self::Error> {
+        let key = offer.public_key;
+        self.tried(format!("publickey {}", key.fingerprint(Default::default())));
+        if self.authorized(user, key) {
+            Ok(Auth::Accept)
+        } else {
+            Ok(self.reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        if self.authorized(user, key.public_key) {
+            Ok(Auth::Accept)
+        } else {
+            Ok(self.reject())
+        }
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        let prompts: &'static [(Cow<'static, str>, bool)] = match self.accepts.keyboard {
+            Keyboard::Off => return Ok(self.reject()),
+            Keyboard::Password => &[(Cow::Borrowed("Password: "), false)],
+            Keyboard::PasswordAndCode => &[
+                (Cow::Borrowed("Password: "), false),
+                (Cow::Borrowed("Verification code: "), true),
+            ],
+        };
+        let Some(response) = response else {
+            self.tried("keyboard-interactive".into());
+            return Ok(Auth::Partial {
+                name: "".into(),
+                instructions: "".into(),
+                prompts: Cow::Borrowed(prompts),
+            });
+        };
+        let answers: Vec<String> = response
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .collect();
+        let expected: &[&str] = match self.accepts.keyboard {
+            Keyboard::Password => &[PASSWORD],
+            _ => &[PASSWORD, CODE],
+        };
+        if user == ACCOUNT && answers == expected {
+            Ok(Auth::Accept)
+        } else {
+            Ok(self.reject())
         }
     }
 

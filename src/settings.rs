@@ -126,6 +126,56 @@ pub struct Browsing {
     /// Whether dot-names are listed, in every Session. Ctrl+H toggles it.
     #[serde(deserialize_with = "lenient")]
     pub show_hidden: bool,
+    #[serde(deserialize_with = "lenient")]
+    pub auto_refresh: AutoRefresh,
+}
+
+/// How often each Session refreshes by itself: off, or one of four intervals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum AutoRefresh {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "10s")]
+    Seconds10,
+    #[serde(rename = "30s")]
+    Seconds30,
+    #[serde(rename = "1min")]
+    Minute1,
+    #[serde(rename = "5min")]
+    Minutes5,
+}
+
+impl AutoRefresh {
+    /// In the order the Browsing page lists them.
+    pub const ALL: [AutoRefresh; 5] = [
+        AutoRefresh::Off,
+        AutoRefresh::Seconds10,
+        AutoRefresh::Seconds30,
+        AutoRefresh::Minute1,
+        AutoRefresh::Minutes5,
+    ];
+
+    /// The interval; `None` when off.
+    pub fn seconds(self) -> Option<f64> {
+        match self {
+            AutoRefresh::Off => None,
+            AutoRefresh::Seconds10 => Some(10.0),
+            AutoRefresh::Seconds30 => Some(30.0),
+            AutoRefresh::Minute1 => Some(60.0),
+            AutoRefresh::Minutes5 => Some(300.0),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AutoRefresh::Off => "Off",
+            AutoRefresh::Seconds10 => "10 s",
+            AutoRefresh::Seconds30 => "30 s",
+            AutoRefresh::Minute1 => "1 min",
+            AutoRefresh::Minutes5 => "5 min",
+        }
+    }
 }
 
 /// The Connections page.
