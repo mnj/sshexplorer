@@ -141,17 +141,17 @@ pub struct Session {
     /// Every directory fetched so far, as Tree view shows them.
     tree: Tree,
     /// Directories Tree view is fetching.
-    fetches: Vec<(String, Request<Listing>)>,
+    fetches: Vec<Fetch>,
     folder: Folder,
     sort: Sort,
     /// The "Show hidden entries" setting the views were last arranged with.
     show_hidden: bool,
-    /// A directory being listed for Folder view, and the entry to focus in it.
-    listing: Option<(Request<Listing>, Option<String>)>,
+    /// A directory being listed for Folder view.
+    listing: Option<FolderListing>,
     /// Why the last directory asked for could not be listed.
     error: Option<String>,
     /// Directories a Tree view Refresh is fetching again.
-    refreshes: Vec<(String, Request<Listing>)>,
+    refreshes: Vec<Fetch>,
     /// Folder view's Refresh, while it runs.
     folder_refresh: Option<FolderRefresh>,
     /// A Refresh finished since the last frame: the Auto-refresh interval restarts.
@@ -207,7 +207,7 @@ impl Session {
         let fetches = tree
             .open_at(opened.home.clone())
             .into_iter()
-            .map(|path| (path.clone(), opened.session.list(path)))
+            .map(|path| Fetch::start(&opened.session, path))
             .collect();
         Session {
             details,
@@ -372,8 +372,7 @@ impl Session {
         match self.view {
             View::Tree => {
                 for path in self.tree.refresh_paths() {
-                    let request = self.connection.list(path.clone());
-                    self.refreshes.push((path, request));
+                    self.refreshes.push(Fetch::start(&self.connection, path));
                 }
             }
             View::Folder => {
@@ -675,7 +674,7 @@ impl Session {
             }
             View::Folder if is_dir => self.list(path, None),
             View::Folder if stale => {
-                self.listing = Some((self.connection.list(dir), Some(name)));
+                self.listing = Some(FolderListing::start(&self.connection, dir, Some(name)));
             }
             View::Folder => self.list(dir, Some(name)),
         }
@@ -1310,7 +1309,7 @@ impl Session {
         match effect {
             Effect::None => {}
             Effect::List { path, focus } => {
-                self.listing = Some((self.connection.list(path), focus));
+                self.listing = Some(FolderListing::start(&self.connection, path, focus));
             }
             Effect::Preview => self.focus_preview = true,
         }
@@ -1319,8 +1318,7 @@ impl Session {
     /// Starts fetching `paths` for Tree view.
     fn fetch(&mut self, paths: Vec<String>) {
         for path in paths {
-            let request = self.connection.list(path.clone());
-            self.fetches.push((path, request));
+            self.fetches.push(Fetch::start(&self.connection, path));
         }
     }
 
@@ -1332,7 +1330,7 @@ impl Session {
                 let listing = listing.clone();
                 self.show_folder(listing, focus);
             }
-            None => self.listing = Some((self.connection.list(path), focus)),
+            None => self.listing = Some(FolderListing::start(&self.connection, path, focus)),
         }
     }
 
@@ -1369,15 +1367,7 @@ impl Session {
     /// Takes the answers of a running Refresh and merges them in.
     fn receive_refresh(&mut self) {
         let running = self.is_refreshing();
-        let mut arrived = Vec::new();
-        self.refreshes
-            .retain(|(path, request)| match request.try_take() {
-                Some(answer) => {
-                    arrived.push((path.clone(), answer));
-                    false
-                }
-                None => true,
-            });
+        let arrived = Fetch::arrived(&mut self.refreshes);
         // Preview reloads a Focused file whose size or modified time changed on its own:
         // it compares the merged entry with what it shows on the next frame.
         for (path, answer) in arrived {
@@ -1448,15 +1438,7 @@ impl Session {
     /// Takes the listings that have arrived. Every one is kept in the tree.
     fn receive(&mut self) {
         self.receive_refresh();
-        let mut arrived = Vec::new();
-        self.fetches
-            .retain(|(path, request)| match request.try_take() {
-                Some(answer) => {
-                    arrived.push((path.clone(), answer));
-                    false
-                }
-                None => true,
-            });
+        let arrived = Fetch::arrived(&mut self.fetches);
         for (path, answer) in arrived {
             if answer.is_err() && self.dropped() {
                 // Fetched again once the connection is back.
@@ -1466,13 +1448,10 @@ impl Session {
             }
         }
 
-        let Some((request, _)) = &self.listing else {
+        let Some(answer) = self.listing.as_ref().and_then(|l| l.request.try_take()) else {
             return;
         };
-        let Some(answer) = request.try_take() else {
-            return;
-        };
-        let Some((_, focus)) = self.listing.take() else {
+        let Some(FolderListing { focus, .. }) = self.listing.take() else {
             return;
         };
         match answer {
@@ -1497,6 +1476,47 @@ impl Session {
 
 /// Folder view's Refresh: the directory being listed again, and the one that went when
 /// that is an ancestor tried instead.
+/// A directory being fetched for Tree view, by path.
+struct Fetch {
+    path: String,
+    request: Request<Listing>,
+}
+
+impl Fetch {
+    fn start(connection: &ssh::Session, path: String) -> Fetch {
+        let request = connection.list(path.clone());
+        Fetch { path, request }
+    }
+
+    /// Takes the fetches in `fetches` that have an answer, with their paths.
+    fn arrived(fetches: &mut Vec<Fetch>) -> Vec<(String, Result<Listing, String>)> {
+        let mut arrived = Vec::new();
+        fetches.retain(|fetch| match fetch.request.try_take() {
+            Some(answer) => {
+                arrived.push((fetch.path.clone(), answer));
+                false
+            }
+            None => true,
+        });
+        arrived
+    }
+}
+
+/// A directory being listed for Folder view, and the entry to focus in it once shown.
+struct FolderListing {
+    request: Request<Listing>,
+    focus: Option<String>,
+}
+
+impl FolderListing {
+    fn start(connection: &ssh::Session, path: String, focus: Option<String>) -> FolderListing {
+        FolderListing {
+            request: connection.list(path),
+            focus,
+        }
+    }
+}
+
 struct FolderRefresh {
     request: Request<Listing>,
     path: String,
