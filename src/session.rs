@@ -71,6 +71,8 @@ pub struct Frame<'a> {
     pub settings: &'a AppSettings,
     /// Whether the listing may take keys: no dialog is up.
     pub keys: bool,
+    /// Where Preview sends audio.
+    pub audio: crate::media::AudioOut,
 }
 
 /// What a Session takes from the Host it was opened from.
@@ -889,6 +891,7 @@ impl Session {
                             settings: frame.settings,
                             keys: frame.keys,
                             zone: &self.zone,
+                            audio: frame.audio,
                         },
                     )
                 })
