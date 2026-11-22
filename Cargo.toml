@@ -11,6 +11,17 @@ eframe = "0.37"
 # The font reader egui itself uses: validates a font file before egui gets it.
 skrifa = "=0.44.0"
 
+# The SSH stack (ADR-0002, issue #4): russh and its SFTP client, in process, on a tokio
+# runtime of the app's own off the frame thread. Use russh's `keys::ssh_key` re-export,
+# never `ssh-key` directly: russh pins an exact release candidate.
+russh = "0.65.4"
+russh-sftp = "4.0.0"
+tokio = { version = "1.54", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+# Hashed known_hosts entries (`|1|salt|hash`): HMAC-SHA1 of the host name, base64.
+hmac = "0.13"
+sha1 = "0.11"
+base64 = "0.22"
+
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
@@ -23,6 +34,8 @@ windows = { version = "0.62.2", features = ["UI_ViewManagement", "Foundation"] }
 
 [dev-dependencies]
 egui_kittest = "0.37"
+# The test SSH/SFTP server (tests/common/fixture.rs) serves a temporary directory.
+tempfile = "3.23"
 
 [lints.rust]
 unsafe_code = "forbid"
