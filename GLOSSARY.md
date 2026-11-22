@@ -39,6 +39,14 @@ _Avoid_: Locked
 The one entry in a listing that the keyboard is on. Preview shows it.
 _Avoid_: Cursor, current entry
 
+**Preview**:
+The panel beside the listing that shows the Focused entry: a details header for every entry, and below it the file's contents when its kind is one sshexplorer can show.
+_Avoid_: Viewer, inspector
+
+**Scratch folder**:
+Where Preview keeps the bytes it has fetched from a host: in memory, the system temp directory, or a directory the operator chooses. Nothing kept there outlives the Preview that fetched it.
+_Avoid_: Cache, temp dir
+
 **Selection**:
 The set of entries a Download acts on. It holds one or more entries and may span directories in Tree view.
 _Avoid_: Marked entries, checked entries
