@@ -16,6 +16,9 @@
 //! A symlinked directory is followed only when [`Options::follow_links`] is on; one that
 //! is not is skipped as "symlink, not followed". A link to a file is copied as the file.
 //! No local symlinks are made. [`Queue`] runs a Session's Downloads one after another.
+//!
+//! When the connection drops, a Download pauses: the file in flight is discarded, and
+//! once [`Download::resume`] hands it the new connection it fetches that file again.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -81,8 +84,10 @@ pub struct Progress {
     /// `None` while counting.
     pub bytes_total: Option<u64>,
     started: Instant,
-    /// Time spent waiting for the operator, which the rate leaves out.
+    /// Time spent waiting for the operator or the connection, which the rate leaves out.
     paused: Duration,
+    /// Paused because the connection dropped, until [`Download::resume`].
+    pub lost: bool,
 }
 
 impl Progress {
@@ -95,6 +100,7 @@ impl Progress {
             bytes_total: None,
             started: Instant::now(),
             paused: Duration::ZERO,
+            lost: false,
         }
     }
 
@@ -187,6 +193,7 @@ pub struct Download {
     progress: Arc<Mutex<Progress>>,
     events: mpsc::Receiver<Event>,
     cancel: Arc<AtomicBool>,
+    resume: tokio::sync::mpsc::UnboundedSender<Remote>,
 }
 
 impl Download {
@@ -208,6 +215,12 @@ impl Download {
         self.events.recv_timeout(timeout).ok()
     }
 
+    /// Goes on over `session`'s connection after a drop paused it, fetching the file
+    /// that was in flight again. The new connection is kept for a later pause too.
+    pub fn resume(&self, session: &ssh::Session) {
+        let _ = self.resume.send(session.remote());
+    }
+
     /// Stops after the current chunk, removing the file in flight.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
@@ -225,8 +238,10 @@ pub fn start(session: &ssh::Session, job: Job) -> Download {
     let (sender, events) = mpsc::channel();
     let progress = Arc::new(Mutex::new(Progress::new()));
     let cancel = Arc::new(AtomicBool::new(false));
+    let (resume, resumed) = tokio::sync::mpsc::unbounded_channel();
     let run = Run {
         remote: session.remote(),
+        resumed,
         progress: progress.clone(),
         cancel: cancel.clone(),
         sender,
@@ -245,6 +260,7 @@ pub fn start(session: &ssh::Session, job: Job) -> Download {
         progress,
         events,
         cancel,
+        resume,
     }
 }
 
@@ -283,6 +299,8 @@ enum Item {
 /// The task's state.
 struct Run {
     remote: Remote,
+    /// New connections, after drops.
+    resumed: tokio::sync::mpsc::UnboundedReceiver<Remote>,
     progress: Arc<Mutex<Progress>>,
     cancel: Arc<AtomicBool>,
     sender: mpsc::Sender<Event>,
@@ -352,6 +370,32 @@ impl Run {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// The connection dropped: waits, paused, for a live one. False when cancelled.
+    async fn reconnect(&mut self) -> bool {
+        let since = Instant::now();
+        self.update(true, |p| p.lost = true);
+        let resumed = loop {
+            if self.cancelled() {
+                break false;
+            }
+            match tokio::time::timeout(Duration::from_millis(50), self.resumed.recv()).await {
+                // One handed over before this drop may be dead already.
+                Ok(Some(remote)) if remote.is_closed() => {}
+                Ok(Some(remote)) => {
+                    self.remote = remote;
+                    break true;
+                }
+                Ok(None) => break false,
+                Err(_) => {}
+            }
+        };
+        self.update(true, |p| {
+            p.lost = false;
+            p.paused += since.elapsed();
+        });
+        resumed
+    }
+
     /// Changes the progress, waking the frame when `now` or when it has not been woken
     /// for a while.
     fn update(&mut self, now: bool, change: impl FnOnce(&mut Progress)) {
@@ -408,10 +452,18 @@ impl Run {
                 .canonicalize(remote.clone())
                 .await
                 .unwrap_or_else(|_| remote.clone());
-            if !seen.insert(real) {
+            if !seen.insert(real.clone()) {
                 continue;
             }
             match self.remote.list(remote.clone()).await {
+                Err(_) if self.remote.closed().await => {
+                    // Walked again on the new connection.
+                    seen.remove(&real);
+                    stack.push((remote, rel, entry));
+                    if !self.reconnect().await {
+                        break;
+                    }
+                }
                 Ok(listing) => {
                     items.push(Item::Dir { rel: rel.clone() });
                     let mut entries = listing.entries;
@@ -509,12 +561,31 @@ impl Run {
         }
         let shown_text = shown.join("/");
         self.update(true, |p| p.current = Some(shown_text));
+        loop {
+            match self.fetch(remote, &target, &shown, entry, options).await {
+                Some(result) => return result,
+                None if self.reconnect().await => {}
+                None => return Err(Halt::Cancelled),
+            }
+        }
+    }
 
+    /// Copies the remote file to `target` through its temp file. `None` when the
+    /// connection dropped: the temp file is gone and its bytes no longer count.
+    async fn fetch(
+        &mut self,
+        remote: &str,
+        target: &Path,
+        shown: &[String],
+        entry: &Entry,
+        options: Options,
+    ) -> Option<Result<(), Halt>> {
         let mut file = match self.remote.open(remote.to_owned()).await {
             Ok(file) => file,
+            Err(_) if self.remote.closed().await => return None,
             Err(reason) => {
-                self.fail(&shown, reason);
-                return Ok(());
+                self.fail(shown, reason);
+                return Some(Ok(()));
             }
         };
         let name = target
@@ -525,10 +596,11 @@ impl Run {
         let local_error = |e: std::io::Error| Halt::Local(format!("Cannot write {name}: {e}"));
         let mut out = match tokio::fs::File::create(&temp).await {
             Ok(out) => out,
-            Err(e) => return Err(local_error(e)),
+            Err(e) => return Some(Err(local_error(e))),
         };
         let mut buf = vec![0; CHUNK];
         let mut written = 0u64;
+        let mut lost = false;
         let outcome = loop {
             if self.cancelled() {
                 break Err(Halt::Cancelled);
@@ -536,8 +608,12 @@ impl Run {
             let n = match file.read(&mut buf).await {
                 Ok(0) => break Ok(true),
                 Ok(n) => n,
+                Err(_) if self.remote.closed().await => {
+                    lost = true;
+                    break Ok(false);
+                }
                 Err(e) => {
-                    self.fail(&shown, e.to_string());
+                    self.fail(shown, e.to_string());
                     break Ok(false);
                 }
             };
@@ -560,7 +636,7 @@ impl Run {
             Ok(true) => keep_metadata(&out, entry, options)
                 .and_then(|()| {
                     drop(out);
-                    std::fs::rename(&temp, &target)
+                    std::fs::rename(&temp, target)
                 })
                 .map(|()| true)
                 .map_err(local_error),
@@ -572,12 +648,12 @@ impl Run {
         if let Ok(true) = placed {
             self.summary.copied += 1;
             self.update(true, |p| p.files_done += 1);
-            return Ok(());
+            return Some(Ok(()));
         }
         let _ = std::fs::remove_file(&temp);
         // The bytes of a file not kept no longer count.
         self.update(true, |p| p.bytes_done -= written.min(p.bytes_done));
-        placed.map(|_| ())
+        (!lost).then(|| placed.map(|_| ()))
     }
 }
 
@@ -637,12 +713,23 @@ impl Queue {
                 }
             }
         }
+        // The next waits while the connection is lost.
         if self.running.is_none()
+            && session.lost().is_none()
             && let Some(job) = self.waiting.pop_front()
         {
             self.running = Some(start(session, job));
         }
         ended
+    }
+
+    /// Hands the running Download `session`'s new connection after a drop, and starts
+    /// the next one if none runs.
+    pub fn resume(&mut self, session: &ssh::Session) {
+        if let Some(download) = &self.running {
+            download.resume(session);
+        }
+        self.poll(session);
     }
 
     /// The running Download.

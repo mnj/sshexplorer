@@ -32,6 +32,8 @@ pub const DELAY: f64 = 0.2;
 pub const SNIFF: usize = 8 * 1024;
 /// The line for a file Preview cannot show.
 pub const UNSUPPORTED: &str = "No preview for this file type.";
+/// What a load cut short, or not started, by a dropped connection shows.
+pub const CONNECTION_LOST: &str = "Cannot read: connection lost";
 
 /// The Focused entry, as Preview needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +78,8 @@ pub struct Shown {
     fetch: Option<u64>,
     /// Whether the fetch has been handed out.
     started: bool,
+    /// The load was cut short, or never started, by a dropped connection.
+    lost: bool,
 }
 
 /// What shows under the details header.
@@ -293,6 +297,7 @@ impl Preview {
             since: now,
             fetch: None,
             started: false,
+            lost: false,
         });
         true
     }
@@ -325,6 +330,32 @@ impl Preview {
             path: shown.focused.path.clone(),
             len: size.map_or(cap, |s| s.min(cap)),
         })
+    }
+
+    /// The connection dropped: a load in flight or waiting shows [`CONNECTION_LOST`]
+    /// and its answer is dropped. What is fully loaded stays. Call it every frame while
+    /// Disconnected, so that no new load starts.
+    pub fn lost(&mut self) {
+        let Some(shown) = self.shown.as_mut() else {
+            return;
+        };
+        if matches!(shown.body, Body::Loading) {
+            shown.body = Body::Failed(CONNECTION_LOST.to_owned());
+            shown.fetch = None;
+            shown.lost = true;
+        }
+    }
+
+    /// The connection is back: a load the drop stopped starts again. Whether it did.
+    pub fn resume(&mut self, now: f64) -> bool {
+        let Some(shown) = self.shown.as_mut().filter(|s| s.lost) else {
+            return false;
+        };
+        shown.lost = false;
+        shown.body = Body::Loading;
+        shown.started = false;
+        shown.since = now;
+        true
     }
 
     /// How long until a fetch is due, for the frame to wake then.

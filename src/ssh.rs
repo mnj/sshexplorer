@@ -504,7 +504,14 @@ impl Session {
         let remote = self.remote();
         let wake = self.wake.clone();
         let task = self.runtime.spawn(async move {
-            let _ = sender.send(remote.read(path, offset, len).await);
+            let answer = remote.read(path, offset, len).await;
+            if let Err(e) = &answer
+                && !matches!(e.as_str(), "No such file" | "Permission denied")
+            {
+                // A failure caused by a drop is seen together with it.
+                remote.closed().await;
+            }
+            let _ = sender.send(answer);
             wake();
         });
         Request {
@@ -635,6 +642,23 @@ impl Remote {
                 _ => {}
             }
         }
+    }
+
+    /// Whether the connection has closed, now.
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
+    /// Whether the connection has closed: after a request failed, waits briefly for the
+    /// close to show, so that a failure caused by a drop is seen as one.
+    pub async fn closed(&self) -> bool {
+        for _ in 0..20 {
+            if self.handle.is_closed() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.handle.is_closed()
     }
 
     /// Opens the file at `path` for reading.

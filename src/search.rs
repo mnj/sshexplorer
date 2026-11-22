@@ -74,6 +74,8 @@ pub enum How {
     Capped,
     /// The host cannot run the Search.
     Unavailable,
+    /// The connection dropped.
+    Lost,
 }
 
 /// A running Search. Dropping it stops it.
@@ -245,7 +247,25 @@ enum Walk {
     Capped,
 }
 
-async fn run(remote: Remote, query: Query, out: Out, mut stopped: watch::Receiver<bool>) {
+async fn run(remote: Remote, query: Query, out: Out, stopped: watch::Receiver<bool>) {
+    // A `find` that ended without an exit status, or a command that could not start,
+    // may mean the connection dropped.
+    let mut suspect = false;
+    let mut ended = search(&remote, query, &out, stopped, &mut suspect).await;
+    let ran_out = matches!(ended.how, How::Finished | How::Unavailable);
+    if ran_out && (remote.is_closed() || (suspect && remote.closed().await)) {
+        ended.how = How::Lost;
+    }
+    out.send(Event::Ended(ended));
+}
+
+async fn search(
+    remote: &Remote,
+    query: Query,
+    out: &Out,
+    mut stopped: watch::Receiver<bool>,
+    suspect: &mut bool,
+) -> Ended {
     let pattern = pattern(&query.text);
     let start = remote
         .canonicalize(query.start.clone())
@@ -259,10 +279,10 @@ async fn run(remote: Remote, query: Query, out: Out, mut stopped: watch::Receive
     let mut found = 0;
     let mut unreadable = 0;
     let mut first = true;
-    let end = |how, unreadable| Event::Ended(Ended { how, unreadable });
+    let end = |how, unreadable| Ended { how, unreadable };
     while let Some(root) = roots.pop_front() {
         if stopped.has_changed().unwrap_or(true) {
-            return out.send(end(How::Stopped, unreadable));
+            return end(How::Stopped, unreadable);
         }
         let prunes: Vec<String> = visited
             .iter()
@@ -272,19 +292,23 @@ async fn run(remote: Remote, query: Query, out: Out, mut stopped: watch::Receive
         let args = expression(&pattern, query.follow, &prunes);
         let exec = match remote.exec(&command(&root.dir, &args)).await {
             Ok(exec) => exec,
-            Err(_) if first => return out.send(end(How::Unavailable, 0)),
+            Err(_) if first => {
+                *suspect = true;
+                return end(How::Unavailable, 0);
+            }
             Err(_) => {
+                *suspect = true;
                 unreadable += 1;
                 continue;
             }
         };
         let mut links = Vec::new();
         let walk = walk(
-            &remote,
+            remote,
             exec,
             &root,
             &mut stopped,
-            &out,
+            out,
             Counts {
                 found: &mut found,
                 cap: query.cap,
@@ -294,12 +318,13 @@ async fn run(remote: Remote, query: Query, out: Out, mut stopped: watch::Receive
         )
         .await;
         match walk {
-            Walk::Stopped => return out.send(end(How::Stopped, unreadable)),
-            Walk::Capped => return out.send(end(How::Capped, unreadable)),
+            Walk::Stopped => return end(How::Stopped, unreadable),
+            Walk::Capped => return end(How::Capped, unreadable),
             Walk::Done { status, pid } => {
+                *suspect |= status.is_none();
                 let missing = matches!(status, Some(126 | 127)) || !pid;
                 if first && missing {
-                    return out.send(end(How::Unavailable, 0));
+                    return end(How::Unavailable, 0);
                 }
                 if status == Some(NO_START) || (!first && missing) {
                     unreadable += 1;
@@ -322,7 +347,7 @@ async fn run(remote: Remote, query: Query, out: Out, mut stopped: watch::Receive
             roots.push_back(Root { dir: real, shown });
         }
     }
-    out.send(end(How::Finished, unreadable));
+    end(How::Finished, unreadable)
 }
 
 /// `path` relative to `dir`, when it is below it.
