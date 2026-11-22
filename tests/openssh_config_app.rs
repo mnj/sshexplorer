@@ -82,7 +82,8 @@ fn app_in(dir: &Path, config: &str, settings: AppSettings) -> (App, PathBuf) {
     std::fs::write(&config_path, config).unwrap();
     let app = App::with_store(store)
         .known_hosts_at(dir.join("known_hosts"))
-        .ssh_config_at(config_path.clone());
+        .ssh_config_at(config_path.clone())
+        .agent_at(None);
     (app, config_path)
 }
 

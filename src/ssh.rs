@@ -13,14 +13,19 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use russh::client::{self, AuthResult};
+use russh::client;
 use russh::keys::PublicKeyOrCertificate;
 use russh::keys::ssh_key::{Algorithm, PublicKey};
 use russh::{Disconnect, Preferred};
 use russh_sftp::client::SftpSession;
 use tokio::sync::oneshot;
 
+use crate::hosts::AuthMethod;
 use crate::known_hosts::{self, Recorded, Verdict};
+
+mod auth;
+
+pub use auth::{NO_AGENT, PassphrasePrompt, Question, QuestionsPrompt, default_agent};
 
 /// How long the TCP connect may take before the Session fails, unless the config's
 /// `ConnectTimeout` says otherwise. The handshake itself has no limit, so a trust prompt
@@ -30,7 +35,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a keepalive goes out, unless the config's `ServerAliveInterval` says.
 const KEEPALIVE: Duration = Duration::from_secs(30);
 
-/// How to connect, besides where: the host-key files, and the timings.
+/// How to connect, besides where: the host-key files, the timings, and how to log in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The `known_hosts` file, which Trust appends to.
@@ -41,16 +46,29 @@ pub struct Options {
     pub connect_timeout: Option<Duration>,
     /// How often a keepalive goes out; `None` for every 30 s, zero for never.
     pub keepalive: Option<Duration>,
+    /// Which methods to log in by.
+    pub auth: AuthMethod,
+    /// The Key file, else the config's `IdentityFile`s, tried in order.
+    pub key_files: Vec<PathBuf>,
+    /// The config's `IdentitiesOnly`: offer no agent identity but the key files'.
+    pub identities_only: bool,
+    /// The SSH agent's socket (a named pipe on Windows); `None` for no agent.
+    pub agent: Option<PathBuf>,
 }
 
 impl Options {
-    /// Checking host keys against `known_hosts` alone, with the default timings.
+    /// Checking host keys against `known_hosts` alone, with the default timings, logging
+    /// in Automatically with no key file and no agent.
     pub fn new(known_hosts: PathBuf) -> Options {
         Options {
             known_hosts,
             also_known_hosts: Vec::new(),
             connect_timeout: None,
             keepalive: None,
+            auth: AuthMethod::Automatic,
+            key_files: Vec::new(),
+            identities_only: false,
+            agent: None,
         }
     }
 }
@@ -142,8 +160,13 @@ impl Opening {
 pub enum Event {
     /// The host's key is not in `known_hosts`: trust it or cancel.
     TrustHostKey(TrustPrompt),
-    /// The password is needed.
+    /// The password is needed, for the password method or a keyboard-interactive round
+    /// with one hidden prompt.
     Password(PasswordPrompt),
+    /// A key file is locked: its passphrase is needed.
+    Passphrase(PassphrasePrompt),
+    /// A keyboard-interactive round asks several things (or one shown answer).
+    Questions(QuestionsPrompt),
     /// The Session is open, with the folder it opened in listed.
     Opened(Opened),
     /// The Session did not open.
@@ -208,6 +231,8 @@ pub enum Failure {
     Sftp(String),
     /// The Session needs something sshexplorer does not do, such as a proxy.
     Unsupported(String),
+    /// No method logged in: no agent, no key file, or none the host accepts.
+    Auth(String),
 }
 
 /// A host key that `known_hosts` refuses, and the line that refuses it.
@@ -253,7 +278,9 @@ impl std::fmt::Display for Failure {
                 )
             }
             Failure::Connection(reason) => write!(f, "Could not connect: {reason}"),
-            Failure::Sftp(reason) | Failure::Unsupported(reason) => write!(f, "{reason}"),
+            Failure::Sftp(reason) | Failure::Unsupported(reason) | Failure::Auth(reason) => {
+                write!(f, "{reason}")
+            }
         }
     }
 }
@@ -394,8 +421,8 @@ async fn connect(
     let check = HostCheck {
         address: target.address.clone(),
         port: target.port,
-        known_hosts: options.known_hosts,
-        also_known_hosts: options.also_known_hosts,
+        known_hosts: options.known_hosts.clone(),
+        also_known_hosts: options.also_known_hosts.clone(),
         out: out.clone(),
         refused: refused.clone(),
     };
@@ -418,7 +445,7 @@ async fn connect(
         }
     };
 
-    authenticate(&mut handle, target, out).await?;
+    auth::authenticate(&mut handle, target, &options, out).await?;
 
     let sftp = start_sftp(&handle)
         .await
@@ -440,37 +467,6 @@ async fn connect(
         },
         home,
     })
-}
-
-/// Asks for the password until the host accepts one, or the operator cancels.
-async fn authenticate(
-    handle: &mut client::Handle<HostCheck>,
-    target: &Target,
-    out: &Events,
-) -> Result<(), Failure> {
-    let mut rejected = false;
-    loop {
-        let (answer, reply) = oneshot::channel();
-        out.send(Event::Password(PasswordPrompt {
-            account: format!("{}@{}", target.account, target.address),
-            rejected,
-            answer,
-        }));
-        let Ok(Some(password)) = reply.await else {
-            let _ = handle
-                .disconnect(Disconnect::ByApplication, "Cancelled", "en")
-                .await;
-            return Err(Failure::Cancelled);
-        };
-        match handle
-            .authenticate_password(&target.account, password)
-            .await
-        {
-            Ok(AuthResult::Success) => return Ok(()),
-            Ok(AuthResult::Failure { .. }) => rejected = true,
-            Err(e) => return Err(Failure::Connection(e.to_string())),
-        }
-    }
 }
 
 async fn start_sftp(

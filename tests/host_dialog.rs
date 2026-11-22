@@ -257,7 +257,11 @@ fn window_with_hosts(
     HostStore::beside(store.path()).save(hosts).unwrap();
     let known_hosts = dir.path().join("known_hosts");
     std::fs::write(&known_hosts, format!("{}\n", fixture.known_hosts_line())).unwrap();
-    window(App::with_store(store).known_hosts_at(known_hosts))
+    window(
+        App::with_store(store)
+            .known_hosts_at(known_hosts)
+            .agent_at(None),
+    )
 }
 
 fn enter_password(harness: &mut Harness<'static, App>) {

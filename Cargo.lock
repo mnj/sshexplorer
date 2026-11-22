@@ -4414,14 +4414,19 @@ dependencies = [
 name = "sshexplorer"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "base64",
+ "cbc",
+ "des",
  "directories",
  "eframe",
  "egui",
  "egui_kittest",
  "fontdb",
+ "futures",
  "hmac",
  "jiff",
+ "md5",
  "objc2-app-kit 0.3.2",
  "russh",
  "russh-sftp",

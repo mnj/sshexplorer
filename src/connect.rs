@@ -18,7 +18,10 @@ use egui::{Context, Id, Key, LayerId, Order};
 use crate::hosts::{self, AuthMethod, Host, PasteError};
 use crate::openssh_config::{CONFIG_NAME, Config, HostFields, NeedsProxy, Resolved};
 use crate::session::{self, Details};
-use crate::ssh::{self, Event, Failure, Opened, PasswordPrompt, Target, TrustPrompt};
+use crate::ssh::{
+    self, Event, Failure, Opened, PassphrasePrompt, PasswordPrompt, QuestionsPrompt, Target,
+    TrustPrompt,
+};
 use crate::theme::TokensExt as _;
 use crate::widgets;
 
@@ -159,6 +162,8 @@ pub struct Plan {
     pub resolved: Result<Resolved, NeedsProxy>,
     /// The Initial remote folder; empty for the home directory.
     pub folder: String,
+    /// The Host's Authentication method.
+    pub auth: AuthMethod,
     pub details: Details,
 }
 
@@ -198,6 +203,7 @@ impl OpenRequest {
         Plan {
             resolved,
             folder: host.initial_folder.clone(),
+            auth: host.auth,
             details: Details {
                 label,
                 tooltip,
@@ -528,13 +534,22 @@ pub struct Pending {
     pub details: Details,
     opening: ssh::Opening,
     prompt: Option<Prompt>,
-    password: String,
+    /// What is typed into the secret dialog: one entry per field.
+    answers: Vec<String>,
 }
 
 enum Prompt {
     Trust(TrustPrompt),
     Password(PasswordPrompt),
+    Passphrase(PassphrasePrompt),
+    Questions(QuestionsPrompt),
     Failed(Failure),
+}
+
+/// One field of the secret dialog.
+struct Field {
+    label: String,
+    hidden: bool,
 }
 
 /// How a [`Pending`] ended.
@@ -551,7 +566,7 @@ impl Pending {
             details,
             opening,
             prompt: None,
-            password: String::new(),
+            answers: Vec::new(),
         }
     }
 
@@ -566,8 +581,16 @@ impl Pending {
             match self.opening.try_next()? {
                 Event::TrustHostKey(prompt) => self.prompt = Some(Prompt::Trust(prompt)),
                 Event::Password(prompt) => {
-                    self.password.clear();
+                    self.answers = vec![String::new()];
                     self.prompt = Some(Prompt::Password(prompt));
+                }
+                Event::Passphrase(prompt) => {
+                    self.answers = vec![String::new()];
+                    self.prompt = Some(Prompt::Passphrase(prompt));
+                }
+                Event::Questions(prompt) => {
+                    self.answers = vec![String::new(); prompt.questions.len()];
+                    self.prompt = Some(Prompt::Questions(prompt));
                 }
                 Event::Opened(opened) => return Some(Outcome::Opened(opened)),
                 Event::Failed(Failure::Cancelled) => return Some(Outcome::Ended),
@@ -577,6 +600,8 @@ impl Pending {
         match self.prompt.take()? {
             Prompt::Trust(prompt) => self.show_trust(ctx, prompt),
             Prompt::Password(prompt) => self.show_password(ctx, prompt),
+            Prompt::Passphrase(prompt) => self.show_passphrase(ctx, prompt),
+            Prompt::Questions(prompt) => self.show_questions(ctx, prompt),
             Prompt::Failed(failure) => self.show_failure(ctx, failure),
         }
     }
@@ -614,22 +639,108 @@ impl Pending {
     }
 
     fn show_password(&mut self, ctx: &Context, prompt: PasswordPrompt) -> Option<Outcome> {
+        let intro = vec![format!("Password for {}", prompt.account)];
+        let rejected = prompt.rejected.then_some("The password was rejected.");
+        let fields = [Field {
+            label: "Password".into(),
+            hidden: true,
+        }];
+        match self.secret(ctx, "password", "Password", &intro, rejected, &fields) {
+            Some(true) => prompt.enter(self.answers.remove(0)),
+            Some(false) => prompt.cancel(),
+            None => self.prompt = Some(Prompt::Password(prompt)),
+        }
+        None
+    }
+
+    fn show_passphrase(&mut self, ctx: &Context, prompt: PassphrasePrompt) -> Option<Outcome> {
+        let intro = vec![format!("Passphrase for the key {}", prompt.key.display())];
+        let rejected = prompt
+            .rejected
+            .then_some("The key passphrase was rejected.");
+        let fields = [Field {
+            label: "Passphrase".into(),
+            hidden: true,
+        }];
+        match self.secret(
+            ctx,
+            "passphrase",
+            "Key passphrase",
+            &intro,
+            rejected,
+            &fields,
+        ) {
+            Some(true) => prompt.enter(self.answers.remove(0)),
+            Some(false) => prompt.cancel(),
+            None => self.prompt = Some(Prompt::Passphrase(prompt)),
+        }
+        None
+    }
+
+    fn show_questions(&mut self, ctx: &Context, prompt: QuestionsPrompt) -> Option<Outcome> {
+        let mut intro = vec![format!("The host asks {}:", prompt.account)];
+        intro.extend(
+            [&prompt.name, &prompt.instructions]
+                .into_iter()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.trim().to_owned()),
+        );
+        let rejected = prompt.rejected.then_some("The answers were rejected.");
+        let fields: Vec<Field> = prompt
+            .questions
+            .iter()
+            .map(|q| Field {
+                label: q.prompt.trim().trim_end_matches(':').trim_end().to_owned(),
+                hidden: !q.echo,
+            })
+            .collect();
+        match self.secret(ctx, "questions", "Sign in", &intro, rejected, &fields) {
+            Some(true) => prompt.answer(std::mem::take(&mut self.answers)),
+            Some(false) => prompt.cancel(),
+            None => self.prompt = Some(Prompt::Questions(prompt)),
+        }
+        None
+    }
+
+    /// The secret dialog for one frame: `intro`, the rejection line, and `fields` typed
+    /// into `self.answers`. `Some(true)` on Connect or Enter, `Some(false)` on Cancel,
+    /// Escape or the close control. Cancelling clears what was typed.
+    fn secret(
+        &mut self,
+        ctx: &Context,
+        name: &str,
+        title: &str,
+        intro: &[String],
+        rejected: Option<&str>,
+        fields: &[Field],
+    ) -> Option<bool> {
         let mut answer = None;
-        let id = self.id.with("password");
-        let shown = modal(ctx, id, "Password", |ui| {
-            paragraph(ui, &format!("Password for {}", prompt.account));
-            if prompt.rejected {
-                ui.add(widgets::invalid_message("The password was rejected."));
+        let id = self.id.with(name);
+        self.answers.resize(fields.len(), String::new());
+        let answers = &mut self.answers;
+        let shown = modal(ctx, id, title, |ui| {
+            for line in intro {
+                paragraph(ui, line);
             }
-            let field = ui
-                .add(
-                    widgets::text_field(&mut self.password)
-                        .id(id.with("field"))
-                        .password(),
-                )
-                .accessible_name("Password");
-            if !field.has_focus() && !ui.memory(|m| m.focused().is_some()) {
-                field.request_focus();
+            if let Some(rejected) = rejected {
+                ui.add(widgets::invalid_message(rejected));
+            }
+            let mut first = None;
+            for (i, (field, text)) in fields.iter().zip(answers.iter_mut()).enumerate() {
+                if fields.len() > 1 {
+                    paragraph(ui, &field.label);
+                }
+                let mut edit = widgets::text_field(text).id(id.with("field").with(i));
+                if field.hidden {
+                    edit = edit.password();
+                }
+                let response = ui.add(edit).accessible_name(field.label.as_str());
+                first.get_or_insert(response);
+            }
+            if let Some(first) = first
+                && !ui.memory(|m| m.focused().is_some())
+            {
+                first.request_focus();
             }
             widgets::button_row(ui, |ui| {
                 if ui.add(widgets::button("Connect").primary()).clicked() {
@@ -652,15 +763,10 @@ impl Pending {
         if shown.as_ref().is_some_and(|s| s.close_clicked) || escape {
             answer = Some(false);
         }
-        match answer {
-            Some(true) => prompt.enter(std::mem::take(&mut self.password)),
-            Some(false) => {
-                self.password.clear();
-                prompt.cancel();
-            }
-            None => self.prompt = Some(Prompt::Password(prompt)),
+        if answer == Some(false) {
+            self.answers.clear();
         }
-        None
+        answer
     }
 
     fn show_failure(&mut self, ctx: &Context, failure: Failure) -> Option<Outcome> {

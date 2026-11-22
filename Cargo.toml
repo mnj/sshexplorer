@@ -27,6 +27,12 @@ tokio = { version = "1.54", features = ["rt-multi-thread", "net", "sync", "time"
 hmac = "0.13"
 sha1 = "0.11"
 base64 = "0.22"
+# Traditional encrypted PEM keys (DEK-Info AES-128/256-CBC, DES-EDE3-CBC), which russh
+# reads only for AES-128 RSA. The versions russh itself uses.
+md5 = "0.8.1"
+aes = "0.9.4"
+cbc = "0.2.1"
+des = "0.9.0"
 # The Modified column in the operator's time zone. russh-sftp already depends on it.
 jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 
@@ -44,6 +50,8 @@ windows = { version = "0.62.2", features = ["UI_ViewManagement", "Foundation"] }
 egui_kittest = "0.37"
 # The test SSH/SFTP server (tests/common/fixture.rs) serves a temporary directory.
 tempfile = "3.27"
+# The test SSH agent (tests/auth.rs) is russh's agent server, which takes a Stream.
+futures = "0.3.34"
 
 [lints.rust]
 unsafe_code = "forbid"
