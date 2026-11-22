@@ -17,12 +17,13 @@ use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
+use crate::openssh_config::Config;
 use crate::session::{self, Session};
 use crate::settings::{
-    Animate, AppSettings, Appearance, Browsing, DEFAULT_UI_SCALE, Edge, Search, Store, ThemeChoice,
-    UI_SCALES,
+    Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge, Search, Store,
+    ThemeChoice, UI_SCALES,
 };
-use crate::ssh::Ssh;
+use crate::ssh::{Failure, Opening, Options, Ssh};
 use crate::theme::{self, Accent, Density, TokensExt as _, fonts};
 use crate::widgets::{self, Glyph, TabKind, Tooltip as _};
 
@@ -118,6 +119,8 @@ pub struct App {
     applied: Option<Appearance>,
     /// The `known_hosts` file host keys are checked against, and Trust appends to.
     known_hosts: PathBuf,
+    /// The operator's OpenSSH config, read at each Session open while it is in use.
+    ssh_config: PathBuf,
     /// The saved Hosts, in the Host dialog's order.
     hosts: Vec<Host>,
     /// Where Hosts are saved; `None` keeps them for this run only.
@@ -148,13 +151,19 @@ impl Default for App {
     }
 }
 
+/// The operator's home directory, or none.
+fn home() -> PathBuf {
+    std::env::home_dir().unwrap_or_default()
+}
+
 /// `~/.ssh/known_hosts` (`%USERPROFILE%\.ssh\known_hosts` on Windows).
-// TODO(#24): `UserKnownHostsFile` from the OpenSSH config.
 fn default_known_hosts() -> PathBuf {
-    std::env::home_dir()
-        .unwrap_or_default()
-        .join(".ssh")
-        .join("known_hosts")
+    home().join(".ssh").join("known_hosts")
+}
+
+/// `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows).
+fn default_ssh_config() -> PathBuf {
+    home().join(".ssh").join("config")
 }
 
 /// Readies `ctx` for the app, before its first frame: the bundled fonts, the tokens and
@@ -174,6 +183,7 @@ impl App {
             dialog: None,
             applied: None,
             known_hosts: path,
+            ssh_config: default_ssh_config(),
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
@@ -204,6 +214,21 @@ impl App {
     pub fn known_hosts_at(mut self, path: PathBuf) -> App {
         self.known_hosts = path;
         self
+    }
+
+    /// The same app, reading the OpenSSH config at `path`.
+    pub fn ssh_config_at(mut self, path: PathBuf) -> App {
+        self.ssh_config = path;
+        self
+    }
+
+    /// The OpenSSH config as the file holds it now; empty when it is not in use.
+    fn read_ssh_config(&self) -> Config {
+        if self.settings.connections.use_ssh_config {
+            Config::read(&self.ssh_config, &home())
+        } else {
+            Config::default()
+        }
     }
 
     /// The app with `settings`, kept for this run only.
@@ -328,6 +353,9 @@ impl App {
                     let folder = details.local_folder.display().to_string();
                     ui.label(t.ty.body.rich(folder).color(t.color.text.muted))
                         .tooltip("Local folder");
+                    if let Some(note) = &details.note {
+                        ui.add(widgets::warning_message(note));
+                    }
                 }
             },
             |ui| {
@@ -439,7 +467,7 @@ impl App {
 
     fn open_host_dialog(&mut self) {
         if self.host_dialog.is_none() {
-            self.host_dialog = Some(HostDialog::new(&self.hosts));
+            self.host_dialog = Some(HostDialog::new(&self.hosts, self.read_ssh_config()));
         }
     }
 
@@ -448,16 +476,26 @@ impl App {
             match dialog.show(ctx, &mut self.hosts) {
                 Some(HostAction::Open(request)) => {
                     self.host_dialog = None;
-                    let ssh = self.ssh.get_or_insert_with(|| {
-                        let ctx = ctx.clone();
-                        Ssh::new(move || ctx.request_repaint())
-                    });
-                    let opening =
-                        ssh.open_in(request.target, self.known_hosts.clone(), &request.folder);
+                    let plan = request.plan(&self.read_ssh_config());
+                    let opening = match plan.resolved {
+                        Ok(resolved) => {
+                            let options = Options {
+                                known_hosts: self.known_hosts.clone(),
+                                also_known_hosts: resolved.known_hosts,
+                                connect_timeout: resolved.connect_timeout,
+                                keepalive: resolved.server_alive_interval,
+                            };
+                            let ssh = self.ssh.get_or_insert_with(|| {
+                                let ctx = ctx.clone();
+                                Ssh::new(move || ctx.request_repaint())
+                            });
+                            ssh.connect(resolved.target, options, &plan.folder)
+                        }
+                        Err(proxy) => Opening::failed(Failure::Unsupported(proxy.to_string())),
+                    };
                     self.next_id += 1;
                     let id = Id::NULL.with("opening").with(self.next_id);
-                    self.pending
-                        .push(Pending::new(id, request.details, opening));
+                    self.pending.push(Pending::new(id, plan.details, opening));
                 }
                 Some(HostAction::Changed) => self.save_hosts(),
                 Some(HostAction::Dismiss) => self.host_dialog = None,
@@ -670,6 +708,7 @@ impl App {
                 Page::Browsing => browsing(ui, &mut settings.browsing),
                 Page::Download => download_page(ui, settings),
                 Page::Keys => editor.ui(ui, &mut settings.keys),
+                Page::Connections => connections(ui, &mut settings.connections),
                 _ => {
                     ui.add(widgets::form_name("Nothing to set here yet."));
                 }
@@ -682,6 +721,7 @@ impl App {
                     settings.download = crate::settings::Download::default();
                     settings.search.follow_links = Search::default().follow_links;
                 }
+                Page::Connections => settings.connections = Connections::default(),
                 Page::Keys => {
                     settings.keys.reset_all();
                     editor.stop();
@@ -839,6 +879,15 @@ fn download_page(ui: &mut egui::Ui, s: &mut AppSettings) {
             "Follow symlinked directories",
             Some("Shared with Search"),
         );
+    });
+}
+
+/// The Connections page.
+fn connections(ui: &mut egui::Ui, c: &mut Connections) {
+    widgets::form("connections").show(ui, |ui| {
+        widgets::form_row(ui, "Use ~/.ssh/config", |ui| {
+            ui.add(widgets::switch(&mut c.use_ssh_config, "").name("Use ~/.ssh/config"));
+        });
     });
 }
 

@@ -8,7 +8,8 @@
 //! - [`download`] copies a Selection into the Local folder in the background, and
 //!   [`download_ui`] is its strip and prompts in the Session.
 //! - [`ssh`] is the SSH stack (russh, ADR-0003) on its own runtime, off the frame
-//!   thread; [`known_hosts`] checks host keys against the operator's `known_hosts`.
+//!   thread; [`known_hosts`] checks host keys against the operator's `known_hosts`, and
+//!   [`openssh_config`] reads and applies the operator's `~/.ssh/config` (ADR-0002).
 //! - [`settings`] holds the app settings saved between runs, and [`keymap`] every key
 //!   binding; [`binding_editor`] is Settings → Keys, where the operator rebinds them.
 
@@ -23,6 +24,7 @@ pub mod icons;
 pub mod keymap;
 pub mod kind;
 pub mod known_hosts;
+pub mod openssh_config;
 pub mod session;
 pub mod settings;
 pub mod ssh;

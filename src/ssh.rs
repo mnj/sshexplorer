@@ -8,7 +8,7 @@
 //! for the operator (trust this host key? the password?) is an event carrying a prompt;
 //! answering it, or dropping it to cancel, lets the connection go on.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,9 +22,38 @@ use tokio::sync::oneshot;
 
 use crate::known_hosts::{self, Recorded, Verdict};
 
-/// How long the TCP connect may take before the Session fails. The handshake itself has
-/// no limit, so a trust prompt can wait for the operator.
+/// How long the TCP connect may take before the Session fails, unless the config's
+/// `ConnectTimeout` says otherwise. The handshake itself has no limit, so a trust prompt
+/// can wait for the operator.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often a keepalive goes out, unless the config's `ServerAliveInterval` says.
+const KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// How to connect, besides where: the host-key files, and the timings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Options {
+    /// The `known_hosts` file, which Trust appends to.
+    pub known_hosts: PathBuf,
+    /// The config's `UserKnownHostsFile`s, checked as well; Trust never writes to them.
+    pub also_known_hosts: Vec<PathBuf>,
+    /// How long the TCP connect may take; `None` for 30 s.
+    pub connect_timeout: Option<Duration>,
+    /// How often a keepalive goes out; `None` for every 30 s, zero for never.
+    pub keepalive: Option<Duration>,
+}
+
+impl Options {
+    /// Checking host keys against `known_hosts` alone, with the default timings.
+    pub fn new(known_hosts: PathBuf) -> Options {
+        Options {
+            known_hosts,
+            also_known_hosts: Vec::new(),
+            connect_timeout: None,
+            keepalive: None,
+        }
+    }
+}
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
 
@@ -67,6 +96,11 @@ impl Ssh {
     /// As [`Ssh::open`], with the Session opening in `folder`: absolute, or relative to
     /// the account's home directory, which an empty `folder` means.
     pub fn open_in(&self, target: Target, known_hosts: PathBuf, folder: &str) -> Opening {
+        self.connect(target, Options::new(known_hosts), folder)
+    }
+
+    /// As [`Ssh::open_in`], with the host-key files and timings in `options`.
+    pub fn connect(&self, target: Target, options: Options, folder: &str) -> Opening {
         let (sender, events) = mpsc::channel();
         let out = Events {
             sender,
@@ -74,7 +108,7 @@ impl Ssh {
         };
         let folder = folder.trim().to_owned();
         self.runtime
-            .spawn(open(target, known_hosts, folder, Arc::new(out)));
+            .spawn(open(target, options, folder, Arc::new(out)));
         Opening { events }
     }
 }
@@ -86,6 +120,13 @@ pub struct Opening {
 }
 
 impl Opening {
+    /// A Session that fails before it connects: its one event is [`Event::Failed`].
+    pub fn failed(failure: Failure) -> Opening {
+        let (sender, events) = mpsc::channel();
+        let _ = sender.send(Event::Failed(failure));
+        Opening { events }
+    }
+
     /// The next event, if one has arrived. Never blocks.
     pub fn try_next(&self) -> Option<Event> {
         self.events.try_recv().ok()
@@ -165,6 +206,8 @@ pub enum Failure {
     Connection(String),
     /// The SFTP subsystem would not start, or the folder to open in could not be listed.
     Sftp(String),
+    /// The Session needs something sshexplorer does not do, such as a proxy.
+    Unsupported(String),
 }
 
 /// A host key that `known_hosts` refuses, and the line that refuses it.
@@ -210,7 +253,7 @@ impl std::fmt::Display for Failure {
                 )
             }
             Failure::Connection(reason) => write!(f, "Could not connect: {reason}"),
-            Failure::Sftp(reason) => write!(f, "{reason}"),
+            Failure::Sftp(reason) | Failure::Unsupported(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -405,8 +448,8 @@ impl Events {
     }
 }
 
-async fn open(target: Target, known_hosts: PathBuf, folder: String, out: Arc<Events>) {
-    let failure = match connect(&target, known_hosts, &folder, &out).await {
+async fn open(target: Target, options: Options, folder: String, out: Arc<Events>) {
+    let failure = match connect(&target, options, &folder, &out).await {
         Ok(opened) => {
             out.send(Event::Opened(opened));
             return;
@@ -418,34 +461,39 @@ async fn open(target: Target, known_hosts: PathBuf, folder: String, out: Arc<Eve
 
 async fn connect(
     target: &Target,
-    known_hosts: PathBuf,
+    options: Options,
     folder: &str,
     out: &Arc<Events>,
 ) -> Result<Opened, Failure> {
-    let recorded = std::fs::read_to_string(&known_hosts).unwrap_or_default();
+    let recorded: Vec<Algorithm> = std::iter::once(&options.known_hosts)
+        .chain(&options.also_known_hosts)
+        .flat_map(|file| {
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            known_hosts::recorded_algorithms(&text, &target.address, target.port)
+        })
+        .collect();
+    let keepalive = options.keepalive.unwrap_or(KEEPALIVE);
     let config = client::Config {
         preferred: Preferred {
-            key: prefer(&known_hosts::recorded_algorithms(
-                &recorded,
-                &target.address,
-                target.port,
-            ))
-            .into(),
+            key: prefer(&recorded).into(),
             ..Preferred::default()
         },
+        keepalive_interval: (!keepalive.is_zero()).then_some(keepalive),
+        keepalive_max: 3,
         ..client::Config::default()
     };
     let refused = Arc::new(Mutex::new(None));
     let check = HostCheck {
         address: target.address.clone(),
         port: target.port,
-        known_hosts,
+        known_hosts: options.known_hosts,
+        also_known_hosts: options.also_known_hosts,
         out: out.clone(),
         refused: refused.clone(),
     };
     let address = (target.address.as_str(), target.port);
     let stream = match tokio::time::timeout(
-        CONNECT_TIMEOUT,
+        options.connect_timeout.unwrap_or(CONNECT_TIMEOUT),
         tokio::net::TcpStream::connect(address),
     )
     .await
@@ -581,12 +629,13 @@ fn same_kind(a: &Algorithm, b: &Algorithm) -> bool {
     matches!((a, b), (Algorithm::Rsa { .. }, Algorithm::Rsa { .. })) || a == b
 }
 
-/// The client handler: checks the host key against `known_hosts`, asking the operator
-/// about an unknown one.
+/// The client handler: checks the host key against `known_hosts` and the config's
+/// `UserKnownHostsFile`s, asking the operator about an unknown one.
 struct HostCheck {
     address: String,
     port: u16,
     known_hosts: PathBuf,
+    also_known_hosts: Vec<PathBuf>,
     out: Arc<Events>,
     /// Why the key was refused, for `connect` to report in place of russh's error.
     refused: Arc<Mutex<Option<Failure>>>,
@@ -600,13 +649,34 @@ impl HostCheck {
         Ok(false)
     }
 
-    fn mismatch(&self, key: &PublicKey, recorded: Recorded) -> KeyMismatch {
+    fn mismatch(&self, key: &PublicKey, file: &Path, recorded: Recorded) -> KeyMismatch {
         KeyMismatch {
             host: known_hosts::host_name(&self.address, self.port),
             fingerprint: known_hosts::fingerprint(key),
-            file: self.known_hosts.clone(),
+            file: file.to_path_buf(),
             recorded,
         }
+    }
+
+    /// What the host-key files say of `key`, and the file that says it: revoked in any
+    /// file is revoked, else recorded in any is known, else a different key is changed.
+    fn verdict(&self, key: &PublicKey) -> (Verdict, PathBuf) {
+        let mut verdicts: Vec<(Verdict, PathBuf)> = std::iter::once(&self.known_hosts)
+            .chain(&self.also_known_hosts)
+            .map(|file| {
+                let text = std::fs::read_to_string(file).unwrap_or_default();
+                let verdict = known_hosts::check(&text, &self.address, self.port, key);
+                (verdict, file.clone())
+            })
+            .collect();
+        let rank = |v: &Verdict| match v {
+            Verdict::Revoked(_) => 0,
+            Verdict::Known => 1,
+            Verdict::Changed(_) => 2,
+            Verdict::Unknown => 3,
+        };
+        verdicts.sort_by_key(|(v, _)| rank(v));
+        verdicts.swap_remove(0)
     }
 }
 
@@ -622,15 +692,15 @@ impl client::Handler for HostCheck {
                 "the host offered a certificate, which sshexplorer does not check".into(),
             ));
         };
-        let text = std::fs::read_to_string(&self.known_hosts).unwrap_or_default();
-        match known_hosts::check(&text, &self.address, self.port, key) {
+        let (verdict, file) = self.verdict(key);
+        match verdict {
             Verdict::Known => Ok(true),
             Verdict::Changed(recorded) => {
-                let mismatch = self.mismatch(key, recorded);
+                let mismatch = self.mismatch(key, &file, recorded);
                 self.refuse(Failure::HostKeyChanged(mismatch))
             }
             Verdict::Revoked(recorded) => {
-                let mismatch = self.mismatch(key, recorded);
+                let mismatch = self.mismatch(key, &file, recorded);
                 self.refuse(Failure::HostKeyRevoked(mismatch))
             }
             Verdict::Unknown => {

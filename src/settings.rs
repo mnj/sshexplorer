@@ -30,6 +30,8 @@ pub struct AppSettings {
     #[serde(deserialize_with = "lenient")]
     pub browsing: Browsing,
     #[serde(deserialize_with = "lenient")]
+    pub connections: Connections,
+    #[serde(deserialize_with = "lenient")]
     pub search: Search,
     #[serde(deserialize_with = "lenient")]
     pub download: Download,
@@ -71,6 +73,24 @@ pub struct Browsing {
     /// Whether dot-names are listed, in every Session. Ctrl+H toggles it.
     #[serde(deserialize_with = "lenient")]
     pub show_hidden: bool,
+}
+
+/// The Connections page.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Connections {
+    /// "Use ~/.ssh/config": Sessions and the Host dialog take values from the
+    /// operator's OpenSSH config.
+    #[serde(deserialize_with = "lenient_true")]
+    pub use_ssh_config: bool,
+}
+
+impl Default for Connections {
+    fn default() -> Self {
+        Connections {
+            use_ssh_config: true,
+        }
+    }
 }
 
 /// Light, dark, or whatever the OS uses.
