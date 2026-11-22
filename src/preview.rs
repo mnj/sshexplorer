@@ -85,6 +85,27 @@ pub enum Body {
     Unsupported,
     /// One line, such as "Cannot read: permission denied".
     Failed(String),
+    /// An image: the panel decodes and shows it.
+    Image(Image),
+    /// [`too_large_line`] for a file of this size, which is not fetched, and a hint to
+    /// Download it.
+    TooLarge(u64),
+}
+
+/// An image's bytes, fetched whole.
+pub struct Image {
+    pub fetched: Fetched,
+}
+
+/// Whether `kind` is shown only from the whole file, so that over the size cap it is
+/// [`Body::TooLarge`] and not fetched.
+pub fn whole(kind: Kind) -> bool {
+    matches!(kind, Kind::Image | Kind::Pdf | Kind::Archive)
+}
+
+/// "Too large to preview (2.3 GiB)".
+pub fn too_large_line(size: u64) -> String {
+    format!("Too large to preview ({})", short_size(size))
 }
 
 /// A fetch that is due: read up to `len` bytes of `path`, and hand the answer to
@@ -225,6 +246,7 @@ impl Preview {
         let body = match kind {
             Kind::Directory => Body::Header,
             Kind::Text | Kind::Source | Kind::Markdown | Kind::Other => Body::Loading,
+            Kind::Image => Body::Loading,
             _ => Body::Unsupported,
         };
         self.shown = Some(Shown {
@@ -257,6 +279,10 @@ impl Preview {
         shown.started = true;
         shown.fetch = Some(self.next_id);
         let size = shown.focused.entry.as_ref().and_then(|e| e.size);
+        if let Some(size) = size.filter(|&s| s > cap && whole(shown.kind)) {
+            shown.body = Body::TooLarge(size);
+            return None;
+        }
         Some(Fetch {
             id: self.next_id,
             path: shown.focused.path.clone(),
@@ -291,13 +317,30 @@ impl Preview {
         if shown.kind == Kind::Other {
             shown.kind = sniff(&bytes);
         }
+        let total = shown.focused.entry.as_ref().and_then(|e| e.size);
+        let fetched_len = bytes.len() as u64;
+        let capped = total.is_some_and(|t| t > fetched_len);
+        if let Some(total) = total.filter(|_| capped && whole(shown.kind)) {
+            shown.body = Body::TooLarge(total);
+            return;
+        }
+        if shown.kind == Kind::Image {
+            shown.body = match place.keep(bytes) {
+                Ok(kept) => Body::Image(Image {
+                    fetched: Fetched {
+                        kept,
+                        total,
+                        capped,
+                    },
+                }),
+                Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
+            };
+            return;
+        }
         if !matches!(shown.kind, Kind::Text | Kind::Source | Kind::Markdown) {
             shown.body = Body::Unsupported;
             return;
         }
-        let total = shown.focused.entry.as_ref().and_then(|e| e.size);
-        let fetched_len = bytes.len() as u64;
-        let capped = total.is_some_and(|t| t > fetched_len);
         let kept = match place.keep(bytes) {
             Ok(kept) => kept,
             Err(e) => {

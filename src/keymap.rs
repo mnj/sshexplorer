@@ -100,11 +100,16 @@ pub enum Action {
     CycleFocusBack,
     /// Downloads the Selection into the Session's Local folder.
     Download,
+    /// Preview's zoom toolbar: the next preset in or out, and back to Fit. Ctrl+wheel
+    /// over the content zooms too, and is fixed.
+    ZoomIn,
+    ZoomOut,
+    ZoomFit,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 35] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -133,6 +138,9 @@ impl Action {
         Action::HostDialog,
         Action::CycleFocus,
         Action::CycleFocusBack,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ZoomFit,
         Action::UiScaleUp,
         Action::UiScaleDown,
         Action::UiScaleReset,
@@ -150,6 +158,7 @@ impl Action {
             | Action::HostDialog
             | Action::CycleFocus
             | Action::CycleFocusBack => Area::Sessions,
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomFit => Area::Preview,
             Action::MoveUp
             | Action::MoveDown
             | Action::MoveFirst
@@ -210,6 +219,9 @@ impl Action {
             Action::CycleFocus => "Cycle focus",
             Action::CycleFocusBack => "Cycle focus back",
             Action::Download => "Download",
+            Action::ZoomIn => "Zoom in (or Ctrl+wheel)",
+            Action::ZoomOut => "Zoom out (or Ctrl+wheel)",
+            Action::ZoomFit => "Zoom to Fit",
         }
     }
 
@@ -255,6 +267,9 @@ impl Action {
             Action::CycleFocus => Binding::new(none, Key::Tab),
             Action::CycleFocusBack => Binding::new(shift, Key::Tab),
             Action::Download => Binding::new(cmd, Key::S),
+            Action::ZoomIn => Binding::new(cmd, Key::Equals),
+            Action::ZoomOut => Binding::new(cmd, Key::Minus),
+            Action::ZoomFit => Binding::new(cmd, Key::Num0),
         })
     }
 }

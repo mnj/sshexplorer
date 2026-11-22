@@ -119,7 +119,11 @@ fn a_pressed_binding_is_taken_once_by_its_action() {
 #[test]
 fn shift_must_match_so_ctrl_equals_is_not_ui_scale() {
     let map = KeyMap::default();
-    assert!(taken(&map, Key::Equals, Key::Equals, CTRL).is_empty());
+    // Ctrl+= is Preview's zoom, not UI scale.
+    assert_eq!(
+        taken(&map, Key::Equals, Key::Equals, CTRL),
+        [Action::ZoomIn]
+    );
     assert!(taken(&map, Key::Comma, Key::Comma, CTRL_SHIFT).is_empty());
 }
 

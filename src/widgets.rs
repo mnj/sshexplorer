@@ -53,6 +53,7 @@ mod tab;
 mod table;
 mod text_view;
 mod tooltip;
+mod zoom;
 
 pub use badge::{BADGE_PAD_X, BADGE_PAD_Y, Badge, BadgeTone, badge, count_pill};
 pub use bar::{
@@ -106,3 +107,4 @@ pub use text_view::{TextView, text_view};
 pub use tooltip::{
     KeyChip, TOOLTIP_WIDTH, Tooltip, TooltipText, key_chip, tooltip_contents, tooltip_frame,
 };
+pub use zoom::{ZoomShown, ZoomView, paint_texture, zoom_bar, zoom_view};

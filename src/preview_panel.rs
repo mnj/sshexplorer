@@ -12,6 +12,7 @@
 use egui::{EventFilter, Id, Key, Modifiers, Sense};
 
 use crate::folder::{modified_text, permissions_text, size_text};
+use crate::image_view::ImageView;
 use crate::keymap::{Action, KeyMap};
 use crate::preview::{self, Body, Focused, Preview, UNSUPPORTED};
 use crate::scratch::Place;
@@ -50,6 +51,8 @@ pub struct PreviewPanel {
     reading: Option<(u64, Request<Vec<u8>>)>,
     /// Rows the text view showed last frame, for paging.
     page: usize,
+    /// The shown image's decoding, textures and zoom; new for each preview.
+    image: ImageView,
 }
 
 impl PreviewPanel {
@@ -59,6 +62,7 @@ impl PreviewPanel {
             preview: Preview::default(),
             reading: None,
             page: 1,
+            image: ImageView::default(),
         }
     }
 
@@ -70,6 +74,7 @@ impl PreviewPanel {
         let now = ui.input(|i| i.time);
         if self.preview.focus(frame.focused, now) {
             self.reading = None;
+            self.image = ImageView::default();
         }
         self.receive(&Place::of(&frame.settings.preview));
         let cap = frame.settings.preview.size_cap_bytes();
@@ -131,6 +136,20 @@ impl PreviewPanel {
             }
             Body::Failed(line) => {
                 ui.add(widgets::invalid_message(line.as_str()));
+            }
+            Body::TooLarge(size) => {
+                ui.label(t.ty.body.rich(preview::too_large_line(*size)));
+                let key = frame.keymap.binding(Action::Download);
+                let key = key.map_or(String::new(), |b| {
+                    format!(" ({})", b.label(cfg!(target_os = "macos")))
+                });
+                ui.add(widgets::form_hint(format!("Download it to see it{key}.")));
+            }
+            Body::Image(image) => {
+                let keys = frame.keys.then_some(frame.keymap);
+                if let Some(line) = self.image.ui(ui, &shown.focused.name, image, keys) {
+                    shown.body = Body::Failed(line);
+                }
             }
             Body::Text(text) => {
                 if let Some(banner) = text.fetched.banner() {
