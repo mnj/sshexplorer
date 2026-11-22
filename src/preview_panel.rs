@@ -28,6 +28,8 @@ use crate::widgets::{self, CodeLine};
 /// What the panel needs from its Session to draw a frame.
 pub struct PanelFrame<'a> {
     pub connection: &'a ssh::Session,
+    /// The Session is Disconnected: no new load starts, and one in flight is lost.
+    pub disconnected: bool,
     pub focused: Option<Focused>,
     pub keymap: &'a KeyMap,
     pub settings: &'a AppSettings,
@@ -101,7 +103,13 @@ impl PreviewPanel {
             self.media = MediaView::default();
             self.archive_rows = None;
         }
-        self.receive(&Place::of(&frame.settings.preview));
+        self.receive(&Place::of(&frame.settings.preview), frame.connection);
+        if frame.disconnected {
+            self.reading = None;
+            self.preview.lost();
+        } else {
+            self.preview.resume(now);
+        }
         let cap = frame.settings.preview.size_cap_bytes();
         if let Some(fetch) = self.preview.due(now, cap) {
             let request = frame.connection.read(fetch.path, 0, fetch.len as usize);
@@ -280,7 +288,7 @@ impl PreviewPanel {
     }
 
     /// Takes a read that has arrived.
-    fn receive(&mut self, place: &Place) {
+    fn receive(&mut self, place: &Place, connection: &ssh::Session) {
         let Some((id, request)) = &self.reading else {
             return;
         };
@@ -290,6 +298,11 @@ impl PreviewPanel {
         let id = *id;
         self.reading = None;
         self.archive_rows = None;
+        if answer.is_err() && connection.lost().is_some() {
+            // Cut short by the drop.
+            self.preview.lost();
+            return;
+        }
         self.preview.arrive(id, answer, place);
     }
 

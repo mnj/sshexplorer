@@ -15,6 +15,8 @@ use crate::widgets::{self, Tooltip as _};
 
 /// How long "Downloaded N files" stays, in seconds.
 pub const CLEAR_AFTER: f64 = 4.0;
+/// What the strip says while the connection is lost.
+pub const PAUSED: &str = "Paused: connection lost";
 
 /// The Session's Download chrome state across frames.
 #[derive(Default)]
@@ -109,7 +111,11 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) {
                 }
                 _ => muted(ui, "counting…".to_owned()),
             }
-            muted(ui, format!("{}/s", size_text(p.rate() as u64)));
+            if p.lost {
+                muted(ui, PAUSED.to_owned());
+            } else {
+                muted(ui, format!("{}/s", size_text(p.rate() as u64)));
+            }
             gap(ui);
             cancel = ui.add(widgets::button("Cancel").flat()).clicked();
             if queue.queued() > 0 {

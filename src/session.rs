@@ -206,6 +206,9 @@ impl Session {
     /// Queues a Download of the Selection into the Local folder. Nothing when the
     /// Selection is empty.
     pub fn download(&mut self, options: download::Options) {
+        if self.is_disconnected() {
+            return;
+        }
         let Some((dir, entries)) = self.selection() else {
             return;
         };
@@ -218,8 +221,11 @@ impl Session {
         self.downloads.push(&self.connection, job);
     }
 
-    /// Whether there is a Selection to download.
+    /// Whether there is a Selection to download, and a connection to download it over.
     pub fn can_download(&self) -> bool {
+        if self.is_disconnected() {
+            return false;
+        }
         if let Some(searching) = &self.search {
             return searching.matches.selection().is_some();
         }
@@ -347,6 +353,7 @@ impl Session {
         if self.lost.is_none() {
             let reason = self.connection.lost()?;
             self.lost = Some(Lost::new(reason, attempts, now));
+            self.search_lost();
         }
         if let Some(opening) = self.reconnecting.take() {
             match opening.try_next() {
@@ -404,6 +411,8 @@ impl Session {
         self.lost = None;
         self.reconnecting = None;
         self.handover = None;
+        // A Download the drop paused fetches its file again.
+        self.downloads.resume(&self.connection);
         let refetch = std::mem::take(&mut self.refetch);
         self.fetch(refetch);
         self.refresh();
@@ -441,9 +450,10 @@ impl Session {
         self.id.with("search")
     }
 
-    /// Gives the search field the keyboard on the next frame: Ctrl+F.
+    /// Gives the search field the keyboard on the next frame: Ctrl+F. Nothing while
+    /// Disconnected.
     pub fn focus_search(&mut self) {
-        self.focus_search = true;
+        self.focus_search = !self.is_disconnected();
     }
 
     /// Whether the search field takes the keyboard this frame, and forgets it.
@@ -486,7 +496,8 @@ impl Session {
             }
         }
         let field = ui
-            .add(
+            .add_enabled(
+                !self.is_disconnected(),
                 widgets::text_field(&mut self.search_text)
                     .id(id)
                     .search()
@@ -508,10 +519,10 @@ impl Session {
     }
 
     /// Starts a Search for the search field's text from the Current directory, stopping
-    /// one that runs. Nothing when the field is empty.
+    /// one that runs. Nothing when the field is empty, or while Disconnected.
     pub fn search(&mut self, settings: &AppSettings) {
         let text = self.search_text.trim();
-        if text.is_empty() {
+        if text.is_empty() || self.is_disconnected() {
             return;
         }
         let query = Query {
@@ -571,6 +582,21 @@ impl Session {
                     break;
                 }
             }
+        }
+    }
+
+    /// The connection dropped: a Search still running ends as lost, keeping its Matches.
+    /// The engine usually says so itself; this covers a drop noticed here first.
+    fn search_lost(&mut self) {
+        self.receive_search();
+        let Some(searching) = &mut self.search else {
+            return;
+        };
+        if searching.running.take().is_some() {
+            searching.matches.end(search::Ended {
+                how: How::Lost,
+                unreadable: 0,
+            });
         }
     }
 
@@ -644,6 +670,9 @@ impl Session {
                     }
                     How::Unavailable => {
                         ui.add(widgets::warning_message(UNAVAILABLE));
+                    }
+                    How::Lost => {
+                        ui.add(widgets::warning_message(SEARCH_LOST));
                     }
                 }
                 match ended.unreadable {
@@ -856,6 +885,7 @@ impl Session {
                         ui,
                         PanelFrame {
                             connection: &self.connection,
+                            disconnected: self.lost.is_some(),
                             focused: focused_entry,
                             keymap: frame.keymap,
                             settings: frame.settings,
@@ -1445,6 +1475,9 @@ struct FolderRefresh {
 
 /// What the Matches show when the host cannot run a Search.
 pub const UNAVAILABLE: &str = "Search is not available on this host.";
+
+/// What the Matches show when the connection dropped during the Search.
+pub const SEARCH_LOST: &str = "Search stopped: connection lost";
 
 /// The Preview panel's width when a Session opens.
 const PREVIEW_WIDTH: f32 = 360.0;
