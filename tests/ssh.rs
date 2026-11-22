@@ -51,7 +51,12 @@ fn an_unknown_key_is_trusted_and_the_password_opens_the_home_listing() {
     let Event::TrustHostKey(prompt) = next(&opening) else {
         panic!("expected the trust prompt");
     };
-    // Every event wakes the frame thread.
+    // Every event wakes the frame thread. The wake runs just after the event is sent,
+    // on the background thread, so wait for it briefly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while wakes.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
     assert_eq!(wakes.load(Ordering::SeqCst), 1);
     assert_eq!(prompt.host, format!("[127.0.0.1]:{}", fixture.port()));
     assert_eq!(prompt.fingerprint, fixture::HOST_KEY_FINGERPRINT);
