@@ -100,6 +100,16 @@ type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin + 'static>>;
 /// A secret the operator entered that logged in, to keep when Remember is on.
 pub(super) type Kept = (Kind, Zeroizing<String>);
 
+/// The secrets a Session logged in with, one per kind, offered first when it reconnects.
+pub(super) type Held = HashMap<Kind, Zeroizing<String>>;
+
+/// What logging in gave: the entered secret to keep under Remember, and every secret
+/// that worked, for reconnecting.
+pub(super) struct LoggedIn {
+    pub kept: Option<Kept>,
+    pub used: Held,
+}
+
 /// A secret, and whether it came from the credential store rather than the operator.
 struct Secret {
     text: Zeroizing<String>,
@@ -116,31 +126,36 @@ enum Stage {
 }
 
 /// Logs `target.account` in by `options.auth`, asking the operator through `out`. A
-/// host that closes the connection after its own attempt limit is reconnected to
-/// quietly. Gives the secret the operator entered that logged in, if any.
+/// secret in `held` is sent before the store's or the operator's. A host that closes
+/// the connection after its own attempt limit is reconnected to quietly. Gives the
+/// secret the operator entered that logged in, if any, and the secrets that worked.
 pub(super) async fn authenticate(
     handle: &mut Handle<HostCheck>,
     target: &Target,
     options: &Options,
+    held: &Held,
     out: &Arc<Events>,
-) -> Result<Option<Kept>, Failure> {
+) -> Result<LoggedIn, Failure> {
     let mut login = Login {
         handle,
         target,
         options,
         out,
+        held,
         methods: MethodSet::empty(),
         stages: HashMap::new(),
         kept: None,
+        used: Held::new(),
     };
     let result = login.run(options).await;
     let kept = login.kept.take();
+    let used = std::mem::take(&mut login.used);
     if matches!(result, Err(Failure::Cancelled)) {
         let _ = handle
             .disconnect(Disconnect::ByApplication, "Cancelled", "en")
             .await;
     }
-    result.map(|()| kept)
+    result.map(|()| LoggedIn { kept, used })
 }
 
 struct Login<'a> {
@@ -148,12 +163,16 @@ struct Login<'a> {
     target: &'a Target,
     options: &'a Options,
     out: &'a Arc<Events>,
+    /// The secrets the Session logged in with before, tried first.
+    held: &'a Held,
     /// What the host last said it would accept.
     methods: MethodSet,
     /// The store's secrets, once looked up.
     stages: HashMap<Kind, Stage>,
     /// The entered secret that logged in.
     kept: Option<Kept>,
+    /// Every secret that logged in, entered or not.
+    used: Held,
 }
 
 /// A key file read from disk, and its public key when that is known without unlocking.
@@ -327,16 +346,18 @@ impl Login<'_> {
 
     /// Notes `secret` as the one that logged in, when the operator entered it.
     fn keep(&mut self, kind: Kind, secret: Option<Secret>) {
-        if let Some(secret) = secret
-            && !secret.saved
-        {
+        let Some(secret) = secret else {
+            return;
+        };
+        self.used.insert(kind, secret.text.clone());
+        if !secret.saved {
             self.kept = Some((kind, secret.text));
         }
     }
 
-    /// The secret of `kind`: the store's, the first time it is asked for, else the
-    /// operator's through the prompt `ask` makes. `rejected` says the last one sent was
-    /// rejected.
+    /// The secret of `kind`: the one the Session held or else the store's, the first
+    /// time it is asked for, else the operator's through the prompt `ask` makes.
+    /// `rejected` says the last one sent was rejected.
     async fn secret(
         &mut self,
         kind: Kind,
@@ -344,26 +365,34 @@ impl Login<'_> {
         ask: impl FnOnce(Saved, oneshot::Sender<Option<String>>) -> Event,
     ) -> Result<Secret, Failure> {
         let mut saved = Saved::Nothing;
-        if let Some(remember) = &self.options.remember {
-            let stage = match self.stages.remove(&kind) {
-                Some(stage) => stage,
-                None => {
+        let stage = match self.stages.remove(&kind) {
+            Some(stage) => Some(stage),
+            None => match (self.held.get(&kind), &self.options.remember) {
+                (Some(text), _) => Some(Stage::Tried(text.clone())),
+                (None, Some(remember)) => {
                     let store = remember.store.clone();
                     let key = credentials::Key::new(remember.host.clone(), kind);
-                    match tokio::task::spawn_blocking(move || store.get(&key)).await {
-                        Ok(Lookup::Found(text)) => Stage::Tried(text),
-                        Ok(Lookup::NoEntry) => Stage::Done(Saved::Nothing),
-                        _ => Stage::Done(Saved::Unavailable),
-                    }
+                    Some(
+                        match tokio::task::spawn_blocking(move || store.get(&key)).await {
+                            Ok(Lookup::Found(text)) => Stage::Tried(text),
+                            Ok(Lookup::NoEntry) => Stage::Done(Saved::Nothing),
+                            _ => Stage::Done(Saved::Unavailable),
+                        },
+                    )
                 }
-            };
+                (None, None) => None,
+            },
+        };
+        if let Some(stage) = stage {
             match stage {
-                // The first request, or another key file asking: the store's secret.
+                // The first request, or another key file asking: the held or store's
+                // secret.
                 Stage::Tried(text) if !rejected => {
                     self.stages.insert(kind, Stage::Tried(text.clone()));
                     return Ok(Secret { text, saved: true });
                 }
-                Stage::Tried(_) => saved = Saved::Rejected,
+                Stage::Tried(_) if self.options.remember.is_some() => saved = Saved::Rejected,
+                Stage::Tried(_) => {}
                 Stage::Done(first) => saved = first,
             }
             self.stages.insert(kind, Stage::Done(Saved::Nothing));

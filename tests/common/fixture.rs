@@ -19,6 +19,10 @@
 //!   Add files with `std::fs` under `root()`.
 //! - **Reads.** Files open for reading only (open, read, fstat, close). A test that needs
 //!   a Download or a read to be in flight slows every read with [`Fixture::slow_reads`].
+//! - **Drops.** [`Fixture::drop_connections`] kills every open connection, as a network
+//!   failure does; [`Fixture::stall`] stops answering on them, so keepalives go
+//!   unanswered; [`Fixture::refuse`] closes new connections at once.
+//!   [`Fixture::set_password`] changes [`ACCOUNT`]'s password.
 //! - **Search.** An exec request runs the command under the local `sh`, with its
 //!   start directory (the first argument after `sh -c '…' sh`, octal-escaped) mapped
 //!   under `root()`, so the host's own `find` does the walking.
@@ -34,8 +38,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use russh::keys::{PrivateKey, PublicKey};
@@ -117,6 +123,11 @@ pub struct Fixture {
     /// How long each SFTP read waits before answering, in milliseconds.
     read_delay: Arc<AtomicU64>,
     attempts: Attempts,
+    /// A second handle on each open connection's socket, shut by `drop_connections`.
+    connections: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    stalled: Arc<AtomicBool>,
+    refusing: Arc<AtomicBool>,
+    password: Arc<std::sync::Mutex<String>>,
     /// How exec requests are answered: [`EXEC_RUN`], [`EXEC_REFUSE`] or [`EXEC_HOLD`].
     exec: Arc<AtomicU8>,
     /// Holds the `find` wrapper [`Fixture::hold_search`] puts first on the `PATH`.
@@ -197,6 +208,16 @@ impl Fixture {
         let delay = read_delay.clone();
         let attempts = Attempts::default();
         let tried = attempts.clone();
+        let connections: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>> = Arc::default();
+        let stalled = Arc::new(AtomicBool::new(false));
+        let refusing = Arc::new(AtomicBool::new(false));
+        let password = Arc::new(std::sync::Mutex::new(PASSWORD.to_owned()));
+        let (open, stall, refuse, secret) = (
+            connections.clone(),
+            stalled.clone(),
+            refusing.clone(),
+            password.clone(),
+        );
         let exec = Arc::new(AtomicU8::new(EXEC_RUN));
         let bin = tempfile::tempdir().expect("fixture bin");
         let find = find_on_path().expect("find is installed");
@@ -214,6 +235,10 @@ impl Fixture {
         let held_path = bin.path().to_path_buf();
         runtime.spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                if refuse.load(Ordering::SeqCst) {
+                    drop(stream);
+                    continue;
+                }
                 let handler = SshHandler {
                     root: served.clone(),
                     channels: Arc::default(),
@@ -221,10 +246,26 @@ impl Fixture {
                     accepts: accepts.clone(),
                     methods: offered.clone(),
                     attempts: tried.clone(),
+                    password: secret.clone(),
                     exec: execs.clone(),
                     bin: held_path.clone(),
                 };
                 let config = config.clone();
+                // A second handle on the socket, to shut it from outside the session.
+                let Ok(std) = stream.into_std() else {
+                    continue;
+                };
+                let Ok(killer) = std.try_clone() else {
+                    continue;
+                };
+                let Ok(stream) = tokio::net::TcpStream::from_std(std) else {
+                    continue;
+                };
+                open.lock().unwrap().push(killer);
+                let stream = Gated {
+                    stream,
+                    stalled: stall.clone(),
+                };
                 tokio::spawn(async move {
                     if let Ok(session) = russh::server::run_stream(config, stream, handler).await {
                         let _ = session.await;
@@ -239,6 +280,10 @@ impl Fixture {
             runtime: Some(runtime),
             read_delay,
             attempts,
+            connections,
+            stalled,
+            refusing,
+            password,
             exec,
             bin,
         }
@@ -253,6 +298,31 @@ impl Fixture {
     /// the client kills it.
     pub fn hold_search(&self) {
         self.exec.store(EXEC_HOLD, Ordering::SeqCst);
+    }
+
+    /// Kills every open connection, as a network failure would: the client sees its
+    /// connection close without a word from the server. New connections are served.
+    pub fn drop_connections(&self) {
+        self.stalled.store(false, Ordering::SeqCst);
+        for socket in self.connections.lock().unwrap().drain(..) {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// Stops reading from every connection, open or new, so nothing is answered, until
+    /// `drop_connections`.
+    pub fn stall(&self) {
+        self.stalled.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether new connections are closed as soon as they are accepted.
+    pub fn refuse(&self, refuse: bool) {
+        self.refusing.store(refuse, Ordering::SeqCst);
+    }
+
+    /// Changes [`ACCOUNT`]'s password from [`PASSWORD`].
+    pub fn set_password(&self, password: &str) {
+        *self.password.lock().unwrap() = password.to_owned();
     }
 
     /// Makes every SFTP read from now on wait `delay` before it answers, so that a
@@ -312,8 +382,52 @@ struct SshHandler {
     /// The methods offered, which every refusal offers again, as OpenSSH does.
     methods: MethodSet,
     attempts: Attempts,
+    password: Arc<std::sync::Mutex<String>>,
     exec: Arc<AtomicU8>,
     bin: PathBuf,
+}
+
+/// A connection's stream, which stops reading while `stalled`.
+struct Gated {
+    stream: tokio::net::TcpStream,
+    stalled: Arc<AtomicBool>,
+}
+
+impl tokio::io::AsyncRead for Gated {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.stalled.load(Ordering::SeqCst) {
+            // Look again later; nothing is read meanwhile.
+            let waker = cx.waker().clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                waker.wake();
+            });
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Gated {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 impl SshHandler {
@@ -343,7 +457,8 @@ impl russh::server::Handler for SshHandler {
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         self.tried("password".into());
-        if self.accepts.password && user == ACCOUNT && password == PASSWORD {
+        let expected = self.password.lock().unwrap().clone();
+        if self.accepts.password && user == ACCOUNT && password == expected {
             Ok(Auth::Accept)
         } else {
             Ok(self.reject())

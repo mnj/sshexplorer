@@ -35,6 +35,7 @@ pub mod openssh_config;
 pub mod picture;
 pub mod preview;
 pub mod preview_panel;
+pub mod reconnect;
 pub mod refresh;
 pub mod scratch;
 pub mod search;

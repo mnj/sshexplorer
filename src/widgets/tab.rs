@@ -76,6 +76,7 @@ pub fn tab(title: &str) -> Tab<'_> {
         kind: TabKind::Back,
         modified: false,
         out_of_sync: false,
+        disconnected: false,
         window_focused: None,
         icon_only: false,
         state: State::Live,
@@ -89,6 +90,7 @@ pub struct Tab<'a> {
     kind: TabKind,
     modified: bool,
     out_of_sync: bool,
+    disconnected: bool,
     window_focused: Option<bool>,
     icon_only: bool,
     state: State,
@@ -123,6 +125,12 @@ impl<'a> Tab<'a> {
     /// The out-of-sync badge: a warning triangle in the warning solid.
     pub fn out_of_sync(mut self, out_of_sync: bool) -> Self {
         self.out_of_sync = out_of_sync;
+        self
+    }
+
+    /// The disconnected badge: a broken ring in the error solid.
+    pub fn disconnected(mut self, disconnected: bool) -> Self {
+        self.disconnected = disconnected;
         self
     }
 
@@ -169,7 +177,8 @@ impl<'a> Tab<'a> {
         } else {
             paint::width(ui, style, self.title)
         };
-        let badge_width = if self.out_of_sync { glyph::BOX } else { 0.0 };
+        let badges = usize::from(self.out_of_sync) + usize::from(self.disconnected);
+        let badge_width = glyph::BOX * badges as f32;
         // | tab_x | icon gap | title | gap | badge | close | tab_x |
         2.0 * t.space.tab_x + icon_width + title + PART_GAP + badge_width + glyph::BOX
     }
@@ -283,9 +292,15 @@ impl<'a> Tab<'a> {
         } else {
             paint::text_in(ui, label, Align2::LEFT_CENTER, style, self.title, ink)
         };
+        let mut badge_left = drawn.right() + PART_GAP;
         if self.out_of_sync {
-            let at = pos2(drawn.right() + PART_GAP + glyph::BOX / 2.0, rect.center().y);
+            let at = pos2(badge_left + glyph::BOX / 2.0, rect.center().y);
             out_of_sync_badge(ui, t, at);
+            badge_left += glyph::BOX;
+        }
+        if self.disconnected {
+            let at = pos2(badge_left + glyph::BOX / 2.0, rect.center().y);
+            disconnected_badge(ui, t, at);
         }
         if self.modified && !pointed {
             Glyph::Dot.paint(ui.painter(), close_at, ink);
@@ -342,6 +357,18 @@ fn under_corners(t: &Tokens) -> CornerRadius {
         sw: r,
         se: r,
     }
+}
+
+/// The disconnected badge centred on `at`: a disc in the error solid crossed by a
+/// slash in its on-colour. A shape and a colour, never colour alone.
+fn disconnected_badge(ui: &Ui, t: &Tokens, at: egui::Pos2) {
+    let c = &t.color.error;
+    let p = ui.painter();
+    let origin = (at - Vec2::splat(glyph::BOX / 2.0)).round_to_pixels(p.pixels_per_point());
+    let to = |x: f32, y: f32| origin + vec2(x, y);
+    p.circle_filled(to(8.0, 8.0), 5.5, c.solid);
+    let pen = Stroke::new(glyph::STROKE, c.on_solid);
+    p.line_segment([to(5.5, 10.5), to(10.5, 5.5)], pen);
 }
 
 /// The out-of-sync badge centred on `at`: the warning triangle filled with the warning
