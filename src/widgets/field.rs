@@ -32,6 +32,7 @@ pub fn text_field(text: &mut String) -> TextField<'_> {
         search: false,
         mono: false,
         rows: None,
+        password: false,
         state: State::Live,
     }
 }
@@ -57,6 +58,7 @@ pub struct TextField<'a> {
     search: bool,
     mono: bool,
     rows: Option<usize>,
+    password: bool,
     state: State,
 }
 
@@ -106,6 +108,12 @@ impl TextField<'_> {
     /// A field of several lines, `rows` of them tall. Enter starts a new line.
     pub fn rows(mut self, rows: usize) -> Self {
         self.rows = Some(rows.max(1));
+        self
+    }
+
+    /// A secret: the text shows as dots and cannot be copied out.
+    pub fn password(mut self) -> Self {
+        self.password = true;
         self
     }
 
@@ -164,7 +172,17 @@ impl Widget for TextField<'_> {
             let mut response = outer;
             if self.state == State::Live {
                 let hint = style.rich(self.hint.as_str()).color(c.text.muted);
-                let edited = edit(ui, inner, self.text, &style, &t, hint, self.id, self.rows);
+                let edited = edit(
+                    ui,
+                    inner,
+                    self.text,
+                    &style,
+                    &t,
+                    hint,
+                    self.id,
+                    self.rows,
+                    self.password,
+                );
                 // A click on the padding around the text lands in the field all the same.
                 let clicked_beside = response.hovered()
                     && !edited.hovered()
@@ -225,7 +243,7 @@ pub(super) fn edit_line(
     id: Option<Id>,
 ) -> Response {
     let line = Rect::from_center_size(inner.center(), vec2(inner.width(), style.line));
-    edit(ui, line, text, style, t, hint, id, None)
+    edit(ui, line, text, style, t, hint, id, None, false)
 }
 
 /// egui's `TextEdit` filling `inner`: one line, or `rows` lines that wrap at its width.
@@ -239,6 +257,7 @@ fn edit(
     hint: egui::RichText,
     id: Option<Id>,
     rows: Option<usize>,
+    password: bool,
 ) -> Response {
     let ink = t.color.text.primary;
     let lay = style.clone();
@@ -260,6 +279,7 @@ fn edit(
         .desired_width(inner.width())
         .align(Align2::LEFT_TOP)
         .hint_text(hint)
+        .password(password)
         .layouter(&mut layouter);
     if let Some(id) = id {
         edit = edit.id(id);
