@@ -137,10 +137,9 @@ fn a_focused_file_shows_its_details_and_then_its_text() {
     assert!(detail(&harness, "Kind", "Text"));
     assert!(detail(&harness, "Size", "23 B"));
     assert!(detail(&harness, "Permissions", "-rw-r--r--"));
-    let meta = std::fs::metadata(fixture.root().join(HOME).join("todo.txt")).unwrap();
-    use std::os::unix::fs::MetadataExt as _;
-    assert!(detail(&harness, "Owner", &meta.uid().to_string()));
-    assert!(detail(&harness, "Group", &meta.gid().to_string()));
+    // By name, as the listing's `ls -l` line gives them, not the numeric ids.
+    assert!(detail(&harness, "Owner", fixture::OWNER));
+    assert!(detail(&harness, "Group", fixture::GROUP));
     let modified = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
         n.label().as_deref() == Some("Modified") && n.value().is_some_and(|v| !v.is_empty())
     };

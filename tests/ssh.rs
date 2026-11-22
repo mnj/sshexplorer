@@ -435,3 +435,21 @@ fn a_session_reads_part_of_a_file_and_says_why_it_cannot() {
         Err("No such file".to_string())
     );
 }
+
+#[test]
+fn owner_and_group_names_come_from_the_ls_style_line() {
+    use sshexplorer::ssh::owner_and_group;
+    let named = |o: &str, g: &str| Some((o.to_owned(), g.to_owned()));
+    assert_eq!(
+        owner_and_group("-rw-r--r--    1 alice    staff        1234 Jan  1 00:00 notes.txt"),
+        named("alice", "staff")
+    );
+    assert_eq!(
+        owner_and_group("drwxr-xr-x+   2 1001     1001         4096 Mar  5  2023 shared"),
+        named("1001", "1001")
+    );
+    // A host that sends no such line: the ids are shown instead.
+    assert_eq!(owner_and_group(""), None);
+    assert_eq!(owner_and_group("notes.txt"), None);
+    assert_eq!(owner_and_group("-rw-r--r-- x alice staff 1 Jan 1 00:00 a"), None);
+}

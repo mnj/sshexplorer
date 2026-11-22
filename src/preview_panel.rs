@@ -422,11 +422,12 @@ fn details(
         if let Some(mode) = e.permissions {
             rows.push(("Permissions", permissions_text(mode)));
         }
-        if let Some(uid) = e.uid {
-            rows.push(("Owner", uid.to_string()));
+        // The names when the host gave them, else the ids.
+        if let Some(owner) = e.owner.clone().or_else(|| e.uid.map(|id| id.to_string())) {
+            rows.push(("Owner", owner));
         }
-        if let Some(gid) = e.gid {
-            rows.push(("Group", gid.to_string()));
+        if let Some(group) = e.group.clone().or_else(|| e.gid.map(|id| id.to_string())) {
+            rows.push(("Group", group));
         }
         if let Some(target) = &e.link {
             rows.push(("Link to", target.clone()));
