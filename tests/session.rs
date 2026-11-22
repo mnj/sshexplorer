@@ -1,5 +1,6 @@
 //! Opening a Session from the window: Hosts, the Host dialog, the trust and password
-//! prompts, the Session tab with its Folder view, and Ctrl+W, against the test server.
+//! prompts, the Session tab with its Tree view and Folder view, and Ctrl+W, against the
+//! test server.
 
 mod common;
 
@@ -7,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::fixture::{self, Fixture};
-use egui::accesskit::Role;
+use egui::accesskit::{Role, Toggled};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use sshexplorer::app::{self, App};
@@ -116,6 +117,11 @@ fn hosts_opens_a_session_that_lists_home_in_folder_view_and_ctrl_w_closes_it() {
     until(&mut harness, "the Session tab", |h| {
         h.query_by_role_and_label(Role::Tab, &label).is_some()
     });
+    // Tree view first, on the home directory; Ctrl+2 switches to Folder view.
+    until(&mut harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
+    folder_view(&mut harness);
     // Folder view: `.` and `..`, then the home directory's entries; hidden ones are not shown.
     until(&mut harness, "the listing", |h| {
         h.query_by_label("notes.txt").is_some()
@@ -136,13 +142,27 @@ fn hosts_opens_a_session_that_lists_home_in_folder_view_and_ctrl_w_closes_it() {
     assert!(harness.query_by_label("notes.txt").is_none());
 }
 
-/// A window with a Session open on the fixture's home, its key already trusted.
-fn browsing(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App> {
+fn folder_view(harness: &mut Harness<'static, App>) {
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    harness.run_ok();
+}
+
+/// A window with a Session open on the fixture's home in Tree view, its key already
+/// trusted, once the tree has reached the home directory.
+fn tree(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App> {
     let known_hosts = dir.path().join("known_hosts");
     std::fs::write(&known_hosts, format!("{}\n", fixture.known_hosts_line())).unwrap();
     let mut harness = window(known_hosts);
     open_session(&mut harness, fixture);
     enter_password(&mut harness, fixture::PASSWORD);
+    until(&mut harness, "the tree", |h| selected_rows(h) == ["tester"]);
+    harness
+}
+
+/// The same, switched to Folder view.
+fn browsing(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App> {
+    let mut harness = tree(fixture, dir);
+    folder_view(&mut harness);
     until(&mut harness, "the listing", |h| {
         h.query_by_label("notes.txt").is_some()
     });
@@ -159,7 +179,7 @@ fn row_names(harness: &Harness<'static, App>) -> Vec<String> {
 
 fn selected_rows(harness: &Harness<'static, App>) -> Vec<String> {
     harness
-        .get_all_by_role(Role::Row)
+        .query_all_by_role(Role::Row)
         .filter(|r| r.accesskit_node().is_selected() == Some(true))
         .map(|r| r.accesskit_node().label().unwrap_or_default())
         .collect()
@@ -274,6 +294,128 @@ fn a_symlinked_directory_is_marked_with_its_target_and_entered() {
     until(&mut harness, "the link's target listed", |h| {
         h.query_by_label("cat.jpg").is_some()
     });
+}
+
+#[test]
+fn a_session_opens_in_tree_view_on_its_initial_remote_folder() {
+    let fixture = Fixture::start();
+    std::fs::write(fixture.root().join("home/tester/docs/plan.txt"), "x").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = tree(&fixture, &dir);
+
+    // Rooted at `/`, the ancestors expanded and the home directory focused, collapsed.
+    assert_eq!(row_names(&harness), ["/", "home", "tester"]);
+    let tester = harness.get_by_role_and_label(Role::Row, "tester");
+    assert_eq!(tester.accesskit_node().data().is_expanded(), Some(false));
+    // The toolbar shows the place, and the switch says Tree.
+    assert!(harness.query_by_label("/home/tester").is_some());
+    let tree = harness.get_by_role_and_label(Role::RadioButton, "Tree");
+    assert_eq!(tree.accesskit_node().toggled(), Some(Toggled::True));
+
+    // Right expands; the home directory was fetched on open, so its entries show at once.
+    press(&mut harness, egui::Key::ArrowRight);
+    assert_eq!(
+        row_names(&harness),
+        [
+            "/",
+            "home",
+            "tester",
+            "docs",
+            "photos",
+            "notes.txt",
+            "readme.md"
+        ]
+    );
+    // Right again moves to the first child; Right on it fetches it.
+    press(&mut harness, egui::Key::ArrowRight);
+    assert_eq!(selected_rows(&harness), ["docs"]);
+    assert!(harness.query_by_label("/home/tester/docs").is_some());
+    press(&mut harness, egui::Key::ArrowRight);
+    until(&mut harness, "docs fetched", |h| {
+        h.query_by_label("plan.txt").is_some()
+    });
+    // The Current directory follows the Focused entry: a file's parent.
+    press(&mut harness, egui::Key::ArrowRight);
+    assert_eq!(selected_rows(&harness), ["plan.txt"]);
+    assert!(harness.query_by_label("/home/tester/docs").is_some());
+
+    // Left goes to the parent, then collapses it; Enter toggles it again.
+    press(&mut harness, egui::Key::ArrowLeft);
+    press(&mut harness, egui::Key::ArrowLeft);
+    assert!(harness.query_by_label("plan.txt").is_none());
+    press(&mut harness, egui::Key::Enter);
+    assert!(harness.query_by_label("plan.txt").is_some());
+
+    // Left climbs above the Initial remote folder, to `/`, which the toolbar then shows.
+    for _ in 0..6 {
+        press(&mut harness, egui::Key::ArrowLeft);
+    }
+    assert_eq!(row_names(&harness), ["/", "home"]);
+    assert_eq!(harness.query_all_by_label("/").count(), 2);
+    assert!(selected_rows(&harness).is_empty());
+}
+
+#[test]
+fn a_directory_that_cannot_be_read_shows_the_reason_as_its_child() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::start();
+    let locked = fixture.root().join("home/tester/locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = tree(&fixture, &dir);
+    press(&mut harness, egui::Key::ArrowRight);
+    harness.get_by_role_and_label(Role::Row, "locked").click();
+    harness.run_ok();
+    press(&mut harness, egui::Key::ArrowRight);
+    until(&mut harness, "the reason", |h| {
+        h.query_by_role_and_label(Role::Row, "Cannot read: permission denied")
+            .is_some()
+    });
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn switching_views_keeps_the_place() {
+    let fixture = Fixture::start();
+    std::fs::write(fixture.root().join("home/tester/docs/plan.txt"), "x").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = tree(&fixture, &dir);
+    press(&mut harness, egui::Key::ArrowRight);
+    press(&mut harness, egui::Key::ArrowRight);
+    press(&mut harness, egui::Key::ArrowRight);
+    until(&mut harness, "docs fetched", |h| {
+        h.query_by_label("plan.txt").is_some()
+    });
+    press(&mut harness, egui::Key::ArrowRight);
+    assert_eq!(selected_rows(&harness), ["plan.txt"]);
+
+    // Tree to Folder lists the Current directory with the same entry focused.
+    folder_view(&mut harness);
+    assert_eq!(row_names(&harness), [".", "..", "plan.txt"]);
+    assert_eq!(selected_rows(&harness), ["plan.txt"]);
+    let folder = harness.get_by_role_and_label(Role::RadioButton, "Folder");
+    assert_eq!(folder.accesskit_node().toggled(), Some(Toggled::True));
+
+    // Backspace goes up to home with docs selected; Ctrl+1 expands to it in the tree.
+    press(&mut harness, egui::Key::Backspace);
+    assert_eq!(selected_rows(&harness), ["docs"]);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+    harness.run_ok();
+    assert_eq!(selected_rows(&harness), ["docs"]);
+    assert!(harness.query_by_label("plan.txt").is_some());
+    assert!(harness.query_by_label("/home/tester/docs").is_some());
+
+    // The toolbar switch does the same, and the listing keeps the keyboard.
+    harness
+        .get_by_role_and_label(Role::RadioButton, "Folder")
+        .click();
+    harness.run_ok();
+    assert_eq!(row_names(&harness), [".", "..", "plan.txt"]);
+    assert!(selected_rows(&harness).is_empty());
+    press(&mut harness, egui::Key::ArrowDown);
+    press(&mut harness, egui::Key::ArrowDown);
+    assert_eq!(selected_rows(&harness), ["plan.txt"]);
 }
 
 #[test]

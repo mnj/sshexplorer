@@ -18,7 +18,7 @@ use crate::connect::{HostAction, HostDialog, Outcome, Pending};
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
 use crate::openssh_config::{Config, IdentityAgent};
-use crate::session::{self, Session};
+use crate::session::{self, Session, View};
 use crate::settings::{
     Animate, AppSettings, Appearance, Browsing, Connections, DEFAULT_UI_SCALE, Edge, Store,
     ThemeChoice, UI_SCALES,
@@ -311,10 +311,25 @@ impl App {
         let mut hosts = false;
         let mut open_settings = false;
         let active = self.sessions.get(self.active).map(|s| &s.details);
+        // The active Session's view and place; the view the switch picks.
+        let place = self
+            .sessions
+            .get(self.active)
+            .map(|s| (s.view(), s.place()));
+        let mut picked = None;
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
+                if let Some((view, place)) = &place {
+                    let mut choice = *view;
+                    let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
+                    if ui.add(widgets::segmented(&mut choice, &views)).changed() {
+                        picked = Some(choice);
+                    }
+                    ui.label(ui.tokens().ty.body.rich(place.as_str()))
+                        .tooltip("Current directory");
+                }
                 if let Some(details) = active {
                     if details.readonly {
                         ui.add(widgets::badge("Readonly"))
@@ -338,6 +353,9 @@ impl App {
         );
         if hosts {
             self.open_host_dialog();
+        }
+        if let (Some(view), Some(session)) = (picked, self.sessions.get_mut(self.active)) {
+            session.set_view(view);
         }
         if self.sessions.is_empty() {
             return open_settings;
@@ -501,6 +519,8 @@ impl App {
             Action::PreviousSession,
             Action::HostDialog,
             Action::ShowHidden,
+            Action::TreeView,
+            Action::FolderView,
         ];
         let [
             settings,
@@ -512,6 +532,8 @@ impl App {
             previous,
             host_dialog,
             hidden,
+            tree_view,
+            folder_view,
         ] = ui.input_mut(|i| {
             [
                 Action::Settings,
@@ -523,12 +545,22 @@ impl App {
                 Action::PreviousSession,
                 Action::HostDialog,
                 Action::ShowHidden,
+                Action::TreeView,
+                Action::FolderView,
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
         if hidden {
             let b = &mut self.settings.browsing;
             b.show_hidden = !b.show_hidden;
+        }
+        if let Some(session) = self.sessions.get_mut(self.active) {
+            if tree_view {
+                session.set_view(View::Tree);
+            }
+            if folder_view {
+                session.set_view(View::Folder);
+            }
         }
         if close {
             self.close(self.active);

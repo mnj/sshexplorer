@@ -25,4 +25,5 @@ pub mod session;
 pub mod settings;
 pub mod ssh;
 pub mod theme;
+pub mod tree;
 pub mod widgets;

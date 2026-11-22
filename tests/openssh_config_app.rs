@@ -202,7 +202,10 @@ fn an_alias_opens_through_its_host_name_port_and_user_read_fresh_at_open() {
     until(&mut harness, "the Session tab", |h| {
         h.query_by_role_and_label(Role::Tab, &label).is_some()
     });
-    until(&mut harness, "the listing", |h| shows(h, "notes.txt"));
+    // Tree view opens on the home directory.
+    until(&mut harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
 }
 
 #[test]
@@ -248,7 +251,10 @@ fn an_unreadable_config_opens_from_the_host_fields_with_a_note_naming_file_and_l
     fill(&mut harness, "Account", fixture::ACCOUNT);
     press(&mut harness, "Open Session");
     enter_password(&mut harness);
-    until(&mut harness, "the listing", |h| shows(h, "notes.txt"));
+    // Tree view opens on the home directory.
+    until(&mut harness, "the tree", |h| {
+        h.query_by_role_and_label(Role::Row, "tester").is_some()
+    });
     let note = format!(
         "{} line 3: bad Port \"lots\". Opened from the Host fields alone.",
         config.display()
