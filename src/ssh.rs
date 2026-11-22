@@ -301,6 +301,41 @@ pub struct Session {
 }
 
 impl Session {
+    /// The connection's SFTP side, for work that runs on the SSH runtime, such as a
+    /// Download. Start that work with [`Session::spawn`].
+    pub fn remote(&self) -> Remote {
+        Remote {
+            sftp: self.sftp.clone(),
+        }
+    }
+
+    /// Runs `work` on the SSH runtime.
+    pub fn spawn(&self, work: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(work);
+    }
+
+    /// The function that wakes the frame thread.
+    pub fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.wake.clone()
+    }
+
+    /// Starts reading up to `len` bytes of the file at the absolute `path`, from byte
+    /// `offset`. Fewer arrive only when the file ends first. The answer wakes the frame;
+    /// dropping the request stops the read.
+    pub fn read(&self, path: String, offset: u64, len: usize) -> Request<Vec<u8>> {
+        let (sender, answer) = mpsc::channel();
+        let remote = self.remote();
+        let wake = self.wake.clone();
+        let task = self.runtime.spawn(async move {
+            let _ = sender.send(remote.read(path, offset, len).await);
+            wake();
+        });
+        Request {
+            answer,
+            task: Some(task.abort_handle()),
+        }
+    }
+
     /// Starts listing the directory at the absolute `path`. A symlinked directory is
     /// followed. The answer arrives on the returned request, and wakes the frame.
     pub fn list(&self, path: String) -> Request<Listing> {
@@ -314,80 +349,96 @@ impl Session {
         });
         Request { answer, task: None }
     }
+}
 
-    /// Starts reading up to `len` bytes of the file at the absolute `path`, from byte
-    /// `offset`: fewer at the end of the file, none past it. A symlink is followed. The
-    /// answer wakes the frame; dropping the request stops the read.
-    pub fn read(&self, path: String, offset: u64, len: u64) -> Request<Vec<u8>, ReadError> {
-        let (sender, answer) = mpsc::channel();
-        let sftp = self.sftp.clone();
-        let wake = self.wake.clone();
-        let task = self.runtime.spawn(async move {
-            let bytes = read(&sftp, path, offset, len).await;
-            let _ = sender.send(bytes);
-            wake();
-        });
-        Request {
-            answer,
-            task: Some(task.abort_handle()),
+/// A Session's SFTP connection, to use from tasks on the SSH runtime. Each failure is
+/// the reason as the operator reads it: "No such file", "Permission denied", or the
+/// host's own words.
+#[derive(Clone)]
+pub struct Remote {
+    sftp: Arc<SftpSession>,
+}
+
+/// A remote file open for reading.
+pub type RemoteFile = russh_sftp::client::fs::File;
+
+impl Remote {
+    /// The entries of the directory at the absolute `path`, as [`Session::list`] gives them.
+    pub async fn list(&self, path: String) -> Result<Listing, String> {
+        list(&self.sftp, path)
+            .await
+            .map_err(|e| operator_reason(&e))
+    }
+
+    /// The absolute path with every symlink resolved.
+    pub async fn canonicalize(&self, path: String) -> Result<String, String> {
+        self.sftp
+            .canonicalize(path)
+            .await
+            .map_err(|e| operator_reason(&e))
+    }
+
+    /// Opens the file at `path` for reading.
+    pub async fn open(&self, path: String) -> Result<RemoteFile, String> {
+        self.sftp.open(path).await.map_err(|e| operator_reason(&e))
+    }
+
+    /// Up to `len` bytes of the file at `path` from `offset`.
+    pub async fn read(&self, path: String, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        let mut file = self.open(path).await?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|e| e.to_string())?;
         }
+        let mut data = Vec::with_capacity(len.min(1 << 20));
+        (&mut file)
+            .take(len as u64)
+            .read_to_end(&mut data)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(data)
     }
 }
 
-/// Why a file could not be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReadError {
-    /// The path names nothing (any more).
-    NoSuchFile,
-    PermissionDenied,
-    /// Anything else, as the host or the connection put it.
-    Other(String),
-}
-
-impl std::fmt::Display for ReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReadError::NoSuchFile => write!(f, "no such file"),
-            ReadError::PermissionDenied => write!(f, "permission denied"),
-            ReadError::Other(reason) => write!(f, "{reason}"),
-        }
+/// An SFTP failure as a Download's Details say it: "No such file", "Permission denied",
+/// or the host's own words.
+fn operator_reason(error: &russh_sftp::client::error::Error) -> String {
+    use russh_sftp::client::error::Error;
+    use russh_sftp::protocol::StatusCode;
+    match error {
+        Error::Status(status) => match status.status_code {
+            StatusCode::NoSuchFile => "No such file".to_owned(),
+            StatusCode::PermissionDenied => "Permission denied".to_owned(),
+            _ if !status.error_message.is_empty() => status.error_message.clone(),
+            code => code.to_string(),
+        },
+        other => other.to_string(),
     }
 }
 
-impl From<russh_sftp::client::error::Error> for ReadError {
-    fn from(error: russh_sftp::client::error::Error) -> Self {
-        use russh_sftp::client::error::Error;
-        use russh_sftp::protocol::StatusCode;
-        match error {
-            Error::Status(s) if s.status_code == StatusCode::NoSuchFile => ReadError::NoSuchFile,
-            Error::Status(s) if s.status_code == StatusCode::PermissionDenied => {
-                ReadError::PermissionDenied
-            }
-            other => ReadError::Other(other.to_string()),
-        }
-    }
-}
-
-/// A request to the host: its answer, or why there is none (`E`).
-pub struct Request<T, E = String> {
-    answer: mpsc::Receiver<Result<T, E>>,
+/// A request to the host: its answer, or why there is none. Dropping a request whose
+/// work can be stopped (a read) stops it.
+pub struct Request<T> {
+    answer: mpsc::Receiver<Result<T, String>>,
     /// The task answering it, stopped when the request is dropped.
     task: Option<tokio::task::AbortHandle>,
 }
 
-impl<T, E> Request<T, E> {
+impl<T> Request<T> {
     /// The answer, if it has arrived. Never blocks.
-    pub fn try_take(&self) -> Option<Result<T, E>> {
+    pub fn try_take(&self) -> Option<Result<T, String>> {
         self.answer.try_recv().ok()
     }
 
     /// Waits up to `timeout` for the answer: for tests, not the frame thread.
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<T, E>> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<T, String>> {
         self.answer.recv_timeout(timeout).ok()
     }
 }
 
-impl<T, E> Drop for Request<T, E> {
+impl<T> Drop for Request<T> {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
             task.abort();
@@ -597,30 +648,6 @@ async fn list(
         });
     }
     Ok(Listing { path, entries })
-}
-
-/// Up to `len` bytes of the file at `path` from `offset`.
-async fn read(
-    sftp: &SftpSession,
-    path: String,
-    offset: u64,
-    len: u64,
-) -> Result<Vec<u8>, ReadError> {
-    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-
-    let file = sftp.open(path).await?;
-    let mut file = file;
-    if offset > 0 {
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|e| ReadError::Other(e.to_string()))?;
-    }
-    let mut bytes = Vec::new();
-    file.take(len)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| ReadError::Other(e.to_string()))?;
-    Ok(bytes)
 }
 
 /// The host-key algorithms to offer: those already recorded for the host first, then the

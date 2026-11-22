@@ -343,3 +343,34 @@ fn the_settings_shortcut_also_closes_the_dialog() {
     h.run();
     assert!(!is_open(h));
 }
+
+#[test]
+fn the_download_page_has_its_two_switches_and_the_follow_setting_shared_with_search() {
+    let mut l = launch();
+    let h = &mut l.harness;
+    open_with_gear(h);
+    h.get_by_role_and_label(Role::ListItem, "Download").click();
+    h.run();
+    h.get_by_label("No effect on Windows");
+    h.get_by_label("Shared with Search");
+    h.get_by_role_and_label(Role::Switch, "Keep modification time")
+        .click();
+    h.run();
+    h.get_by_role_and_label(Role::Switch, "Keep executable bit")
+        .click();
+    h.run();
+    h.get_by_role_and_label(Role::Switch, "Follow symlinked directories")
+        .click();
+    h.run();
+    let saved = l.store.load();
+    assert!(!saved.download.keep_modified);
+    assert!(!saved.download.keep_executable);
+    assert!(saved.search.follow_links);
+
+    h.get_by_role_and_label(Role::Button, "Reset Download to defaults")
+        .click();
+    h.run();
+    let saved = l.store.load();
+    assert_eq!(saved.download, AppSettings::default().download);
+    assert_eq!(saved.search, AppSettings::default().search);
+}

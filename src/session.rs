@@ -16,7 +16,10 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use egui::{Event, EventFilter, Id, Sense};
+use egui::{Align, Event, EventFilter, Id, Layout, Sense};
+
+use crate::download::{self, Queue};
+use crate::download_ui;
 
 use crate::folder::{
     self, Column, Command, Effect, Folder, Sort, modified_text, permissions_text, size_text,
@@ -84,6 +87,9 @@ pub struct Session {
     preview: PreviewPanel,
     /// Preview takes the keyboard on the next frame: Enter on a file.
     focus_preview: bool,
+    /// The Session's Downloads; dropped, and so cancelled, before the connection.
+    downloads: Queue,
+    downloads_panel: download_ui::Panel,
     connection: ssh::Session,
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
@@ -116,6 +122,8 @@ impl Session {
             focus_preview: false,
             focus_listing: true,
             reveal: false,
+            downloads: Queue::default(),
+            downloads_panel: download_ui::Panel::default(),
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
         }
@@ -123,6 +131,83 @@ impl Session {
 
     pub fn label(&self) -> &str {
         &self.details.label
+    }
+
+    /// Queues a Download of the Selection into the Local folder. Nothing when the
+    /// Selection is empty.
+    pub fn download(&mut self, options: download::Options) {
+        let Some((dir, entries)) = self.selection() else {
+            return;
+        };
+        let job = download::Job {
+            dir,
+            entries,
+            local_folder: self.details.local_folder.clone(),
+            options,
+        };
+        self.downloads.push(&self.connection, job);
+    }
+
+    /// Whether there is a Selection to download.
+    pub fn can_download(&self) -> bool {
+        match self.view {
+            View::Tree => !self.tree.selection().is_empty(),
+            View::Folder => (0..self.folder.len()).any(|i| self.folder.is_selected(i)),
+        }
+    }
+
+    /// The Selection in the Session's view: the directory its entries share, and the
+    /// entries as listed. `None` when nothing is selected.
+    fn selection(&self) -> Option<(String, Vec<ssh::Entry>)> {
+        let (dir, entries) = match self.view {
+            View::Folder => {
+                let entries = (0..self.folder.len())
+                    .filter(|i| self.folder.is_selected(*i))
+                    .filter_map(|i| self.folder.entry(i).cloned())
+                    .collect();
+                (self.folder.path().to_owned(), entries)
+            }
+            View::Tree => {
+                let paths = self.tree.selection();
+                let (dir, _) = folder::parent(paths.first()?)?;
+                // A directory above the Initial remote folder may not be listed yet: it is
+                // known only as a directory.
+                let entries = (0..self.tree.len())
+                    .filter(|i| self.tree.is_selected(*i))
+                    .filter_map(|i| match self.tree.row(i).line {
+                        tree::Line::Entry { name, entry, .. } => {
+                            Some(entry.cloned().unwrap_or_else(|| ssh::Entry {
+                                name: name.to_owned(),
+                                is_dir: true,
+                                ..ssh::Entry::default()
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (dir, entries)
+            }
+        };
+        let entries: Vec<ssh::Entry> = entries;
+        (!entries.is_empty()).then_some((dir, entries))
+    }
+
+    /// Whether a Download is running or queued.
+    pub fn is_downloading(&self) -> bool {
+        self.downloads.is_busy()
+    }
+
+    /// Whether a Download waits for the operator to answer a conflict.
+    pub fn needs_attention(&self) -> bool {
+        self.downloads.conflict.is_some()
+    }
+
+    /// Takes what the Downloads have said and starts the next queued one. Call it every
+    /// frame, on screen or not; `now` is egui's time.
+    pub fn poll(&mut self, now: f64) {
+        if self.downloads.poll(&self.connection) {
+            self.downloads_panel.ended(now);
+        }
     }
 
     pub fn view(&self) -> View {
@@ -174,8 +259,48 @@ impl Session {
         }
     }
 
-    /// The Session's listing in its view.
+    /// The Session: its listing in its view, the Download strip along the bottom, and
+    /// the Download prompt, modal to this Session only.
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
+        let ctx = ui.ctx().clone();
+        let now = ui.input(|i| i.time);
+        let strip =
+            download_ui::has_strip(&mut self.downloads, &mut self.downloads_panel, &ctx, now);
+        let asking = self.needs_attention();
+        let area = ui.available_rect_before_wrap();
+        let keys = frame.keys;
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            if strip {
+                download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel);
+            }
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.add_enabled_ui(!asking, |ui| {
+                    let frame = Frame {
+                        keys: keys && !asking,
+                        ..frame
+                    };
+                    self.listing_view(ui, frame);
+                });
+            });
+        });
+        download_ui::conflict(
+            &ctx,
+            self.id.with("conflict"),
+            area,
+            keys,
+            &mut self.downloads,
+            &mut self.downloads_panel,
+        );
+        download_ui::details(
+            &ctx,
+            self.id.with("details"),
+            &self.downloads,
+            &mut self.downloads_panel,
+        );
+    }
+
+    /// The listing in the Session's view.
+    fn listing_view(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
         self.receive();
         let show_hidden = frame.settings.browsing.show_hidden;
         if show_hidden != self.show_hidden {

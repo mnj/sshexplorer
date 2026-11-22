@@ -14,7 +14,8 @@
 //! - **Files.** The filesystem is `root()`, a temp directory; the remote path `/x` is
 //!   `root()/x`. The account's home is `/home/tester` and starts with [`HOME_ENTRIES`].
 //!   Add files with `std::fs` under `root()`.
-//! - **Reads.** Files open for reading only; a request to write is refused.
+//! - **Reads.** Files open for reading only (open, read, fstat, close). A test that needs
+//!   a Download or a read to be in flight slows every read with [`Fixture::slow_reads`].
 //! - **Limits.** SFTP semantics are the fixture's own (no `longname`; `stat` follows
 //!   links, while `lstat` and `readdir` describe a link itself, as OpenSSH does). For
 //!   real OpenSSH behaviour, run an unprivileged `sshd` on a high port (public key only)
@@ -25,6 +26,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use russh::keys::PrivateKey;
@@ -72,6 +74,8 @@ pub struct Fixture {
     host_key: PrivateKey,
     root: tempfile::TempDir,
     runtime: Option<tokio::runtime::Runtime>,
+    /// How long each SFTP read waits before answering, in milliseconds.
+    read_delay: Arc<AtomicU64>,
 }
 
 impl Fixture {
@@ -108,11 +112,14 @@ impl Fixture {
             ..Default::default()
         });
         let served = root.path().to_path_buf();
+        let read_delay = Arc::new(AtomicU64::new(0));
+        let delay = read_delay.clone();
         runtime.spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let handler = SshHandler {
                     root: served.clone(),
                     channels: Arc::default(),
+                    read_delay: delay.clone(),
                 };
                 let config = config.clone();
                 tokio::spawn(async move {
@@ -127,7 +134,15 @@ impl Fixture {
             host_key,
             root,
             runtime: Some(runtime),
+            read_delay,
         }
+    }
+
+    /// Makes every SFTP read from now on wait `delay` before it answers, so that a
+    /// transfer stays in flight long enough to watch or cancel.
+    pub fn slow_reads(&self, delay: Duration) {
+        self.read_delay
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     pub fn address(&self) -> &'static str {
@@ -170,6 +185,7 @@ impl Drop for Fixture {
 struct SshHandler {
     root: PathBuf,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    read_delay: Arc<AtomicU64>,
 }
 
 impl russh::server::Handler for SshHandler {
@@ -218,6 +234,7 @@ impl russh::server::Handler for SshHandler {
                     dirs: HashMap::new(),
                     files: HashMap::new(),
                     next: 0,
+                    read_delay: self.read_delay.clone(),
                 };
                 russh_sftp::server::run(channel.into_stream(), sftp).await;
             }
@@ -228,7 +245,7 @@ impl russh::server::Handler for SshHandler {
 }
 
 /// SFTP over the served directory: enough for listing (realpath, stat, lstat, readlink,
-/// opendir, readdir) and for reading files (open for reading, read). Writing is refused.
+/// opendir, readdir) and reading files (open, read, fstat, close).
 struct SftpHandler {
     root: PathBuf,
     /// Open directory handles: the entries still to send, or None once sent.
@@ -236,6 +253,7 @@ struct SftpHandler {
     /// Open file handles, for reading.
     files: HashMap<String, std::fs::File>,
     next: u64,
+    read_delay: Arc<AtomicU64>,
 }
 
 impl SftpHandler {
@@ -297,9 +315,18 @@ impl russh_sftp::server::Handler for SftpHandler {
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        // As OpenSSH does, symlinks are resolved when the path exists.
+        let mut real = Self::absolute(&path);
+        if let (Ok(root), Ok(target)) = (
+            std::fs::canonicalize(&self.root),
+            std::fs::canonicalize(self.local(&path)),
+        ) && let Ok(inside) = target.strip_prefix(&root)
+        {
+            real = format!("/{}", inside.to_string_lossy());
+        }
         Ok(Name {
             id,
-            files: vec![File::dummy(Self::absolute(&path))],
+            files: vec![File::dummy(real)],
         })
     }
 
@@ -364,10 +391,14 @@ impl russh_sftp::server::Handler for SftpHandler {
         pflags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
-        if pflags.intersects(OpenFlags::WRITE | OpenFlags::APPEND | OpenFlags::CREATE) {
+        if pflags.bits() != OpenFlags::READ.bits() {
             return Err(StatusCode::PermissionDenied);
         }
-        let file = std::fs::File::open(self.local(&filename)).map_err(status)?;
+        let local = self.local(&filename);
+        if local.is_dir() {
+            return Err(StatusCode::Failure);
+        }
+        let file = std::fs::File::open(local).map_err(status)?;
         self.next += 1;
         let handle = format!("file{}", self.next);
         self.files.insert(handle.clone(), file);
@@ -384,17 +415,37 @@ impl russh_sftp::server::Handler for SftpHandler {
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
-        use std::os::unix::fs::FileExt as _;
-
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let delay = self.read_delay.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         let key = String::from_utf8_lossy(handle.as_bytes()).into_owned();
-        let file = self.files.get(&key).ok_or(StatusCode::Failure)?;
+        let file = self.files.get_mut(&key).ok_or(StatusCode::Failure)?;
+        file.seek(SeekFrom::Start(offset)).map_err(status)?;
         let mut data = vec![0; len as usize];
-        let n = file.read_at(&mut data, offset).map_err(status)?;
-        if n == 0 && len > 0 {
+        let mut filled = 0;
+        while filled < data.len() {
+            match file.read(&mut data[filled..]).map_err(status)? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        if filled == 0 {
             return Err(StatusCode::Eof);
         }
-        data.truncate(n);
+        data.truncate(filled);
         Ok(Data { id, data })
+    }
+
+    async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, Self::Error> {
+        let key = String::from_utf8_lossy(handle.as_bytes()).into_owned();
+        let file = self.files.get(&key).ok_or(StatusCode::Failure)?;
+        let metadata = file.metadata().map_err(status)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
     }
 
     async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {

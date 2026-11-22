@@ -17,7 +17,7 @@ use crate::preview::{self, Body, Focused, Preview, UNSUPPORTED};
 use crate::scratch::Place;
 use crate::settings::AppSettings;
 use crate::source::Highlighting;
-use crate::ssh::{self, ReadError, Request};
+use crate::ssh::{self, Request};
 use crate::theme::TokensExt as _;
 use crate::widgets::{self, CodeLine};
 
@@ -47,7 +47,7 @@ pub struct PreviewPanel {
     pub id: Id,
     preview: Preview,
     /// The read in flight, and the fetch it answers.
-    reading: Option<(u64, Request<Vec<u8>, ReadError>)>,
+    reading: Option<(u64, Request<Vec<u8>>)>,
     /// Rows the text view showed last frame, for paging.
     page: usize,
 }
@@ -74,7 +74,7 @@ impl PreviewPanel {
         self.receive(&Place::of(&frame.settings.preview));
         let cap = frame.settings.preview.size_cap_bytes();
         if let Some(fetch) = self.preview.due(now, cap) {
-            let request = frame.connection.read(fetch.path, 0, fetch.len);
+            let request = frame.connection.read(fetch.path, 0, fetch.len as usize);
             self.reading = Some((fetch.id, request));
         }
         if let Some(wait) = self.preview.wait(now) {

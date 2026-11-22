@@ -98,11 +98,13 @@ pub enum Action {
     CycleFocus,
     /// Moves the keyboard back round the Session.
     CycleFocusBack,
+    /// Downloads the Selection into the Session's Local folder.
+    Download,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 32] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -124,6 +126,7 @@ impl Action {
         Action::TreeView,
         Action::FolderView,
         Action::Sort,
+        Action::Download,
         Action::NextSession,
         Action::PreviousSession,
         Action::CloseSession,
@@ -167,7 +170,8 @@ impl Action {
             | Action::ToggleSelected
             | Action::SelectAll
             | Action::ShowHidden
-            | Action::Sort => Area::Browsing,
+            | Action::Sort
+            | Action::Download => Area::Browsing,
         }
     }
 
@@ -205,6 +209,7 @@ impl Action {
             Action::HostDialog => "Host dialog",
             Action::CycleFocus => "Cycle focus",
             Action::CycleFocusBack => "Cycle focus back",
+            Action::Download => "Download",
         }
     }
 
@@ -249,6 +254,7 @@ impl Action {
             Action::HostDialog => Binding::new(cmd, Key::O),
             Action::CycleFocus => Binding::new(none, Key::Tab),
             Action::CycleFocusBack => Binding::new(shift, Key::Tab),
+            Action::Download => Binding::new(cmd, Key::S),
         })
     }
 }

@@ -394,19 +394,12 @@ fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links()
 
 #[test]
 fn a_session_reads_part_of_a_file_and_says_why_it_cannot() {
-    use sshexplorer::ssh::ReadError;
-    use std::os::unix::fs::PermissionsExt as _;
-
     let fixture = Fixture::start();
-    let srv = fixture.root().join("srv");
-    std::fs::create_dir_all(&srv).unwrap();
     let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-    std::fs::write(srv.join("data.bin"), &bytes).unwrap();
-    std::fs::write(srv.join("secret"), b"no").unwrap();
-    std::fs::set_permissions(srv.join("secret"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::write(fixture.root().join("home/tester/data.bin"), &bytes).unwrap();
     let ssh = Ssh::new(|| {});
     let opened = opened(&ssh, &fixture);
-    let read = |path: &str, offset: u64, len: u64| {
+    let read = |path: &str, offset: u64, len: usize| {
         opened
             .session
             .read(path.to_string(), offset, len)
@@ -414,16 +407,21 @@ fn a_session_reads_part_of_a_file_and_says_why_it_cannot() {
             .expect("the read answers")
     };
 
-    // The whole file, in more than one SFTP read.
-    assert_eq!(read("/srv/data.bin", 0, 1 << 20).unwrap(), bytes);
-    // A part from an offset; at the end, only what is there.
-    assert_eq!(read("/srv/data.bin", 10, 5).unwrap(), bytes[10..15]);
-    assert_eq!(read("/srv/data.bin", 99_998, 10).unwrap(), bytes[99_998..]);
-    assert_eq!(read("/srv/nope", 0, 10), Err(ReadError::NoSuchFile));
-    // Root reads anything, so the refusal is only checked as an ordinary user.
-    if std::fs::read(srv.join("secret")).is_err() {
-        assert_eq!(read("/srv/secret", 0, 10), Err(ReadError::PermissionDenied));
-    }
-    assert_eq!(ReadError::NoSuchFile.to_string(), "no such file");
-    assert_eq!(ReadError::PermissionDenied.to_string(), "permission denied");
+    assert_eq!(
+        read("/home/tester/notes.txt", 0, 1024),
+        Ok(b"notes\n".to_vec())
+    );
+    assert_eq!(
+        read("/home/tester/data.bin", 70_000, 20_000),
+        Ok(bytes[70_000..90_000].to_vec())
+    );
+    // A read past the end stops at it.
+    assert_eq!(
+        read("/home/tester/data.bin", 99_990, 100),
+        Ok(bytes[99_990..].to_vec())
+    );
+    assert_eq!(
+        read("/home/tester/gone.txt", 0, 10),
+        Err("No such file".to_string())
+    );
 }

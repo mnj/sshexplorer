@@ -20,7 +20,7 @@ use crate::scratch::{Kept, Place};
 use std::sync::Arc;
 
 use crate::source::{self, Highlighting};
-use crate::ssh::{Entry, ReadError};
+use crate::ssh::Entry;
 
 /// How long focus rests on a file before its fetch starts, in seconds.
 pub const DELAY: f64 = 0.2;
@@ -273,7 +273,7 @@ impl Preview {
 
     /// Takes the answer to fetch `id`, keeping the bytes in `place`. An answer for a
     /// preview no longer shown is dropped.
-    pub fn arrive(&mut self, id: u64, answer: Result<Vec<u8>, ReadError>, place: &Place) {
+    pub fn arrive(&mut self, id: u64, answer: Result<Vec<u8>, String>, place: &Place) {
         let Some(shown) = self.shown.as_mut() else {
             return;
         };
@@ -405,12 +405,18 @@ pub fn capped_banner(shown: u64, total: u64) -> String {
     )
 }
 
-/// The one line a failed read shows.
-pub fn failure_line(error: &ReadError) -> String {
-    match error {
-        ReadError::NoSuchFile => "Cannot read: no longer exists".to_owned(),
-        other => format!("Cannot read: {other}"),
+/// The one line a failed read shows, from the reason [`crate::ssh::Session::read`]
+/// gives: "No such file" means the file is gone.
+pub fn failure_line(reason: &str) -> String {
+    if reason == "No such file" {
+        return "Cannot read: no longer exists".to_owned();
     }
+    let mut chars = reason.chars();
+    let reason = match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    format!("Cannot read: {reason}")
 }
 
 /// The header's name for a kind.

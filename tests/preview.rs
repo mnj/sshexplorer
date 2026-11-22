@@ -4,7 +4,7 @@
 use sshexplorer::kind::Kind;
 use sshexplorer::preview::{self, Body, Focused, Preview};
 use sshexplorer::scratch::Place;
-use sshexplorer::ssh::{Entry, ReadError};
+use sshexplorer::ssh::Entry;
 
 const MIB: u64 = 1 << 20;
 
@@ -96,15 +96,15 @@ fn the_banner_and_failure_lines_read_as_the_spec_says() {
         "Showing the first 10 MiB of 2.3 GiB"
     );
     assert_eq!(
-        preview::failure_line(&ReadError::PermissionDenied),
+        preview::failure_line("Permission denied"),
         "Cannot read: permission denied"
     );
     assert_eq!(
-        preview::failure_line(&ReadError::NoSuchFile),
+        preview::failure_line("No such file"),
         "Cannot read: no longer exists"
     );
     assert_eq!(
-        preview::failure_line(&ReadError::Other("connection lost".into())),
+        preview::failure_line("connection lost"),
         "Cannot read: connection lost"
     );
 }
@@ -196,7 +196,7 @@ fn directories_show_the_header_only_and_failures_one_line() {
 
     p.focus(Some(file("gone.txt", 3, 1)), 5.0);
     let fetch = p.due(6.0, MIB).unwrap();
-    p.arrive(fetch.id, Err(ReadError::NoSuchFile), &Place::Memory);
+    p.arrive(fetch.id, Err("No such file".to_string()), &Place::Memory);
     let Body::Failed(line) = &p.shown().unwrap().body else {
         panic!("a failure line");
     };
