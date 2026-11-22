@@ -61,12 +61,20 @@ impl Ssh {
     /// Starts opening a Session to `target`, checking its host key against the
     /// `known_hosts` file at `known_hosts`, to which Trust appends.
     pub fn open(&self, target: Target, known_hosts: PathBuf) -> Opening {
+        self.open_in(target, known_hosts, "")
+    }
+
+    /// As [`Ssh::open`], with the Session opening in `folder`: absolute, or relative to
+    /// the account's home directory, which an empty `folder` means.
+    pub fn open_in(&self, target: Target, known_hosts: PathBuf, folder: &str) -> Opening {
         let (sender, events) = mpsc::channel();
         let out = Events {
             sender,
             wake: self.wake.clone(),
         };
-        self.runtime.spawn(open(target, known_hosts, Arc::new(out)));
+        let folder = folder.trim().to_owned();
+        self.runtime
+            .spawn(open(target, known_hosts, folder, Arc::new(out)));
         Opening { events }
     }
 }
@@ -95,7 +103,7 @@ pub enum Event {
     TrustHostKey(TrustPrompt),
     /// The password is needed.
     Password(PasswordPrompt),
-    /// The Session is open, with its home directory listed.
+    /// The Session is open, with the folder it opened in listed.
     Opened(Opened),
     /// The Session did not open.
     Failed(Failure),
@@ -155,7 +163,7 @@ pub enum Failure {
     KnownHostsWrite { file: PathBuf, reason: String },
     /// The connection failed or dropped: unreachable, refused, timed out, closed.
     Connection(String),
-    /// The SFTP subsystem would not start, or the home directory could not be listed.
+    /// The SFTP subsystem would not start, or the folder to open in could not be listed.
     Sftp(String),
 }
 
@@ -202,14 +210,15 @@ impl std::fmt::Display for Failure {
                 )
             }
             Failure::Connection(reason) => write!(f, "Could not connect: {reason}"),
-            Failure::Sftp(reason) => write!(f, "Could not list the home directory: {reason}"),
+            Failure::Sftp(reason) => write!(f, "{reason}"),
         }
     }
 }
 
-/// An open Session's connection, with its home directory's listing.
+/// An open Session's connection, with the listing of the folder it opened in.
 pub struct Opened {
     pub session: Session,
+    /// The Initial remote folder, or the home directory when that is empty.
     pub home: Listing,
 }
 
@@ -304,8 +313,8 @@ impl Events {
     }
 }
 
-async fn open(target: Target, known_hosts: PathBuf, out: Arc<Events>) {
-    let failure = match connect(&target, known_hosts, &out).await {
+async fn open(target: Target, known_hosts: PathBuf, folder: String, out: Arc<Events>) {
+    let failure = match connect(&target, known_hosts, &folder, &out).await {
         Ok(opened) => {
             out.send(Event::Opened(opened));
             return;
@@ -318,6 +327,7 @@ async fn open(target: Target, known_hosts: PathBuf, out: Arc<Events>) {
 async fn connect(
     target: &Target,
     known_hosts: PathBuf,
+    folder: &str,
     out: &Arc<Events>,
 ) -> Result<Opened, Failure> {
     let recorded = std::fs::read_to_string(&known_hosts).unwrap_or_default();
@@ -364,10 +374,15 @@ async fn connect(
 
     let sftp = start_sftp(&handle)
         .await
-        .map_err(|e| Failure::Sftp(e.to_string()))?;
-    let home = list_home(&sftp)
-        .await
-        .map_err(|e| Failure::Sftp(e.to_string()))?;
+        .map_err(|e| Failure::Sftp(format!("The SFTP subsystem did not start: {e}")))?;
+    let home = list_folder(&sftp, folder).await.map_err(|e| {
+        let folder = if folder.is_empty() {
+            "the home directory"
+        } else {
+            folder
+        };
+        Failure::Sftp(format!("Could not list {folder}: {e}"))
+    })?;
     Ok(Opened {
         session: Session {
             handle: Arc::new(handle),
@@ -418,8 +433,13 @@ async fn start_sftp(
     Ok(SftpSession::new(channel.into_stream()).await?)
 }
 
-async fn list_home(sftp: &SftpSession) -> Result<Listing, russh_sftp::client::error::Error> {
-    let path = sftp.canonicalize(".").await?;
+/// Lists `folder`, absolute or relative to the home directory (empty: the home itself).
+async fn list_folder(
+    sftp: &SftpSession,
+    folder: &str,
+) -> Result<Listing, russh_sftp::client::error::Error> {
+    let folder = if folder.is_empty() { "." } else { folder };
+    let path = sftp.canonicalize(folder).await?;
     list(sftp, path).await
 }
 

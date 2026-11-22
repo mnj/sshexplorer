@@ -8,11 +8,13 @@
 //! - [`ssh`] is the SSH stack (russh, ADR-0003) on its own runtime, off the frame
 //!   thread; [`known_hosts`] checks host keys against the operator's `known_hosts`.
 //! - [`settings`] holds the app settings saved between runs, and [`keymap`] every key
-//!   binding.
+//!   binding; [`binding_editor`] is Settings → Keys, where the operator rebinds them.
 
 pub mod app;
+pub mod binding_editor;
 pub mod connect;
 pub mod folder;
+pub mod hosts;
 pub mod icons;
 pub mod keymap;
 pub mod kind;

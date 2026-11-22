@@ -6,6 +6,7 @@
 //! directory when a command leaves this one, and draws the result.
 // TODO(#28): Tree view and switching views.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::{Event, EventFilter, Id, Sense};
@@ -28,8 +29,19 @@ pub struct Frame<'a> {
     pub keys: bool,
 }
 
-pub struct Session {
+/// What a Session takes from the Host it was opened from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Details {
+    /// The tab's label: a saved Host's display name, else [`label`].
     pub label: String,
+    /// The tab's tooltip: for a saved Host, where it connects, port and all.
+    pub tooltip: Option<String>,
+    pub readonly: bool,
+    pub local_folder: PathBuf,
+}
+
+pub struct Session {
+    pub details: Details,
     folder: Folder,
     sort: Sort,
     /// The "Show hidden entries" setting the folder was last arranged with.
@@ -50,12 +62,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(target: &Target, opened: ssh::Opened) -> Self {
+    pub fn new(details: Details, opened: ssh::Opened) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let sort = Sort::default();
         Session {
-            label: label(target),
+            details,
             folder: Folder::new(opened.home, sort, false),
             sort,
             show_hidden: false,
@@ -67,6 +79,10 @@ impl Session {
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
         }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.details.label
     }
 
     /// The Folder view of the listed directory.

@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use egui::{Event, InputState, Key, ModifierNames, Modifiers};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Where an action belongs, as the binding editor groups them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -79,11 +80,17 @@ pub enum Action {
     ShowHidden,
     /// Sorts the active Session by the next column. Unbound by default.
     Sort,
+    /// Brings the next Session's tab to the front, wrapping round.
+    NextSession,
+    /// Brings the previous Session's tab to the front, wrapping round.
+    PreviousSession,
+    /// Opens the Host dialog.
+    HostDialog,
 }
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 25] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -101,7 +108,10 @@ impl Action {
         Action::SelectAll,
         Action::ShowHidden,
         Action::Sort,
+        Action::NextSession,
+        Action::PreviousSession,
         Action::CloseSession,
+        Action::HostDialog,
         Action::UiScaleUp,
         Action::UiScaleDown,
         Action::UiScaleReset,
@@ -113,7 +123,10 @@ impl Action {
             Action::Settings | Action::UiScaleUp | Action::UiScaleDown | Action::UiScaleReset => {
                 Area::Appearance
             }
-            Action::CloseSession => Area::Sessions,
+            Action::CloseSession
+            | Action::NextSession
+            | Action::PreviousSession
+            | Action::HostDialog => Area::Sessions,
             Action::MoveUp
             | Action::MoveDown
             | Action::MoveFirst
@@ -159,6 +172,9 @@ impl Action {
             Action::SelectAll => "Select all",
             Action::ShowHidden => "Show hidden entries",
             Action::Sort => "Sort",
+            Action::NextSession => "Next Session",
+            Action::PreviousSession => "Previous Session",
+            Action::HostDialog => "Host dialog",
         }
     }
 
@@ -194,6 +210,9 @@ impl Action {
             Action::UiScaleDown => Binding::new(shift_cmd, Key::Minus),
             Action::UiScaleReset => Binding::new(shift_cmd, Key::Num0),
             Action::CloseSession => Binding::new(cmd, Key::W),
+            Action::NextSession => Binding::new(cmd, Key::Tab),
+            Action::PreviousSession => Binding::new(shift_cmd, Key::Tab),
+            Action::HostDialog => Binding::new(cmd, Key::O),
         })
     }
 }
@@ -208,6 +227,59 @@ pub struct Binding {
 impl Binding {
     pub const fn new(modifiers: Modifiers, key: Key) -> Binding {
         Binding { modifiers, key }
+    }
+
+    /// The binding a key press with `modifiers` records: Ctrl (Cmd on macOS) as
+    /// `command`, and on macOS the Control key, which is not Cmd, as `ctrl`.
+    pub fn pressed(modifiers: Modifiers, key: Key) -> Binding {
+        let m = modifiers;
+        Binding::new(
+            Modifiers {
+                alt: m.alt,
+                shift: m.shift,
+                command: m.command,
+                ctrl: m.ctrl && !m.command,
+                mac_cmd: false,
+            },
+            key,
+        )
+    }
+
+    /// The binding as the settings file writes it: "Ctrl+Shift+Equals". Ctrl is Cmd on
+    /// macOS; "Control" is the macOS Control key.
+    fn to_text(self) -> String {
+        let m = self.modifiers;
+        let mut text = String::new();
+        for (on, name) in [
+            (m.command, "Ctrl"),
+            (m.ctrl, "Control"),
+            (m.alt, "Alt"),
+            (m.shift, "Shift"),
+        ] {
+            if on {
+                text += name;
+                text += "+";
+            }
+        }
+        text + self.key.name()
+    }
+
+    /// The binding [`Binding::to_text`] wrote, if `text` is one. Escape is never one.
+    fn from_text(text: &str) -> Option<Binding> {
+        let mut parts: Vec<&str> = text.split('+').collect();
+        let key = parts.pop()?;
+        let key = Key::from_name(key).filter(|k| *k != Key::Escape)?;
+        let mut m = Modifiers::NONE;
+        for name in parts {
+            match name {
+                "Ctrl" => m.command = true,
+                "Control" => m.ctrl = true,
+                "Alt" => m.alt = true,
+                "Shift" => m.shift = true,
+                _ => return None,
+            }
+        }
+        Some(Binding::new(m, key))
     }
 
     /// How a key chip shows it: "Ctrl+Shift+=", or "⇧⌘=" on macOS; "Shift+Up" for an
@@ -241,7 +313,11 @@ impl Binding {
 }
 
 /// The bindings in force: each action's default unless it was rebound.
-#[derive(Clone, Debug, Default)]
+///
+/// In the settings file it is the `[keys]` table of the rebound actions only, each by its
+/// variant name: `Settings = "Ctrl+Shift+Comma"`, or `""` for unbound. An entry that names
+/// no action, or no binding, is left out, and that action keeps its default.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct KeyMap {
     /// Actions whose binding is not the default; `None` is unbound.
     changed: BTreeMap<Action, Option<Binding>>,
@@ -304,5 +380,48 @@ impl KeyMap {
             !hit
         });
         found
+    }
+}
+
+impl Action {
+    /// The name the settings file knows the action by: its variant name.
+    fn file_name(self) -> String {
+        format!("{self:?}")
+    }
+}
+
+impl Serialize for KeyMap {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let table: BTreeMap<String, String> = self
+            .changed
+            .iter()
+            .map(|(action, binding)| {
+                let text = binding.map_or(String::new(), Binding::to_text);
+                (action.file_name(), text)
+            })
+            .collect();
+        table.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyMap {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<KeyMap, D::Error> {
+        let table = BTreeMap::<String, toml::Value>::deserialize(d)?;
+        let mut map = KeyMap::default();
+        for (name, value) in table {
+            let action = Action::ALL.into_iter().find(|a| a.file_name() == name);
+            match (action, value.as_str()) {
+                (Some(action), Some("")) if action.default_binding().is_some() => {
+                    map.changed.insert(action, None);
+                }
+                (Some(action), Some(text)) => {
+                    if let Some(binding) = Binding::from_text(text) {
+                        map.set(action, binding);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(map)
     }
 }

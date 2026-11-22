@@ -67,6 +67,24 @@ fn bindings_read_ctrl_elsewhere_and_cmd_on_macos() {
 }
 
 #[test]
+fn a_recorded_press_is_ctrl_on_every_os_and_control_stays_control_on_macos() {
+    let linux_ctrl = Modifiers::CTRL | Modifiers::COMMAND;
+    let mac_cmd = Modifiers::MAC_CMD | Modifiers::COMMAND;
+    let ctrl_k = Binding::new(Modifiers::COMMAND, Key::K);
+    assert_eq!(Binding::pressed(linux_ctrl, Key::K), ctrl_k);
+    assert_eq!(Binding::pressed(mac_cmd, Key::K), ctrl_k);
+    assert_eq!(
+        Binding::pressed(Modifiers::CTRL, Key::K),
+        Binding::new(Modifiers::CTRL, Key::K),
+        "the macOS Control key"
+    );
+    // A recorded default is the default, not a change.
+    let mut map = KeyMap::default();
+    map.set(Action::Settings, Binding::pressed(linux_ctrl, Key::Comma));
+    assert!(!map.is_changed(Action::Settings));
+}
+
+#[test]
 fn the_areas_are_the_binding_editors_groups_in_order() {
     let names: Vec<&str> = Area::ALL.iter().map(|a| a.name()).collect();
     assert_eq!(

@@ -1,7 +1,10 @@
 //! The main window: the toolbar along the top and, once one is open, the Sessions as tabs;
 //! and the Settings dialog over it.
 //!
-//! Launch opens no Session and lists no Hosts. Hosts opens the Host dialog. The Settings
+//! Launch opens no Session and lists no Hosts. Hosts, or Ctrl+O, opens the Host dialog;
+//! saved Hosts are kept in `hosts.toml` beside the settings. The tabs run along the
+//! Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle them. The toolbar shows the active
+//! Session's Readonly indicator and Local folder. The Settings
 //! gear, and Ctrl+, from anywhere, opens the Settings dialog. Every change there applies
 //! on the next frame and is saved at once. The SSH stack starts with the first Session
 //! opened, and every network step runs on it, off this frame thread.
@@ -10,7 +13,9 @@ use std::path::PathBuf;
 
 use egui::Id;
 
+use crate::binding_editor::BindingEditor;
 use crate::connect::{HostAction, HostDialog, Outcome, Pending};
+use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
 use crate::session::{self, Session};
 use crate::settings::{
@@ -81,6 +86,7 @@ struct SettingsDialog {
     /// The installed families the font fields list, read when the dialog opened.
     ui_fonts: Vec<String>,
     mono_fonts: Vec<String>,
+    keys: BindingEditor,
 }
 
 impl SettingsDialog {
@@ -97,6 +103,7 @@ impl SettingsDialog {
             page: 0,
             ui_fonts: names(fonts::Family::has_latin_regular),
             mono_fonts: names(fonts::Family::is_fixed_pitch),
+            keys: BindingEditor::default(),
         }
     }
 }
@@ -106,12 +113,15 @@ pub struct App {
     settings: AppSettings,
     /// Where settings are saved; `None` keeps them for this run only.
     store: Option<Store>,
-    keymap: KeyMap,
     dialog: Option<SettingsDialog>,
     /// The Appearance last put on the context, so a change is applied once.
     applied: Option<Appearance>,
     /// The `known_hosts` file host keys are checked against, and Trust appends to.
     known_hosts: PathBuf,
+    /// The saved Hosts, in the Host dialog's order.
+    hosts: Vec<Host>,
+    /// Where Hosts are saved; `None` keeps them for this run only.
+    host_store: Option<HostStore>,
     host_dialog: Option<HostDialog>,
     pending: Vec<Pending>,
     /// Dropped before `ssh`, so that each closes its connection on a live runtime.
@@ -150,10 +160,11 @@ impl App {
         App {
             settings: AppSettings::default(),
             store: None,
-            keymap: KeyMap::default(),
             dialog: None,
             applied: None,
             known_hosts: path,
+            hosts: Vec::new(),
+            host_store: None,
             host_dialog: None,
             pending: Vec::new(),
             sessions: Vec::new(),
@@ -163,13 +174,23 @@ impl App {
         }
     }
 
-    /// The app with the settings `store` holds, saving every change back to it.
+    /// The app with the settings `store` holds, and the Hosts saved beside them, saving
+    /// every change back.
     pub fn with_store(store: Store) -> App {
+        let host_store = HostStore::beside(store.path());
         App {
             settings: store.load(),
+            hosts: host_store.load(),
+            host_store: Some(host_store),
             store: Some(store),
             ..App::default()
         }
+    }
+
+    /// The same app, checking host keys against the `known_hosts` file at `path`.
+    pub fn known_hosts_at(mut self, path: PathBuf) -> App {
+        self.known_hosts = path;
+        self
     }
 
     /// The app with `settings`, kept for this run only.
@@ -185,7 +206,7 @@ impl App {
     }
 
     pub fn keymap(&self) -> &KeyMap {
-        &self.keymap
+        &self.settings.keys
     }
 
     /// Puts the settings on `ctx` if they are not there yet. The first frame does this
@@ -199,6 +220,17 @@ impl App {
         ctx.set_theme(a.theme_preference());
         ctx.set_zoom_factor(a.zoom_factor());
         self.applied = Some(a.clone());
+    }
+
+    fn save_hosts(&self) {
+        if let Some(store) = &self.host_store
+            && let Err(err) = store.save(&self.hosts)
+        {
+            eprintln!(
+                "sshexplorer: cannot save Hosts to {}: {err}",
+                store.path().display()
+            );
+        }
     }
 
     fn save(&self) {
@@ -218,6 +250,10 @@ impl App {
         self.apply(&ctx);
         let before = self.settings.clone();
         let modal = self.host_dialog.is_some() || self.pending.iter().any(Pending::is_modal);
+        // A binding being recorded takes the keys before any action sees them.
+        if let Some(dialog) = &mut self.dialog {
+            dialog.keys.record(&ctx, &mut self.settings.keys);
+        }
         self.keys(ui, modal);
         let mut open_settings = false;
         ui.add_enabled_ui(!modal, |ui| {
@@ -238,10 +274,21 @@ impl App {
     fn window(&mut self, ui: &mut egui::Ui) -> bool {
         let mut hosts = false;
         let mut open_settings = false;
+        let active = self.sessions.get(self.active).map(|s| &s.details);
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
+                if let Some(details) = active {
+                    if details.readonly {
+                        ui.add(widgets::badge("Readonly"))
+                            .tooltip("This Session cannot change the remote filesystem");
+                    }
+                    let t = ui.tokens();
+                    let folder = details.local_folder.display().to_string();
+                    ui.label(t.ty.body.rich(folder).color(t.color.text.muted))
+                        .tooltip("Local folder");
+                }
             },
             |ui| {
                 open_settings = ui
@@ -251,62 +298,115 @@ impl App {
             },
         );
         if hosts {
-            self.host_dialog = Some(HostDialog::default());
+            self.open_host_dialog();
         }
         if self.sessions.is_empty() {
             return open_settings;
         }
+        let edge = self.settings.appearance.tab_bar_edge;
+        match edge {
+            Edge::Top => {
+                self.tabs(ui, false);
+                self.active_session(ui);
+            }
+            Edge::Bottom => {
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    self.tabs(ui, false);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        self.active_session(ui);
+                    });
+                });
+            }
+            Edge::Left | Edge::Right => {
+                let layout = if edge == Edge::Left {
+                    egui::Layout::left_to_right(egui::Align::Min)
+                } else {
+                    egui::Layout::right_to_left(egui::Align::Min)
+                };
+                ui.with_layout(layout, |ui| {
+                    self.tabs(ui, true);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        self.active_session(ui);
+                    });
+                });
+            }
+        }
+        open_settings
+    }
+
+    /// The Sessions' tabs: in a row along the top or bottom, or stacked down a side.
+    fn tabs(&mut self, ui: &mut egui::Ui, stacked: bool) {
         let t = ui.tokens();
         let mut close = None;
-        ui.allocate_ui(egui::vec2(ui.available_width(), t.tab_height()), |ui| {
-            ui.horizontal(|ui| {
-                widgets::tab_strip(ui, |ui| {
-                    for (i, session) in self.sessions.iter().enumerate() {
-                        let kind = if i == self.active {
-                            TabKind::Active
-                        } else {
-                            TabKind::Back
-                        };
-                        let tab = widgets::tab(&session.label).kind(kind).show(ui);
-                        if tab.close.is_some_and(|c| c.clicked()) {
-                            close = Some(i);
-                        } else if tab.response.clicked() {
-                            self.active = i;
-                        }
+        let strip = |ui: &mut egui::Ui| {
+            widgets::tab_strip(ui, |ui| {
+                for (i, session) in self.sessions.iter().enumerate() {
+                    let kind = if i == self.active {
+                        TabKind::Active
+                    } else {
+                        TabKind::Back
+                    };
+                    let mut tab = widgets::tab(session.label()).kind(kind).show(ui);
+                    if let Some(tooltip) = &session.details.tooltip {
+                        tab.response = tab.response.tooltip(tooltip);
                     }
-                });
+                    if tab.close.is_some_and(|c| c.clicked()) {
+                        close = Some(i);
+                    } else if tab.response.clicked() {
+                        self.active = i;
+                    }
+                }
             });
-        });
+        };
+        if stacked {
+            // The strip stands its first tab in from the top, and stacks them with no gap.
+            ui.vertical(|ui| widgets::rows(ui, strip));
+        } else {
+            ui.allocate_ui(egui::vec2(ui.available_width(), t.tab_height()), |ui| {
+                ui.horizontal(strip);
+            });
+        }
         if let Some(i) = close {
             self.close(i);
         }
+    }
+
+    fn active_session(&mut self, ui: &mut egui::Ui) {
         // The listing takes keys only while no dialog is up.
         let keys = ui.is_enabled() && self.dialog.is_none();
         if let Some(session) = self.sessions.get_mut(self.active) {
             let frame = session::Frame {
-                keymap: &self.keymap,
+                keymap: &self.settings.keys,
                 settings: &self.settings,
                 keys,
             };
             session.ui(ui, frame);
         }
-        open_settings
+    }
+
+    fn open_host_dialog(&mut self) {
+        if self.host_dialog.is_none() {
+            self.host_dialog = Some(HostDialog::new(&self.hosts));
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(dialog) = &mut self.host_dialog {
-            match dialog.show(ctx) {
-                Some(HostAction::Open(target)) => {
+            match dialog.show(ctx, &mut self.hosts) {
+                Some(HostAction::Open(request)) => {
                     self.host_dialog = None;
                     let ssh = self.ssh.get_or_insert_with(|| {
                         let ctx = ctx.clone();
                         Ssh::new(move || ctx.request_repaint())
                     });
-                    let opening = ssh.open(target.clone(), self.known_hosts.clone());
+                    let opening =
+                        ssh.open_in(request.target, self.known_hosts.clone(), &request.folder);
                     self.next_id += 1;
                     let id = Id::NULL.with("opening").with(self.next_id);
-                    self.pending.push(Pending::new(id, target, opening));
+                    self.pending
+                        .push(Pending::new(id, request.details, opening));
                 }
+                Some(HostAction::Changed) => self.save_hosts(),
                 Some(HostAction::Dismiss) => self.host_dialog = None,
                 None => {}
             }
@@ -317,7 +417,7 @@ impl App {
                 Some(outcome) => {
                     let pending = self.pending.remove(i);
                     if let Outcome::Opened(opened) = outcome {
-                        self.sessions.push(Session::new(&pending.target, opened));
+                        self.sessions.push(Session::new(pending.details, opened));
                         self.active = self.sessions.len() - 1;
                     }
                 }
@@ -333,24 +433,41 @@ impl App {
         }
     }
 
-    /// The app-wide keys: Settings, the UI scale, and closing the active Session and
-    /// Show hidden entries, which wait while a dialog is up.
+    /// The app-wide keys: Settings and the UI scale; and the Sessions' keys and Show
+    /// hidden entries, which wait while a dialog is up.
     fn keys(&mut self, ui: &mut egui::Ui, modal: bool) {
-        let map = &self.keymap;
-        let can_close = !modal && self.dialog.is_none();
-        let [settings, up, down, reset, close, hidden] = ui.input_mut(|i| {
+        let map = &self.settings.keys;
+        let free = !modal && self.dialog.is_none();
+        let sessions = [
+            Action::CloseSession,
+            Action::NextSession,
+            Action::PreviousSession,
+            Action::HostDialog,
+            Action::ShowHidden,
+        ];
+        let [
+            settings,
+            up,
+            down,
+            reset,
+            close,
+            next,
+            previous,
+            host_dialog,
+            hidden,
+        ] = ui.input_mut(|i| {
             [
                 Action::Settings,
                 Action::UiScaleUp,
                 Action::UiScaleDown,
                 Action::UiScaleReset,
                 Action::CloseSession,
+                Action::NextSession,
+                Action::PreviousSession,
+                Action::HostDialog,
                 Action::ShowHidden,
             ]
-            .map(|action| {
-                let waits = matches!(action, Action::CloseSession | Action::ShowHidden);
-                (!waits || can_close) && map.take(i, action)
-            })
+            .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
         if hidden {
             let b = &mut self.settings.browsing;
@@ -358,6 +475,18 @@ impl App {
         }
         if close {
             self.close(self.active);
+        }
+        let count = self.sessions.len();
+        if count > 0 {
+            if next {
+                self.active = (self.active + 1) % count;
+            }
+            if previous {
+                self.active = (self.active + count - 1) % count;
+            }
+        }
+        if host_dialog {
+            self.open_host_dialog();
         }
         if settings {
             self.dialog = match self.dialog.take() {
@@ -385,16 +514,23 @@ impl App {
         let id = egui::Id::NULL.with("sshexplorer-settings");
         let report = fonts::report(ctx);
         let settings = &mut self.settings;
-        let keymap = &mut self.keymap;
-        let (ui_fonts, mono_fonts) = (&dialog.ui_fonts, &dialog.mono_fonts);
+        let SettingsDialog {
+            page: current,
+            ui_fonts,
+            mono_fonts,
+            keys: editor,
+        } = dialog;
+        if page != Page::Keys {
+            editor.stop();
+        }
         let shown = widgets::pages_dialog(id, "Changes apply at once", &PAGE_NAMES)
             .reset_label(page.reset_label())
-            .show(ctx, &mut dialog.page, |ui, page| match Page::ALL[page] {
+            .show(ctx, current, |ui, page| match Page::ALL[page] {
                 Page::Appearance => {
                     appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
                 }
                 Page::Browsing => browsing(ui, &mut settings.browsing),
-                Page::Keys => keys_page(ui, keymap),
+                Page::Keys => editor.ui(ui, &mut settings.keys),
                 _ => {
                     ui.add(widgets::form_name("Nothing to set here yet."));
                 }
@@ -403,7 +539,10 @@ impl App {
             match page {
                 Page::Appearance => settings.appearance = Appearance::default(),
                 Page::Browsing => settings.browsing = Browsing::default(),
-                Page::Keys => keymap.reset_all(),
+                Page::Keys => {
+                    settings.keys.reset_all();
+                    editor.stop();
+                }
                 _ => {}
             }
         }
@@ -569,28 +708,6 @@ fn font_field(
             }
         }
     });
-}
-
-/// The Keys page: every binding by area, read-only until the binding editor.
-fn keys_page(ui: &mut egui::Ui, keymap: &KeyMap) {
-    let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
-    for area in crate::keymap::Area::ALL {
-        let rows: Vec<(String, String)> = Action::ALL
-            .into_iter()
-            .filter(|a| a.area() == area)
-            .map(|a| {
-                let key = keymap
-                    .binding(a)
-                    .map_or("unbound".to_owned(), |b| b.label(mac));
-                (key, a.name().to_owned())
-            })
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        ui.add(widgets::form_name(area.name()));
-        widgets::key_list(ui, area.name(), &rows);
-    }
 }
 
 impl eframe::App for App {
