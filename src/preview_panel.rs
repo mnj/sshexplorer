@@ -75,6 +75,10 @@ pub const TOO_LARGE_HINT: &str = "Download it to open it locally.";
 /// An archive with no members.
 pub const EMPTY_ARCHIVE: &str = "The archive is empty.";
 
+/// How much of the panel's height the preview takes; the details have the rest.
+// theme-exempt: a share of the panel's height, not a size
+const BODY_SHARE: f32 = 0.75;
+
 impl PreviewPanel {
     pub fn new(id: Id) -> Self {
         PreviewPanel {
@@ -179,9 +183,26 @@ impl PreviewPanel {
         let Some(shown) = self.preview.shown_mut() else {
             return leave;
         };
-        details(ui, &shown.focused, shown.kind, frame.zone);
+        // The preview takes the top three quarters and the details the quarter below it.
         let t = ui.tokens();
-        ui.add_space(t.space.stack);
+        let full = ui.available_rect_before_wrap();
+        let split = full.top() + full.height() * BODY_SHARE;
+        let body_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.right(), split));
+        let details_rect =
+            egui::Rect::from_min_max(egui::pos2(full.left(), split + t.space.stack), full.max);
+        let clip = ui.clip_rect();
+        let mut below = ui.new_child(egui::UiBuilder::new().max_rect(details_rect));
+        below.set_clip_rect(details_rect.intersect(clip));
+        egui::ScrollArea::vertical()
+            .id_salt(self.id.with("details"))
+            .auto_shrink(false)
+            .show(&mut below, |ui| {
+                details(ui, &shown.focused, shown.kind, frame.zone)
+            });
+        ui.advance_cursor_after_rect(full);
+        let mut above = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
+        above.set_clip_rect(body_rect.intersect(clip));
+        let ui = &mut above;
         match &mut shown.body {
             Body::Header => {}
             Body::Loading => {

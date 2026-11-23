@@ -171,7 +171,11 @@ impl Matches {
                 self.choose(i.min(last));
                 return Effect::Open(self.items[i.min(last)].clone());
             }
-            Command::Parent | Command::Expand | Command::Collapse | Command::Type(_) => {}
+            Command::Parent
+            | Command::Expand
+            | Command::Collapse
+            | Command::Type(_)
+            | Command::Disclose(_) => {}
         }
         Effect::None
     }

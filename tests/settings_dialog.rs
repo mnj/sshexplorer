@@ -7,7 +7,7 @@ use egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
 use sshexplorer::app::{self, App};
-use sshexplorer::settings::{AppSettings, Store, ThemeChoice};
+use sshexplorer::settings::{AppSettings, ScratchChoice, Store, ThemeChoice};
 use sshexplorer::theme::{Accent, Density, Settings, Tokens, TokensExt as _, fonts};
 
 const PAGES: [&str; 7] = [
@@ -373,4 +373,24 @@ fn the_download_page_has_its_two_switches_and_the_follow_setting_shared_with_sea
     let saved = l.store.load();
     assert_eq!(saved.download, AppSettings::default().download);
     assert_eq!(saved.search, AppSettings::default().search);
+}
+
+#[test]
+fn the_preview_page_picks_the_scratch_folder() {
+    let mut l = launch();
+    let h = &mut l.harness;
+    open_with_gear(h);
+    h.get_by_role_and_label(Role::ListItem, "Preview").click();
+    h.run();
+    h.get_by_label("Scratch folder");
+    h.get_by_label("In memory");
+    h.get_by_label("System temp").click();
+    h.run();
+    assert_eq!(l.store.load().preview.scratch, ScratchChoice::Temp);
+    l.harness.get_by_label("Chosen").click();
+    l.harness.run();
+    l.harness
+        .get_by_role_and_label(Role::TextInput, "Scratch folder path");
+    l.harness.get_by_role_and_label(Role::Button, "Browse…");
+    assert_eq!(l.store.load().preview.scratch, ScratchChoice::Chosen);
 }

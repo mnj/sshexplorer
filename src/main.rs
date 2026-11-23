@@ -11,7 +11,9 @@ use sshexplorer::theme::fonts;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("sshexplorer"),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("sshexplorer")
+            .with_maximized(true),
         ..Default::default()
     };
     let mut app = Store::platform()

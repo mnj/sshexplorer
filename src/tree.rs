@@ -466,6 +466,11 @@ impl Tree {
                     return self.open(i);
                 }
             }
+            Command::Disclose(i) => {
+                if self.path(i).is_some() && self.is_dir(i) {
+                    return self.open(i);
+                }
+            }
         }
         Effect::None
     }

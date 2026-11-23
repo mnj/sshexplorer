@@ -262,8 +262,18 @@ fn edit(
     let ink = t.color.text.primary;
     let lay = style.clone();
     let wraps = rows.is_some();
+    // egui masks a password only in its own layouter, so this one masks it too.
     let mut layouter = move |ui: &Ui, buffer: &dyn egui::TextBuffer, wrap: f32| {
-        let mut job = lay.job(buffer.as_str(), ink);
+        let masked;
+        let shown = if password {
+            masked = egui::epaint::text::PASSWORD_REPLACEMENT_CHAR
+                .to_string()
+                .repeat(buffer.as_str().chars().count());
+            masked.as_str()
+        } else {
+            buffer.as_str()
+        };
+        let mut job = lay.job(shown, ink);
         if wraps {
             job.wrap.max_width = wrap;
         }

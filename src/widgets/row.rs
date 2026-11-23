@@ -451,9 +451,10 @@ pub struct TreeLead {
     expanded: Option<bool>,
 }
 
-impl egui::Widget for TreeLead {
-    fn ui(self, ui: &mut Ui) -> Response {
-        ui.horizontal(|ui| {
+impl TreeLead {
+    /// Shows the lead; the chevron's rect when the row has one, for a click on it.
+    pub fn show(self, ui: &mut Ui) -> (Response, Option<Rect>) {
+        let inner = ui.horizontal(|ui| {
             ui.add_space(TREE_INDENT * self.depth as f32);
             match self.expanded {
                 Some(open) => {
@@ -463,11 +464,20 @@ impl egui::Widget for TreeLead {
                         Glyph::ChevronRight
                     };
                     let ink = ui.tokens().color.text.muted;
-                    ui.add(glyph::glyph(glyph).color(ink));
+                    Some(ui.add(glyph::glyph(glyph).color(ink)).rect)
                 }
-                None => ui.add_space(TREE_INDENT),
+                None => {
+                    ui.add_space(TREE_INDENT);
+                    None
+                }
             }
-        })
-        .response
+        });
+        (inner.response, inner.inner)
+    }
+}
+
+impl egui::Widget for TreeLead {
+    fn ui(self, ui: &mut Ui) -> Response {
+        self.show(ui).0
     }
 }

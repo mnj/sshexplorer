@@ -178,6 +178,9 @@ pub enum Command {
     CtrlClick(usize),
     ShiftClick(usize),
     DoubleClick(usize),
+    /// Tree view: a click on a line's chevron opens or closes that directory. Folder view
+    /// does nothing.
+    Disclose(usize),
 }
 
 /// What the Session does after a command.
@@ -395,6 +398,7 @@ impl Folder {
                 self.choose(i.min(last));
                 return self.open(self.focus);
             }
+            Command::Disclose(_) => {}
         }
         Effect::None
     }

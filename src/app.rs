@@ -3,9 +3,10 @@
 //!
 //! Launch opens no Session and lists no Hosts. Hosts, or Ctrl+O, opens the Host dialog;
 //! saved Hosts are kept in `hosts.toml` beside the settings. The tabs run along the
-//! Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle them. The toolbar shows the active
-//! Session's view switch, Refresh (also F5), Readonly indicator and Local folder. The Settings
-//! gear, and Ctrl+, from anywhere, opens the Settings dialog. Every change there applies
+//! Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle them. Under its tab, the active
+//! Session has its own bar: Download, the view switch, Refresh (also F5), the place,
+//! Search, the Readonly indicator and the Local folder. The Settings gear, and Ctrl+, from
+//! anywhere, opens the Settings dialog. Every change there applies
 //! on the next frame and is saved at once. The SSH stack starts with the first Session
 //! opened, and every network step runs on it, off this frame thread.
 
@@ -389,78 +390,11 @@ impl App {
     /// The toolbar, the tab strip and the active Session; whether the gear was clicked.
     fn window(&mut self, ui: &mut egui::Ui) -> bool {
         let mut hosts = false;
-        let mut download = false;
         let mut open_settings = false;
-        let mut dismiss = false;
-        let session = self.sessions.get(self.active);
-        let has_session = session.is_some();
-        let can_download = session.is_some_and(Session::can_download);
-        let download_key = self
-            .settings
-            .keys
-            .binding(Action::Download)
-            .map(|b| b.label(cfg!(target_os = "macos")));
-        let active = self.sessions.get(self.active).map(|s| s.details.clone());
-        // The active Session's view and place; the view the switch picks.
-        let place = self.sessions.get(self.active).map(|s| {
-            let busy = s.is_searching() || s.is_disconnected();
-            (s.view(), s.place(), s.is_refreshing(), busy)
-        });
-        let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
-        let mut picked = None;
-        let mut refresh = false;
         widgets::toolbar(
             ui,
             |ui| {
                 hosts = ui.add(widgets::button("Hosts").flat()).clicked();
-                if has_session {
-                    let tip = match &download_key {
-                        Some(key) => format!("Download the Selection ({key})"),
-                        None => "Download the Selection".to_owned(),
-                    };
-                    download = ui
-                        .add_enabled(can_download, widgets::button("Download").flat())
-                        .tooltip(&tip)
-                        .clicked();
-                }
-                if let Some((view, place, refreshing, searching)) = &place {
-                    let mut choice = *view;
-                    let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
-                    if ui.add(widgets::segmented(&mut choice, &views)).changed() {
-                        picked = Some(choice);
-                    }
-                    refresh = ui
-                        .add_enabled(!refreshing && !searching, widgets::button("Refresh").flat())
-                        .tooltip("Fetch the listing again")
-                        .clicked();
-                    if *refreshing {
-                        ui.add(widgets::spinner());
-                    }
-                    ui.label(ui.tokens().ty.body.rich(place.as_str()))
-                        .tooltip("Current directory");
-                }
-                if let Some(session) = sessions.get_mut(index) {
-                    session.search_field(ui, &settings.keys, settings);
-                }
-                if let Some(details) = &active {
-                    if details.readonly {
-                        ui.add(widgets::badge("Readonly"))
-                            .tooltip("This Session cannot change the remote filesystem");
-                    }
-                    let folder = details.local_folder.display().to_string();
-                    ui.add(widgets::muted(folder)).tooltip("Local folder");
-                    if let Some(note) = &details.note {
-                        ui.add(widgets::warning_message(note));
-                    }
-                    if let Some(note) = &details.dismissible {
-                        // The dismiss control first, so a long note cannot push it out.
-                        dismiss = ui
-                            .add(widgets::glyph_button(Glyph::Close).name("Dismiss"))
-                            .tooltip("Dismiss")
-                            .clicked();
-                        ui.add(widgets::warning_message(note));
-                    }
-                }
             },
             |ui| {
                 open_settings = ui
@@ -471,18 +405,6 @@ impl App {
         );
         if hosts {
             self.open_host_dialog();
-        }
-        if dismiss && let Some(session) = self.sessions.get_mut(self.active) {
-            session.details.dismissible = None;
-        }
-        if download {
-            self.download();
-        }
-        if let (Some(view), Some(session)) = (picked, self.sessions.get_mut(self.active)) {
-            session.set_view(view);
-        }
-        if let (true, Some(session)) = (refresh, self.sessions.get_mut(self.active)) {
-            session.refresh();
         }
         if self.sessions.is_empty() {
             return open_settings;
@@ -569,7 +491,90 @@ impl App {
         }
     }
 
+    /// The active Session's own bar, under its tab: Download, the view switch, Refresh,
+    /// the place, Search, and the Session's notes.
+    fn session_bar(&mut self, ui: &mut egui::Ui) {
+        let mut download = false;
+        let mut dismiss = false;
+        let Some(session) = self.sessions.get(self.active) else {
+            return;
+        };
+        let can_download = session.can_download();
+        let download_key = self
+            .settings
+            .keys
+            .binding(Action::Download)
+            .map(|b| b.label(cfg!(target_os = "macos")));
+        let details = session.details.clone();
+        let busy = session.is_searching() || session.is_disconnected();
+        let (view, place, refreshing) = (session.view(), session.place(), session.is_refreshing());
+        let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
+        let mut picked = None;
+        let mut refresh = false;
+        widgets::toolbar(
+            ui,
+            |ui| {
+                let tip = match &download_key {
+                    Some(key) => format!("Download the Selection ({key})"),
+                    None => "Download the Selection".to_owned(),
+                };
+                download = ui
+                    .add_enabled(can_download, widgets::button("Download").flat())
+                    .tooltip(&tip)
+                    .clicked();
+                let mut choice = view;
+                let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
+                if ui.add(widgets::segmented(&mut choice, &views)).changed() {
+                    picked = Some(choice);
+                }
+                refresh = ui
+                    .add_enabled(!refreshing && !busy, widgets::button("Refresh").flat())
+                    .tooltip("Fetch the listing again")
+                    .clicked();
+                if refreshing {
+                    ui.add(widgets::spinner());
+                }
+                ui.label(ui.tokens().ty.body.rich(place.as_str()))
+                    .tooltip("Current directory");
+                if let Some(session) = sessions.get_mut(index) {
+                    session.search_field(ui, &settings.keys, settings);
+                }
+                if details.readonly {
+                    ui.add(widgets::badge("Readonly"))
+                        .tooltip("This Session cannot change the remote filesystem");
+                }
+                let folder = details.local_folder.display().to_string();
+                ui.add(widgets::muted(folder)).tooltip("Local folder");
+                if let Some(note) = &details.note {
+                    ui.add(widgets::warning_message(note));
+                }
+                if let Some(note) = &details.dismissible {
+                    // The dismiss control first, so a long note cannot push it out.
+                    dismiss = ui
+                        .add(widgets::glyph_button(Glyph::Close).name("Dismiss"))
+                        .tooltip("Dismiss")
+                        .clicked();
+                    ui.add(widgets::warning_message(note));
+                }
+            },
+            |_| {},
+        );
+        if dismiss && let Some(session) = self.sessions.get_mut(self.active) {
+            session.details.dismissible = None;
+        }
+        if download {
+            self.download();
+        }
+        if let (Some(view), Some(session)) = (picked, self.sessions.get_mut(self.active)) {
+            session.set_view(view);
+        }
+        if let (true, Some(session)) = (refresh, self.sessions.get_mut(self.active)) {
+            session.refresh();
+        }
+    }
+
     fn active_session(&mut self, ui: &mut egui::Ui) {
+        self.session_bar(ui);
         // The listing takes keys only while no dialog is up.
         let keys = ui.is_enabled() && self.dialog.is_none();
         if let Some(session) = self.sessions.get_mut(self.active) {
@@ -1075,7 +1080,8 @@ fn preview(ui: &mut egui::Ui, p: &mut PreviewSettings) {
     widgets::form("preview").show(ui, |ui| {
         widgets::form_row(ui, "Size cap", |ui| {
             let mut cap = i64::from(p.size_cap);
-            ui.add(widgets::stepper_field(&mut cap, 1..=4096).suffix("MiB"));
+            ui.add(widgets::stepper_field(&mut cap, 1..=4096).suffix("MiB"))
+                .accessible_name("Size cap");
             p.size_cap = u32::try_from(cap.max(1)).unwrap_or(p.size_cap);
         });
         widgets::form_row(ui, "Autoplay audio and video", |ui| {

@@ -452,8 +452,6 @@ pub struct Size {
     pub field: f32,
     /// The Host dialog's column of saved Hosts.
     pub host_list: f32,
-    /// The Preview panel's width when a Session opens.
-    pub preview: f32,
     /// Between stacked PDF pages, in the pages' own points (it scales with the zoom).
     pub page_gap: f32,
 }
@@ -820,7 +818,6 @@ impl Tokens {
             size: Size {
                 field: 280.0,
                 host_list: 180.0,
-                preview: 360.0,
                 page_gap: 8.0,
             },
             opacity: Opacity { disabled: 0.45 },

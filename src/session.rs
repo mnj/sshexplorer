@@ -497,12 +497,17 @@ impl Session {
 
         let t = ui.tokens();
         let focused_entry = self.focused();
+        // Preview starts at half the Session's width.
+        let half = ui.available_width() / 2.0;
         let leave = widgets::splitter(ui, t.space.gap, |ui| {
             egui::Panel::right(self.id.with("preview-panel"))
                 .resizable(true)
-                .default_size(t.size.preview)
+                .default_size(half)
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
+                    // egui keeps a panel as wide as its contents, so they fill it: otherwise
+                    // the panel shrinks to them and a drag of its edge springs back.
+                    ui.set_min_width(ui.available_width());
                     self.preview.ui(
                         ui,
                         PanelFrame {
@@ -630,8 +635,9 @@ impl Session {
                             let ringed = focused && Some(i) == focus;
                             let look = RowLook::of(selected, live, ringed);
                             let shown = self.shown(i);
+                            let mut chevron = None;
                             let response = table.row_with(look, |row| {
-                                self.cells(row, &shown, show_icons);
+                                chevron = self.cells(row, &shown, show_icons);
                             });
                             let (label, expanded) = (shown.label, shown.expanded);
                             response.ctx.accesskit_node_builder(response.id, |node| {
@@ -643,7 +649,16 @@ impl Session {
                             if reveal && Some(i) == focus {
                                 response.scroll_to_me(None);
                             }
-                            if response.double_clicked() {
+                            let on_chevron = chevron.is_some_and(|rect: egui::Rect| {
+                                response
+                                    .interact_pointer_pos()
+                                    .is_some_and(|at| rect.expand(t.space.gap).contains(at))
+                            });
+                            if on_chevron && response.clicked() {
+                                command = Some(Command::Disclose(i));
+                            } else if on_chevron && response.double_clicked() {
+                                // The first click already opened it.
+                            } else if response.double_clicked() {
                                 command = Some(Command::DoubleClick(i));
                             } else if response.clicked() {
                                 let m = response.ctx.input(|i| i.modifiers);
@@ -762,13 +777,20 @@ impl Session {
         }
     }
 
-    fn cells(&self, row: &mut widgets::TableRow<'_>, shown: &Shown<'_>, show_icons: bool) {
+    /// Fills a line's cells; the rect of its chevron, when it has one.
+    fn cells(
+        &self,
+        row: &mut widgets::TableRow<'_>,
+        shown: &Shown<'_>,
+        show_icons: bool,
+    ) -> Option<egui::Rect> {
         let entry = shown.entry;
         let kind = entry.map_or(Kind::Directory, |e| Kind::of(&e.name, e.is_dir));
         let target = entry.and_then(|e| e.link.as_deref());
+        let mut chevron = None;
         row.ui(|ui| {
             if let Some(depth) = shown.depth {
-                ui.add(widgets::tree_lead(depth, shown.expanded));
+                chevron = widgets::tree_lead(depth, shown.expanded).show(ui).1;
             }
             if shown.status {
                 ui.add(widgets::muted(&shown.label));
@@ -792,6 +814,7 @@ impl Session {
         );
         let mode = entry.and_then(|e| e.permissions);
         row.muted(mode.map(permissions_text).unwrap_or_default());
+        chevron
     }
 
     /// The listing's keys, and typed characters for the name prefix.
