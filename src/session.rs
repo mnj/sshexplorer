@@ -187,6 +187,8 @@ pub struct Session {
     handover: Option<Pending>,
     /// Directories whose fetch the drop cut short, fetched again on reconnect.
     refetch: Vec<String>,
+    info_request: Option<Request<ssh::host_info::HostInfo>>,
+    host_info: ssh::host_info::HostInfo,
     connection: ssh::Session,
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
@@ -243,6 +245,8 @@ impl Session {
             reconnecting: None,
             handover: None,
             refetch: Vec::new(),
+            info_request: Some(opened.session.host_info()),
+            host_info: Default::default(),
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
             navigation: Default::default(),
@@ -504,6 +508,10 @@ impl Session {
     }
 
     fn host_status(&mut self, ui: &mut egui::Ui) {
+        if let Some(info) = self.info_request.as_ref().and_then(Request::try_take) {
+            self.host_info = info.unwrap_or_default();
+            self.info_request = None;
+        }
         let target = self.connection.target();
         let address = if target.address.contains(':') && !target.address.starts_with('[') {
             format!("[{}]", target.address)
@@ -518,14 +526,38 @@ impl Session {
         } else {
             "Connected"
         };
+        let info = if self.is_disconnected() || self.info_request.is_some() {
+            None
+        } else {
+            let os = self.host_info.os.as_deref().unwrap_or("OS unavailable");
+            let uptime = self.host_info.uptime().map_or_else(
+                || "Uptime unavailable".to_owned(),
+                |duration| {
+                    let mins = duration.as_secs() / 60;
+                    ui.ctx()
+                        .request_repaint_after(Duration::from_secs(60 - duration.as_secs() % 60));
+                    uptime_text(mins)
+                },
+            );
+            Some(format!("{os} · {uptime}"))
+        };
         widgets::status_bar(ui, |ui| {
             if ui.add(widgets::status_item("Downloads")).clicked() {
                 self.downloads_panel.queue_open = true;
             }
             ui.add(widgets::muted(state));
             ui.add_space(ui.tokens().space.gap);
-            ui.add(egui::Label::new(&endpoint).truncate())
-                .tooltip(&endpoint);
+            ui.scope(|ui| {
+                if info.is_some() {
+                    ui.set_max_width(ui.available_width() * 0.5);
+                }
+                ui.add(egui::Label::new(&endpoint).truncate())
+                    .tooltip(&endpoint);
+            });
+            if let Some(text) = info {
+                ui.add_space(ui.tokens().space.gap);
+                ui.add(egui::Label::new(&text).truncate()).tooltip(&text);
+            }
         });
     }
 
@@ -1191,6 +1223,17 @@ struct Shown<'a> {
     expanded: Option<bool>,
     /// A "Loading…" or failure row.
     status: bool,
+}
+
+fn uptime_text(minutes: u64) -> String {
+    let hours = minutes / 60;
+    if hours >= 24 {
+        format!("Up {}d {}h {}m", hours / 24, hours % 24, minutes % 60)
+    } else if hours > 0 {
+        format!("Up {hours}h {}m", minutes % 60)
+    } else {
+        format!("Up {minutes}m")
+    }
 }
 
 /// An unsaved Session's tab label: `account@address`, and `:port` off port 22.

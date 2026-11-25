@@ -287,3 +287,50 @@ fn audio_cut_short_by_the_drop_reloads_after_reconnect() {
         h.query_by_role_and_label(Role::Button, "Play").is_some()
     });
 }
+
+#[test]
+fn sftp_only_host_info_is_resampled_after_reconnect() {
+    let fixture = Fixture::start();
+    fixture.refuse_search();
+    let etc = fixture.root().join("etc");
+    let proc = fixture.root().join("proc");
+    std::fs::create_dir_all(&etc).unwrap();
+    std::fs::create_dir_all(&proc).unwrap();
+    std::fs::write(etc.join("os-release"), "PRETTY_NAME=\"Fixture Linux 1\"\n").unwrap();
+    std::fs::write(proc.join("uptime"), "93605.99 348215.04\n").unwrap();
+    let mut w = window(&fixture);
+    let h = &mut w.harness;
+    until(h, "the OS and uptime", |h| {
+        has(h, "Fixture Linux 1 · Up 1d 2h 0m")
+    });
+    drop_connection(&fixture, h);
+    assert!(!has(h, "Fixture Linux 1"));
+    std::fs::write(etc.join("os-release"), "PRETTY_NAME=\"Fixture Linux 2\"\n").unwrap();
+    std::fs::write(proc.join("uptime"), "125.12 301.88\n").unwrap();
+    reconnect(h);
+    until(h, "the rebooted host", |h| {
+        has(h, "Fixture Linux 2 · Up 2m")
+    });
+    assert!(!has(h, "Fixture Linux 1"));
+
+    drop_connection(&fixture, h);
+    std::fs::remove_file(etc.join("os-release")).unwrap();
+    std::fs::remove_file(proc.join("uptime")).unwrap();
+    reconnect(h);
+    until(h, "unavailable host information", |h| {
+        has(h, "OS unavailable · Uptime unavailable")
+    });
+    assert!(has_row(h, "notes.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shell_host_reports_its_os_and_uptime_over_ssh() {
+    let fixture = Fixture::start();
+    let mut w = window(&fixture);
+    until(
+        &mut w.harness,
+        "host information from the remote command",
+        |h| has(h, " · Up "),
+    );
+}

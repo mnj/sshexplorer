@@ -22,6 +22,8 @@ impl Session {
         if self.lost.is_none() {
             let reason = self.connection.lost()?;
             self.lost = Some(Lost::new(reason, attempts, now));
+            self.info_request = None;
+            self.host_info = Default::default();
             self.search_lost();
         }
         if let Some(opening) = self.reconnecting.take() {
@@ -76,6 +78,7 @@ impl Session {
     /// The connection is back: the strip clears, the Current directory is refreshed and
     /// the fetches the drop cut short are made again.
     pub(super) fn reconnected(&mut self, opened: ssh::Opened) {
+        self.info_request = Some(opened.session.host_info());
         self.connection = opened.session;
         self.lost = None;
         self.reconnecting = None;

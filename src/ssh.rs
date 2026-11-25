@@ -30,6 +30,7 @@ use crate::hosts::AuthMethod;
 use crate::known_hosts::{self, Recorded, Verdict};
 
 mod auth;
+pub(crate) mod host_info;
 mod opening;
 pub(crate) mod tail;
 
