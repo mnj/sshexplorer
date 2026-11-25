@@ -191,3 +191,91 @@ fn auto_refresh_is_chosen_on_the_browsing_page() {
     harness.run_ok();
     assert_eq!(store.load().browsing.auto_refresh, AutoRefresh::Seconds30);
 }
+
+#[test]
+fn navigating_to_a_cached_folder_retires_the_previous_refresh() {
+    let fixture = Fixture::start();
+    let home = fixture.root().join("home/tester");
+    std::fs::write(home.join("docs/inside.txt"), "ok").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = session(&fixture, &dir, "");
+    press(&mut h, egui::Key::ArrowRight);
+    until(&mut h, "expanded home", |h| has_row(h, "docs"));
+    h.get_by_role_and_label(Role::Row, "docs").click();
+    h.run_ok();
+    press(&mut h, egui::Key::ArrowRight);
+    until(&mut h, "cached docs", |h| has_row(h, "inside.txt"));
+    h.get_by_role_and_label(Role::Row, "tester").click();
+    h.run_ok();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run_ok();
+    until(&mut h, "list home", |h| {
+        has_row(h, "notes.txt") && has_row(h, "..")
+    });
+    fixture.slow_listings(Duration::from_millis(400));
+    press(&mut h, egui::Key::F5);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+    h.run_ok();
+    h.get_by_role_and_label(Role::Row, "docs").click();
+    h.run_ok();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run_ok();
+    until(&mut h, "list docs", |h| {
+        has_row(h, "inside.txt") && has_row(h, "..")
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    h.step();
+    h.run_ok();
+    assert!(has_row(&h, "inside.txt"));
+    assert!(!has_row(&h, "notes.txt"));
+}
+
+#[test]
+fn go_to_file_back_and_forward_preserve_the_folder_and_failed_paths_leave_it_open() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.root().join("home/tester/docs/plan.txt"), "plan").unwrap();
+    let mut h = session(&fixture, &dir, "");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    until(&mut h, "home folder", |h| has_row(h, "notes.txt"));
+    go(&mut h, "docs/plan.txt");
+    until(&mut h, "selected file", |h| {
+        selected_rows(h) == ["plan.txt"]
+    });
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    until(&mut h, "previous directory", |h| has_row(h, "notes.txt"));
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    until(&mut h, "next directory", |h| has_row(h, "plan.txt"));
+    go(&mut h, "missing-dir");
+    until(&mut h, "missing directory error", |h| {
+        h.query_by_label_contains("Cannot open").is_some()
+    });
+    assert!(has_row(&h, "plan.txt"));
+}
+
+fn go(h: &mut Harness<'static, App>, path: &str) {
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::L);
+    h.run_ok();
+    h.get_by_role_and_label(Role::TextInput, "Remote path")
+        .type_text(path);
+    h.run_ok();
+    press(h, egui::Key::Enter);
+}
+
+#[test]
+fn go_to_tree_path_refetches_a_cached_parent_when_the_directory_is_new() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = session(&fixture, &dir, "");
+    press(&mut h, egui::Key::ArrowRight);
+    until(&mut h, "cached home", |h| has_row(h, "notes.txt"));
+    let added = fixture.root().join("home/tester/new");
+    std::fs::create_dir(&added).unwrap();
+    std::fs::write(added.join("file.txt"), "hello").unwrap();
+    go(&mut h, "/home/tester/new/file.txt");
+    until(&mut h, "file focused in the new tree branch", |h| {
+        selected_rows(h) == ["file.txt"]
+    });
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    until(&mut h, "back in home", |h| selected_rows(h) == ["tester"]);
+}

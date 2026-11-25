@@ -3,6 +3,7 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -325,6 +326,7 @@ fn cancel_during_a_file_removes_the_file_in_flight() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_remote_failure_is_recorded_and_the_download_goes_on() {
     let s = Setup::new();
@@ -357,6 +359,7 @@ fn a_remote_failure_is_recorded_and_the_download_goes_on() {
     assert_eq!(tree(s.local.path()), ["d/", "d/open.txt"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_local_write_error_stops_the_download() {
     let s = Setup::new();
@@ -379,6 +382,7 @@ fn a_local_write_error_stops_the_download() {
     assert!(tree(&readonly).is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinked_directories_are_followed_only_when_asked_and_no_local_links_are_made() {
     let s = Setup::new();
@@ -421,6 +425,7 @@ fn symlinked_directories_are_followed_only_when_asked_and_no_local_links_are_mad
     assert!(!s.local("linked").is_symlink());
 }
 
+#[cfg(unix)]
 #[test]
 fn modification_time_and_executable_bit_are_kept_when_on() {
     let s = Setup::new();
@@ -534,6 +539,7 @@ fn a_late_conflict_keeps_both_sessions_contents_on_rename() {
     assert_eq!(tree(slow.local.path()), ["report", "slow report"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_blocked_directory_skips_its_descendants_and_copies_the_next_selection() {
     let s = Setup::new();
@@ -550,6 +556,7 @@ fn a_blocked_directory_skips_its_descendants_and_copies_the_next_selection() {
     assert!(tree(other.path()).is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_selected_in_search_keeps_its_size_time_and_mode() {
     use sshexplorer::folder::Command;
@@ -604,4 +611,35 @@ fn rename_suggestion_fits_even_when_the_existing_name_is_full_length() {
     assert!(finished(&transfer).is_clean());
     assert_eq!(read(s.local(&name)), "original");
     assert_eq!(read(s.local(&suggested)), "new");
+}
+
+#[test]
+fn a_later_success_preserves_the_failure_and_retry_copies_only_failed_files() {
+    let s = Setup::new();
+    s.write("/srv/docs/good.txt", "keep");
+    s.write("/srv/docs/bad.txt", "retry");
+    s.write("/srv/next.txt", "next");
+    std::fs::create_dir_all(s.local("docs/bad.txt")).unwrap();
+    let mut queue = Queue::default();
+    queue.push(&s.session, s.job("/srv", &["docs"], Options::default()));
+    queue.push(&s.session, s.job("/srv", &["next.txt"], Options::default()));
+    let drain = |q: &mut Queue| {
+        let start = std::time::Instant::now();
+        while q.is_busy() {
+            assert!(start.elapsed() < WAIT);
+            q.poll(&s.session);
+            assert!(q.conflict.is_none(), "retry must skip successful files");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    drain(&mut queue);
+    assert!(queue.finished.as_ref().unwrap().is_clean());
+    assert_eq!(queue.summary().unwrap().failed[0].path, "docs/bad.txt");
+    std::fs::remove_dir(s.local("docs/bad.txt")).unwrap();
+    queue.retry_failed(&s.session);
+    drain(&mut queue);
+    assert_eq!(queue.finished.as_ref().unwrap().copied, 1);
+    assert_eq!(read(s.local("docs/bad.txt")), "retry");
+    queue.dismiss();
+    assert!(queue.summary().unwrap().is_clean());
 }

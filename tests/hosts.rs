@@ -172,3 +172,38 @@ fn a_file_that_is_not_toml_is_kept_aside_on_the_next_save() {
     assert_eq!(std::fs::read_to_string(aside).unwrap(), "not = [toml");
     assert_eq!(store.load().len(), 1);
 }
+
+#[test]
+fn independent_windows_merge_edits_and_resolve_overlapping_changes() {
+    let (_dir, store) = store();
+    let build = Host {
+        id: hosts::new_id(),
+        address: "build".into(),
+        ..Host::default()
+    };
+    let deploy = Host {
+        id: hosts::new_id(),
+        address: "deploy".into(),
+        ..Host::default()
+    };
+    store
+        .merge(&[], std::slice::from_ref(&build), false)
+        .unwrap();
+    store
+        .merge(&[], std::slice::from_ref(&deploy), false)
+        .unwrap();
+    let base = store.load();
+    assert_eq!(base, [build, deploy]);
+
+    let mut first = base.clone();
+    first[0].address = "new-build".into();
+    store.merge(&base, &first, false).unwrap();
+    let deletion = &base[1..];
+    assert_eq!(
+        store.merge(&base, deletion, false).unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(store.load(), first);
+    store.merge(&base, deletion, true).unwrap();
+    assert_eq!(store.load(), deletion);
+}

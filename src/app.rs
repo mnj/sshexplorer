@@ -134,6 +134,8 @@ pub struct App {
     /// Where Hosts are saved; `None` keeps them for this run only.
     host_store: Option<HostStore>,
     host_dialog: Option<HostDialog>,
+    host_baseline: Vec<Host>,
+    host_conflict: bool,
     host_save_error: Option<String>,
     settings_save_error: Option<String>,
     /// Where remembered secrets are kept: the OS credential store in the app, a store in
@@ -208,6 +210,8 @@ impl App {
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
+            host_baseline: Vec::new(),
+            host_conflict: false,
             host_save_error: None,
             settings_save_error: None,
             credentials: Arc::new(credentials::MemoryStore::default()),
@@ -227,24 +231,21 @@ impl App {
     /// every change back.
     pub fn with_store(store: Store) -> App {
         let host_store = HostStore::beside(store.path());
-        let mut hosts = host_store.load();
-        // Hosts saved before they had ids get them now, so a secret can be kept.
-        let mut named = false;
-        for host in hosts.iter_mut().filter(|h| h.id.is_empty()) {
-            host.id = crate::hosts::new_id();
-            named = true;
-        }
-        let mut app = App {
+        let loaded = host_store.load_identified();
+        let host_save_error = loaded
+            .as_ref()
+            .err()
+            .map(|e| format!("Cannot load Hosts: {e}"));
+        let hosts = loaded.unwrap_or_else(|_| host_store.load());
+        App {
             settings: store.load(),
+            host_baseline: hosts.clone(),
             hosts,
+            host_save_error,
             host_store: Some(host_store),
             store: Some(store),
             ..App::default()
-        };
-        if named {
-            app.save_hosts();
         }
-        app
     }
 
     /// The same app, keeping remembered secrets in `store`: the OS credential store in
@@ -325,13 +326,36 @@ impl App {
         self.applied = Some(a.clone());
     }
 
-    fn save_hosts(&mut self) {
-        self.host_save_error = self.host_store.as_ref().and_then(|store| {
-            store
-                .save(&self.hosts)
-                .err()
-                .map(|e| format!("Cannot save Hosts to {}: {e}", store.path().display()))
-        });
+    fn persist_hosts(&mut self, ctx: &egui::Context, overwrite: bool) {
+        let replaced = match &self.host_store {
+            Some(store) => match store.merge(&self.host_baseline, &self.hosts, overwrite) {
+                Ok(replaced) => replaced,
+                Err(e) => {
+                    self.host_conflict = e.kind() == std::io::ErrorKind::AlreadyExists;
+                    self.host_save_error = Some(format!(
+                        "Cannot save Hosts to {}: {e}",
+                        store.path().display()
+                    ));
+                    return;
+                }
+            },
+            None => self.host_baseline.clone(),
+        };
+        self.host_baseline.clone_from(&self.hosts);
+        self.host_save_error = None;
+        self.host_conflict = false;
+        let mut keys = Vec::new();
+        for old in replaced {
+            let new = self.hosts.iter().find(|h| h.id == old.id);
+            keys.extend(
+                credentials::forgotten(&old, new)
+                    .into_iter()
+                    .map(|kind| credentials::Key::new(old.id.clone(), kind)),
+            );
+        }
+        if !keys.is_empty() {
+            self.forget(ctx, keys);
+        }
     }
 
     fn save(&mut self) {
@@ -390,7 +414,7 @@ impl App {
     /// The toolbar, the tab strip and the active Session; whether the gear was clicked.
     fn window(&mut self, ui: &mut egui::Ui) -> bool {
         if self.host_dialog.is_none() && widgets::retry_save(ui, self.host_save_error.as_deref()) {
-            self.save_hosts();
+            self.persist_hosts(ui.ctx(), false);
         }
         if self.dialog.is_none() && widgets::retry_save(ui, self.settings_save_error.as_deref()) {
             self.save();
@@ -412,6 +436,7 @@ impl App {
         if hosts {
             self.open_host_dialog();
         }
+        self.pending.retain_mut(|opening| !opening.progress(ui));
         if self.sessions.is_empty() {
             return open_settings;
         }
@@ -517,40 +542,89 @@ impl App {
         let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
         let mut picked = None;
         let mut refresh = false;
-        widgets::toolbar(
-            ui,
-            |ui| {
-                let tip = match &download_key {
-                    Some(key) => format!("Download the Selection ({key})"),
-                    None => "Download the Selection".to_owned(),
-                };
-                download = ui
-                    .add_enabled(can_download, widgets::button("Download").flat())
-                    .tooltip(&tip)
-                    .clicked();
-                let mut choice = view;
-                let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
-                if ui.add(widgets::segmented(&mut choice, &views)).changed() {
-                    picked = Some(choice);
-                }
-                refresh = ui
-                    .add_enabled(!refreshing && !busy, widgets::button("Refresh").flat())
-                    .tooltip("Fetch the listing again")
-                    .clicked();
-                if refreshing {
-                    ui.add(widgets::spinner());
-                }
-                ui.label(ui.tokens().ty.body.rich(place.as_str()))
-                    .tooltip("Current directory");
-                if let Some(session) = sessions.get_mut(index) {
+        let compact = ui.available_width() < 875.;
+        let actions = |ui: &mut egui::Ui| {
+            let tip = match &download_key {
+                Some(key) => format!("Download the Selection ({key})"),
+                None => "Download the Selection".to_owned(),
+            };
+            download = ui
+                .add_enabled(can_download, widgets::button("Download").flat())
+                .tooltip(&tip)
+                .clicked();
+            let mut choice = view;
+            let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
+            if ui.add(widgets::segmented(&mut choice, &views)).changed() {
+                picked = Some(choice);
+            }
+            refresh = ui
+                .add_enabled(!refreshing && !busy, widgets::button("Refresh").flat())
+                .tooltip("Fetch the listing again")
+                .clicked();
+            if refreshing {
+                ui.add(widgets::spinner());
+            }
+            if let Some(session) = sessions.get_mut(index) {
+                widgets::menu_button("Location").show(ui, |ui| {
+                    ui.label(&place);
+                    if ui.add(widgets::menu_item("Copy path")).clicked() {
+                        ui.ctx().copy_text(place.clone());
+                    }
+                    if ui
+                        .add_enabled(!session.is_disconnected(), widgets::menu_item("Go to path"))
+                        .clicked()
+                    {
+                        session.edit_path();
+                    }
+                    for (label, step) in [("Back", -1), ("Forward", 1)] {
+                        if ui
+                            .add_enabled(session.can_move(step), widgets::menu_item(label))
+                            .clicked()
+                        {
+                            session.move_in_history(step);
+                        }
+                    }
+                    if compact {
+                        if details.readonly {
+                            ui.add(widgets::badge("Readonly"));
+                        }
+                        ui.label(details.local_folder.display().to_string())
+                            .tooltip("Local folder");
+                    }
+                });
+                if !compact {
+                    let width = (ui.available_width() - 420.).clamp(45., 180.);
+                    ui.add_sized(
+                        [width, ui.tokens().control_height()],
+                        egui::Label::new(&place).truncate(),
+                    )
+                    .tooltip(place.as_str());
                     session.search_field(ui, &settings.keys, settings);
                 }
+            }
+            if !compact {
                 if details.readonly {
                     ui.add(widgets::badge("Readonly"))
                         .tooltip("This Session cannot change the remote filesystem");
                 }
                 let folder = details.local_folder.display().to_string();
-                ui.add(widgets::muted(folder)).tooltip("Local folder");
+                ui.add(egui::Label::new(folder).truncate())
+                    .tooltip("Local folder");
+            }
+        };
+        if ui.available_width() < 460. {
+            ui.horizontal_wrapped(actions);
+        } else {
+            widgets::toolbar(ui, actions, |_| {});
+        }
+        if let Some(session) = sessions.get_mut(index) {
+            if compact {
+                ui.horizontal(|ui| session.search_field(ui, &settings.keys, settings));
+            }
+            session.path_bar(ui);
+        }
+        if details.note.is_some() || details.dismissible.is_some() {
+            ui.horizontal_wrapped(|ui| {
                 if let Some(note) = &details.note {
                     ui.add(widgets::warning_message(note));
                 }
@@ -562,9 +636,8 @@ impl App {
                         .clicked();
                     ui.add(widgets::warning_message(note));
                 }
-            },
-            |_| {},
-        );
+            });
+        }
         if dismiss && let Some(session) = self.sessions.get_mut(self.active) {
             session.details.dismissible = None;
         }
@@ -596,14 +669,29 @@ impl App {
 
     fn open_host_dialog(&mut self) {
         if self.host_dialog.is_none() {
+            if self.host_save_error.is_none()
+                && let Some(store) = &self.host_store
+            {
+                match store.load_identified() {
+                    Ok(hosts) => {
+                        self.host_baseline = hosts.clone();
+                        self.hosts = hosts;
+                    }
+                    Err(e) => self.host_save_error = Some(format!("Cannot load Hosts: {e}")),
+                }
+            }
             self.host_dialog = Some(HostDialog::new(&self.hosts, self.read_ssh_config()));
         }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(dialog) = &mut self.host_dialog {
-            match dialog.show_with_save_error(ctx, &mut self.hosts, self.host_save_error.as_deref())
-            {
+            match dialog.show_with_save_error(
+                ctx,
+                &mut self.hosts,
+                self.host_save_error.as_deref(),
+                self.host_conflict,
+            ) {
                 Some(HostAction::Open(request)) => {
                     self.host_dialog = None;
                     let plan = request.plan(&self.read_ssh_config());
@@ -639,12 +727,22 @@ impl App {
                     let id = Id::NULL.with("opening").with(self.next_id);
                     self.pending.push(Pending::new(id, plan.details, opening));
                 }
-                Some(HostAction::Changed) => {
-                    let keys = dialog.take_forgotten();
-                    self.save_hosts();
-                    if !keys.is_empty() {
-                        self.forget(ctx, keys);
+                Some(HostAction::Reload) => {
+                    match self.host_store.as_ref().unwrap().load_identified() {
+                        Ok(hosts) => {
+                            self.hosts = hosts.clone();
+                            self.host_baseline = hosts;
+                            self.host_save_error = None;
+                            self.host_conflict = false;
+                            self.host_dialog =
+                                Some(HostDialog::new(&self.hosts, self.read_ssh_config()));
+                        }
+                        Err(e) => self.host_save_error = Some(e.to_string()),
                     }
+                }
+                Some(action @ (HostAction::Changed | HostAction::Overwrite)) => {
+                    dialog.take_forgotten();
+                    self.persist_hosts(ctx, matches!(action, HostAction::Overwrite));
                 }
                 Some(HostAction::Dismiss) => self.host_dialog = None,
                 None => {}
@@ -783,6 +881,9 @@ impl App {
     fn close_now(&mut self, i: usize) {
         if i < self.sessions.len() {
             self.sessions.remove(i);
+            if i < self.active {
+                self.active -= 1;
+            }
             self.active = self.active.min(self.sessions.len().saturating_sub(1));
         }
     }
@@ -838,6 +939,19 @@ impl App {
             ]
             .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
         });
+        if free && let Some(session) = self.sessions.get_mut(self.active) {
+            ui.input_mut(|i| {
+                if map.take(i, Action::GoToPath) {
+                    session.edit_path();
+                }
+                if map.take(i, Action::Back) {
+                    session.move_in_history(-1);
+                }
+                if map.take(i, Action::Forward) {
+                    session.move_in_history(1);
+                }
+            });
+        }
         if hidden {
             let b = &mut self.settings.browsing;
             b.show_hidden = !b.show_hidden;

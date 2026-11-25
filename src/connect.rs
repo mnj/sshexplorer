@@ -68,7 +68,7 @@ const AUTH_METHODS: [(AuthMethod, &str); 4] = [
 ];
 
 /// An entry of the Host dialog's left column.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Entry {
     /// The saved Host at this index.
     Saved(usize),
@@ -77,6 +77,7 @@ enum Entry {
 }
 
 /// The fields as typed, for the entry picked.
+#[derive(Clone)]
 struct Fields {
     id: String,
     display_name: String,
@@ -130,6 +131,10 @@ impl Fields {
 pub struct HostDialog {
     entry: Entry,
     fields: Fields,
+    drafts: std::collections::HashMap<Entry, Fields>,
+    filter: String,
+    focus_row: bool,
+    list_focus: Option<Id>,
     /// The OpenSSH config the placeholders come from, read when the dialog opened.
     config: Config,
     /// Why pasted text stayed in Address, since focus last left it.
@@ -146,6 +151,8 @@ pub enum HostAction {
     Open(Box<OpenRequest>),
     /// A Host was saved or deleted: the list is to be written out.
     Changed,
+    Reload,
+    Overwrite,
     Dismiss,
 }
 
@@ -236,6 +243,10 @@ impl HostDialog {
     /// Placeholders come from `config`: an empty one when the config is not used.
     pub fn new(hosts: &[Host], config: Config) -> HostDialog {
         let mut dialog = HostDialog {
+            drafts: Default::default(),
+            filter: String::new(),
+            focus_row: true,
+            list_focus: None,
             entry: Entry::NewHost,
             fields: Fields::of(&Host::default()),
             config,
@@ -274,23 +285,36 @@ impl HostDialog {
         );
     }
 
-    /// Picks `entry` and shows its fields; unsaved changes to the last one are dropped.
+    /// Restores the draft for this entry, or fills the form from the saved host.
     fn pick(&mut self, entry: Entry, hosts: &[Host]) {
         self.entry = entry;
         self.pasted.clear();
-        self.fields = match entry {
+        self.fields = self.drafts.remove(&entry).unwrap_or_else(|| match entry {
             Entry::Saved(i) => Fields::of(&hosts[i]),
             Entry::NewHost => Fields::of(&Host::default()),
             Entry::UnsavedSession => Fields {
                 remember: false,
                 ..Fields::of(&Host::default())
             },
-        };
+        });
+    }
+
+    fn switch(&mut self, entry: Entry, hosts: &[Host]) {
+        if self.entry != entry {
+            self.drafts.insert(self.entry, self.fields.clone());
+            self.pick(entry, hosts);
+        }
+        self.focus_row = true;
     }
 
     /// Every entry, in the left column's order.
-    fn entries(hosts: &[Host]) -> Vec<Entry> {
+    fn entries(&self, hosts: &[Host]) -> Vec<Entry> {
+        let filter = self.filter.to_lowercase();
         (0..hosts.len())
+            .filter(|&i| {
+                entry_name(&hosts[i]).to_lowercase().contains(&filter)
+                    || hosts[i].address.to_lowercase().contains(&filter)
+            })
             .map(Entry::Saved)
             .chain([Entry::NewHost, Entry::UnsavedSession])
             .collect()
@@ -298,17 +322,17 @@ impl HostDialog {
 
     /// Picks the entry `step` away from the one picked, if there is one.
     fn step(&mut self, step: isize, hosts: &[Host]) {
-        let entries = Self::entries(hosts);
+        let entries = self.entries(hosts);
         let at = entries.iter().position(|e| *e == self.entry).unwrap_or(0);
         if let Some(next) = at.checked_add_signed(step).and_then(|i| entries.get(i)) {
-            self.pick(*next, hosts);
+            self.switch(*next, hosts);
         }
     }
 
     /// Draws the dialog for one frame. Save and Delete change `hosts` and say so with
     /// [`HostAction::Changed`].
     pub fn show(&mut self, ctx: &Context, hosts: &mut Vec<Host>) -> Option<HostAction> {
-        self.show_with_save_error(ctx, hosts, None)
+        self.show_with_save_error(ctx, hosts, None, false)
     }
 
     pub(crate) fn show_with_save_error(
@@ -316,9 +340,16 @@ impl HostDialog {
         ctx: &Context,
         hosts: &mut Vec<Host>,
         save_error: Option<&str>,
+        conflict: bool,
     ) -> Option<HostAction> {
         let id = Id::NULL.with("host-dialog");
-        if !egui::Popup::is_any_open(ctx) {
+        let mut open_selected = false;
+        if !egui::Popup::is_any_open(ctx)
+            && self
+                .list_focus
+                .is_some_and(|row| ctx.memory(|m| m.has_focus(row)))
+        {
+            open_selected = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
             let (up, down) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
@@ -332,6 +363,13 @@ impl HostDialog {
                 self.step(1, hosts);
             }
         }
+        let filter_id = id.with("filter");
+        if ctx.memory(|m| m.has_focus(filter_id))
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+            && let Some(entry) = self.entries(hosts).first()
+        {
+            self.switch(*entry, hosts);
+        }
         let port = hosts::port_value(&self.fields.port);
         let filled = port.is_ok() && !self.fields.address.trim().is_empty();
         let mut clicked = None;
@@ -341,27 +379,47 @@ impl HostDialog {
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(t.size.host_list);
-                    widgets::rows(ui, |ui| {
-                        for entry in Self::entries(hosts) {
-                            let name = match entry {
-                                Entry::Saved(i) => entry_name(&hosts[i]),
-                                Entry::NewHost => "New Host",
-                                Entry::UnsavedSession => "Unsaved Session",
-                            };
-                            let selection = if entry == self.entry {
-                                widgets::Highlight::Live
-                            } else {
-                                widgets::Highlight::None
-                            };
-                            let row = widgets::list_row(name)
-                                .selection(selection)
-                                .width(t.size.host_list)
-                                .show(ui);
-                            if row.response.clicked() {
-                                picked = Some(entry);
-                            }
-                        }
-                    });
+                    ui.add(
+                        widgets::text_field(&mut self.filter)
+                            .id(id.with("filter"))
+                            .hint("Filter hosts")
+                            .width(t.size.host_list),
+                    )
+                    .accessible_name("Filter hosts");
+                    egui::ScrollArea::vertical()
+                        .id_salt("host-list")
+                        .max_height((ctx.content_rect().height() - 130.0).max(80.0))
+                        .show(ui, |ui| {
+                            widgets::rows(ui, |ui| {
+                                for entry in self.entries(hosts) {
+                                    let name = match entry {
+                                        Entry::Saved(i) => entry_name(&hosts[i]),
+                                        Entry::NewHost => "New Host",
+                                        Entry::UnsavedSession => "Unsaved Session",
+                                    };
+                                    let selection = if entry == self.entry {
+                                        widgets::Highlight::Live
+                                    } else {
+                                        widgets::Highlight::None
+                                    };
+                                    let row = widgets::list_row(name)
+                                        .selection(selection)
+                                        .width(t.size.host_list)
+                                        .show(ui);
+                                    if entry == self.entry {
+                                        self.list_focus = Some(row.response.id);
+                                    }
+                                    if entry == self.entry && self.focus_row {
+                                        row.response.scroll_to_me(None);
+                                        row.response.request_focus();
+                                        self.focus_row = false;
+                                    }
+                                    if row.response.clicked() {
+                                        picked = Some(entry);
+                                    }
+                                }
+                            })
+                        });
                 });
                 ui.add_space(t.space.section);
                 ui.vertical(|ui| {
@@ -382,6 +440,14 @@ impl HostDialog {
                             clicked = Some(Clicked::Delete);
                         }
                     });
+                    if conflict {
+                        if ui.add(widgets::button("Keep my changes")).clicked() {
+                            clicked = Some(Clicked::Overwrite);
+                        }
+                        if ui.add(widgets::button("Use saved Hosts")).clicked() {
+                            clicked = Some(Clicked::Reload);
+                        }
+                    }
                     if widgets::retry_save(ui, save_error) {
                         clicked = Some(Clicked::Retry);
                     }
@@ -394,13 +460,17 @@ impl HostDialog {
         // The click that opened the dialog is not a click on its backdrop.
         let first = !std::mem::replace(&mut self.shown_before, true);
         let shown = shown?;
-        if let Some(entry) = picked {
-            self.pick(entry, hosts);
+        if let Some(entry) = picked
+            && !(open_selected && entry == self.entry)
+        {
+            self.switch(entry, hosts);
             return None;
         }
-        let enter = ctx.input(|i| i.key_pressed(Key::Enter));
+        let enter = open_selected || ctx.input(|i| i.key_pressed(Key::Enter));
         match clicked {
             Some(Clicked::Open) => return Some(HostAction::Open(Box::new(self.request(hosts)))),
+            Some(Clicked::Reload) => return Some(HostAction::Reload),
+            Some(Clicked::Overwrite) => return Some(HostAction::Overwrite),
             Some(Clicked::Retry) => return Some(HostAction::Changed),
             Some(Clicked::Save) => {
                 if self.fields.id.is_empty() {
@@ -421,6 +491,15 @@ impl HostDialog {
             }
             Some(Clicked::Delete) => {
                 if let Entry::Saved(i) = self.entry {
+                    let drafts = std::mem::take(&mut self.drafts);
+                    for (entry, fields) in drafts {
+                        let key = match entry {
+                            Entry::Saved(j) if j == i => continue,
+                            Entry::Saved(j) if j > i => Entry::Saved(j - 1),
+                            _ => entry,
+                        };
+                        self.drafts.insert(key, fields);
+                    }
                     let old = hosts.remove(i);
                     self.forget(&old, None);
                     let next = match hosts.len() {
@@ -450,7 +529,6 @@ impl HostDialog {
         let matched = self.config.lookup(&self.fields.address);
         let f = &mut self.fields;
         let pasted = &mut self.pasted;
-        let first = !self.shown_before;
         let entry = self.entry;
         let message = |ui: &mut egui::Ui, text: &str| {
             ui.label("");
@@ -477,9 +555,7 @@ impl HostDialog {
                     let address = ui
                         .add(widgets::text_field(&mut f.address).id(id.with("address")))
                         .accessible_name("Address");
-                    if first {
-                        address.request_focus();
-                    }
+
                     if address.changed() {
                         pasted.clear();
                     }
@@ -588,6 +664,8 @@ impl HostDialog {
 
 /// A button of the Host dialog that was clicked.
 enum Clicked {
+    Reload,
+    Overwrite,
     Retry,
     Open,
     Save,
@@ -647,6 +725,21 @@ impl Pending {
             first: Some(first),
             ..Pending::new(id, details, opening)
         }
+    }
+
+    pub(crate) fn progress(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.is_modal() {
+            return false;
+        }
+        ui.push_id(self.id, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(widgets::spinner());
+                ui.label(format!("{} · {}", self.details.label, self.opening.stage()));
+                ui.add(widgets::button("Cancel")).clicked()
+            })
+            .inner
+        })
+        .inner
     }
 
     /// Whether it is showing a dialog, which takes the input from the window.

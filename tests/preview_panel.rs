@@ -163,6 +163,7 @@ fn a_focused_file_shows_its_details_and_then_its_text() {
     assert!(detail(&harness, "Kind", "Directory"));
 }
 
+#[cfg(unix)]
 #[test]
 fn source_shows_with_numbered_lines_and_an_unknown_binary_file_says_so() {
     let fixture = Fixture::start();
@@ -258,6 +259,7 @@ fn an_archive_lists_its_members_and_one_over_the_cap_says_it_is_too_large() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_that_cannot_be_read_shows_one_line() {
     use std::os::unix::fs::PermissionsExt as _;

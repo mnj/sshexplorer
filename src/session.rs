@@ -58,6 +58,7 @@ use crate::theme::TokensExt as _;
 use crate::tree::{self, Line, Tree};
 use crate::widgets::{self, RowLook, Tooltip as _};
 
+mod navigation;
 mod reconnecting;
 mod searching;
 
@@ -187,6 +188,7 @@ pub struct Session {
     /// The operator's time zone, for the Modified column.
     zone: jiff::tz::TimeZone,
     /// What the search field holds.
+    navigation: navigation::Navigation,
     search_text: String,
     /// The Search's Matches, shown in place of the listing, and the Search while it runs.
     search: Option<Searching>,
@@ -240,6 +242,7 @@ impl Session {
             refetch: Vec::new(),
             connection: opened.session,
             zone: jiff::tz::TimeZone::system(),
+            navigation: Default::default(),
             search_text: String::new(),
             search: None,
             focus_search: false,
@@ -409,6 +412,9 @@ impl Session {
         if view == self.view {
             return;
         }
+        self.retire_folder_refresh();
+        self.cancel_navigation();
+        self.listing = None;
         self.view = view;
         self.focus_listing = true;
         self.reveal = true;
@@ -452,8 +458,8 @@ impl Session {
         let area = ui.available_rect_before_wrap();
         let keys = frame.keys;
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            if strip {
-                download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel);
+            if strip && download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel) {
+                self.downloads.retry_failed(&self.connection);
             }
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 let attempts = frame.settings.connections.reconnect_attempts;
@@ -486,6 +492,8 @@ impl Session {
     /// The listing in the Session's view.
     fn listing_view(&mut self, ui: &mut egui::Ui, frame: Frame<'_>) {
         self.receive();
+        self.receive_navigation();
+        self.remember_place();
         self.receive_search();
         self.auto_refresh(ui, frame.settings);
         let show_hidden = frame.settings.browsing.show_hidden;
@@ -694,14 +702,16 @@ impl Session {
             let matches = &searching.matches;
             let m = matches.get(matches.focus()?);
             let name = matches::name(&m.path).to_owned();
-            return Some(Focused {
-                path: matches.absolute(m),
+            let path = matches.absolute(m);
+            let entry = self.tree.entry_of(&path).cloned().unwrap_or_else(|| Entry {
                 name: name.clone(),
-                entry: Some(Entry {
-                    name,
-                    is_dir: m.is_dir,
-                    ..Entry::default()
-                }),
+                is_dir: m.is_dir,
+                ..Entry::default()
+            });
+            return Some(Focused {
+                path,
+                name,
+                entry: Some(entry),
             });
         }
         if self.view == View::Tree {
@@ -877,6 +887,7 @@ impl Session {
     }
 
     fn apply(&mut self, command: Command, now: f64) {
+        self.cancel_navigation();
         if let Some(searching) = &mut self.search {
             if let matches::Effect::Open(m) = searching.matches.apply(command) {
                 let path = searching.matches.absolute(&m);
@@ -901,6 +912,7 @@ impl Session {
         match effect {
             Effect::None => {}
             Effect::List { path, focus } => {
+                self.retire_folder_refresh();
                 self.listing = Some(FolderListing::start(&self.connection, path, focus));
             }
             Effect::Preview => self.focus_preview = true,
@@ -917,6 +929,7 @@ impl Session {
     /// Lists `path` in Folder view, from the kept listing when there is one, and focuses
     /// `focus` in it.
     fn list(&mut self, path: String, focus: Option<String>) {
+        self.retire_folder_refresh();
         match self.tree.listing(&path) {
             Some(listing) => {
                 let listing = listing.clone();
@@ -953,6 +966,12 @@ impl Session {
         } else if ready && let Some(wait) = self.timer.wait(now, every) {
             ui.ctx()
                 .request_repaint_after(Duration::from_secs_f64(wait.max(0.01)));
+        }
+    }
+
+    fn retire_folder_refresh(&mut self) {
+        if let Some(FolderRefresh { path, request, .. }) = self.folder_refresh.take() {
+            self.refreshes.push(Fetch { path, request });
         }
     }
 

@@ -280,6 +280,7 @@ fn a_new_session_focuses_the_listing_and_the_keys_browse_it() {
     assert_eq!(selected_rows(&harness), ["photos"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlinked_directory_is_marked_with_its_target_and_entered() {
     let fixture = Fixture::start();
@@ -355,6 +356,7 @@ fn a_session_opens_in_tree_view_on_its_initial_remote_folder() {
     assert!(selected_rows(&harness).is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_directory_that_cannot_be_read_shows_the_reason_as_its_child() {
     use std::os::unix::fs::PermissionsExt as _;

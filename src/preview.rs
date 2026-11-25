@@ -80,6 +80,7 @@ pub struct Shown {
     since: f64,
     /// The fetch asked for, whose answer is awaited.
     fetch: Option<u64>,
+    cap: u64,
     /// Whether the fetch has been handed out.
     started: bool,
     /// The load was cut short, or never started, by a dropped connection.
@@ -327,6 +328,7 @@ impl Preview {
             body,
             since: now,
             fetch: None,
+            cap: 0,
             started: false,
             lost: false,
             prepared: None,
@@ -342,7 +344,8 @@ impl Preview {
         self.shown.as_mut()
     }
 
-    /// The fetch to start, once focus has rested long enough: at most `cap` bytes. It is
+    /// The fetch to start, once focus has rested long enough. An unknown size needs one
+    /// lookahead byte to detect truncation. The request is
     /// handed out once.
     pub fn due(&mut self, now: f64, cap: u64) -> Option<Fetch> {
         let shown = self.shown.as_mut()?;
@@ -365,10 +368,11 @@ impl Preview {
         self.next_id += 1;
         shown.started = true;
         shown.fetch = Some(self.next_id);
+        shown.cap = cap;
         Some(Fetch {
             id: self.next_id,
             path: shown.focused.path.clone(),
-            len: size.map_or(cap, |s| s.min(cap)),
+            len: size.map_or(cap.saturating_add(1), |s| s.min(cap)),
         })
     }
 
@@ -442,7 +446,7 @@ impl Preview {
             return;
         }
         shown.fetch = None;
-        let bytes = match answer {
+        let mut bytes = match answer {
             Ok(bytes) => bytes,
             Err(e) => {
                 shown.body = Body::Failed(failure_line(&e));
@@ -454,7 +458,17 @@ impl Preview {
         }
         let total = shown.focused.entry.as_ref().and_then(|e| e.size);
         let fetched_len = bytes.len() as u64;
-        let capped = total.is_some_and(|t| t > fetched_len);
+        let capped = total.is_some_and(|t| t > fetched_len) || fetched_len > shown.cap;
+        if fetched_len > shown.cap {
+            bytes.truncate(shown.cap as usize);
+        }
+        if total.is_none() && capped && whole(shown.kind) {
+            shown.body = Body::TooLarge(format!(
+                "Too large to preview (over {})",
+                short_size(shown.cap)
+            ));
+            return;
+        }
         if let Some(total) = total.filter(|_| capped && whole(shown.kind)) {
             shown.body = Body::TooLarge(too_large(total));
             return;

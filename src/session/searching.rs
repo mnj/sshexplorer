@@ -51,12 +51,15 @@ impl Session {
                 ui.memory_mut(|m| m.surrender_focus(id));
             }
         }
+        let width =
+            (ui.available_width() - if self.is_searching() { 80. } else { 0. }).clamp(48., 238.);
         let field = ui
             .add_enabled(
                 !self.is_disconnected(),
                 widgets::text_field(&mut self.search_text)
                     .id(id)
                     .search()
+                    .width(width)
                     .hint("Search names"),
             )
             .accessible_name("Search");
@@ -160,6 +163,7 @@ impl Session {
     /// becomes the Current directory and a file is focused in its parent, which is
     /// fetched first when its kept listing does not list it.
     pub(super) fn open_match(&mut self, path: String, is_dir: bool) {
+        self.retire_folder_refresh();
         self.search = None;
         self.focus_listing = true;
         self.reveal = true;

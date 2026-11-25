@@ -137,15 +137,35 @@ pub fn pattern(text: &str) -> String {
 /// It holds no single quote or backslash, so it survives any login shell's quoting.
 const SCRIPT: &str = "n=$#; while [ \"$n\" -gt 0 ]; do a=$(printf \"$1.\"); \
 set -- \"$@\" \"${a%.}\"; shift; n=$((n-1)); done; echo $$; \
-cd \"$1\" 2>/dev/null || exit 3; shift; LC_ALL=C; export LC_ALL; exec find . \"$@\"";
+cd \"$1\" 2>/dev/null || exit 3; LC_ALL=C; export LC_ALL;";
 
-/// The exit status [`SCRIPT`] gives when it cannot enter the start directory.
+/// The exit status the script gives when it cannot enter the start directory.
 const NO_START: u32 = 3;
 
-/// The command line that runs `find` in `dir` with `args`.
-fn command(dir: &str, args: &[String]) -> String {
-    let mut line = format!("exec sh -c '{SCRIPT}' sh");
-    for arg in std::iter::once(dir).chain(args.iter().map(String::as_str)) {
+/// Choose an unbuffered native printer when available. Each arm refers to numbered
+/// shell arguments: host paths and patterns only ever appear in the encoded argument list.
+fn command(dir: &str, fast: &[String], portable: &[String]) -> String {
+    let mut args = vec![dir];
+    let mut line =
+        format!("exec sh -c '{SCRIPT} if stdbuf -o0 find . -prune -printf \"\" >/dev/null 2>&1; ");
+    for (prefix, expression) in [
+        ("then exec stdbuf -o0 find .", fast),
+        ("; else exec find .", portable),
+    ] {
+        line.push_str(prefix);
+        for token in expression {
+            let index = match args.iter().position(|&a| a == token) {
+                Some(i) => i + 1,
+                None => {
+                    args.push(token);
+                    args.len()
+                }
+            };
+            line.push_str(&format!(" \"${{{index}}}\""));
+        }
+    }
+    line.push_str("; fi' sh");
+    for arg in args {
         line.push_str(" '");
         line.push_str(&escape(arg));
         line.push('\'');
@@ -171,10 +191,14 @@ fn escape(text: &str) -> String {
 /// matching name prints its kind and path (`D` for a symlink to a directory), and when
 /// following, every symlink to a directory is printed too, `L` when its name matches and
 /// `l` when not.
-fn expression(pattern: &str, follow: bool, prunes: &[String]) -> Vec<String> {
-    fn print(kind: &str) -> [&str; 5] {
-        ["-exec", "printf", kind, "{}", ";"]
-    }
+fn expression(pattern: &str, follow: bool, prunes: &[String], native: bool) -> Vec<String> {
+    let print = |kind: &'static str, native_format: &'static str| {
+        if native {
+            vec!["-printf", native_format]
+        } else {
+            vec!["-exec", "printf", kind, "{}", ";"]
+        }
+    };
     let is_dir_link = ["-type", "l", "-exec", "test", "-d", "{}", ";"];
     let mut args: Vec<&str> = Vec::new();
     if !prunes.is_empty() {
@@ -190,18 +214,18 @@ fn expression(pattern: &str, follow: bool, prunes: &[String]) -> Vec<String> {
     if follow {
         args.extend(is_dir_link);
         args.extend(["(", "-iname", pattern]);
-        args.extend(print("L%s\\0"));
+        args.extend(print("L%s\\0", "L%p\\0"));
         args.push("-o");
-        args.extend(print("l%s\\0"));
+        args.extend(print("l%s\\0", "l%p\\0"));
         args.extend([")", "-o"]);
     }
     args.extend(["-iname", pattern, "(", "-type", "d"]);
-    args.extend(print("d%s\\0"));
+    args.extend(print("d%s\\0", "d%p\\0"));
     args.push("-o");
     args.extend(is_dir_link);
-    args.extend(print("D%s\\0"));
+    args.extend(print("D%s\\0", "D%p\\0"));
     args.push("-o");
-    args.extend(print("f%s\\0"));
+    args.extend(print("f%s\\0", "f%p\\0"));
     args.push(")");
     args.into_iter().map(str::to_owned).collect()
 }
@@ -292,8 +316,9 @@ async fn search(
             .filter_map(|v| below(&root.dir, v))
             .map(|rel| literal(&format!("./{rel}")))
             .collect();
-        let args = expression(&pattern, query.follow, &prunes);
-        let exec = match remote.exec(&command(&root.dir, &args)).await {
+        let fast = expression(&pattern, query.follow, &prunes, true);
+        let portable = expression(&pattern, query.follow, &prunes, false);
+        let exec = match remote.exec(&command(&root.dir, &fast, &portable)).await {
             Ok(exec) => exec,
             Err(_) if first => {
                 *suspect = true;

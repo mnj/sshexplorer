@@ -240,6 +240,10 @@ impl Drop for Download {
 
 /// Starts `job` on `session`'s connection.
 pub fn start(session: &ssh::Session, job: Job) -> Download {
+    start_entries(session, job, Vec::new())
+}
+
+fn start_entries(session: &ssh::Session, job: Job, paths: Vec<String>) -> Download {
     let (sender, events) = mpsc::channel();
     let progress = Arc::new(Mutex::new(Progress::new()));
     let cancel = Arc::new(AtomicBool::new(false));
@@ -252,6 +256,7 @@ pub fn start(session: &ssh::Session, job: Job) -> Download {
         sender,
         wake: session.waker(),
         woken: Instant::now(),
+        paths,
         policy: None,
         summary: Summary {
             copied: 0,
@@ -329,6 +334,8 @@ enum Transfer<'a> {
 
 /// The task's state.
 struct Run {
+    /// For a retry, copy only these failed paths, traversing their ancestors.
+    paths: Vec<String>,
     remote: Remote,
     /// New connections, after drops.
     resumed: tokio::sync::mpsc::UnboundedReceiver<Remote>,
@@ -493,6 +500,14 @@ impl Run {
             if self.cancelled() {
                 break;
             }
+            if !self.paths.is_empty() {
+                let path = rel.join("/");
+                if !self.paths.iter().any(|failed| {
+                    path == *failed || descendant(failed, &path) || descendant(&path, failed)
+                }) {
+                    continue;
+                }
+            }
             if !local::valid_name(&entry.name) {
                 self.fail(&rel, "Invalid local filename");
                 continue;
@@ -540,6 +555,20 @@ impl Run {
                 }
                 Ok(listing) => {
                     items.push(Item::Dir { rel: rel.clone() });
+                    let dir = rel.join("/");
+                    for path in &self.paths {
+                        if let Some(rest) =
+                            path.strip_prefix(&dir).and_then(|s| s.strip_prefix('/'))
+                        {
+                            let child = rest.split('/').next().unwrap_or(rest);
+                            if !listing.entries.iter().any(|e| e.name == child) {
+                                self.summary.failed.push(Note {
+                                    path: path.clone(),
+                                    reason: "No such file".into(),
+                                });
+                            }
+                        }
+                    }
                     let mut entries = listing.entries;
                     entries.sort_by(|a, b| b.name.cmp(&a.name));
                     for child in entries {
@@ -635,7 +664,10 @@ impl Run {
         shown.push(name.clone());
         self.update(true, |p| p.current = Some(shown.join("/")));
         let (mut temp, written) = loop {
-            match self.fetch(remote, dir, &shown, entry, job.options).await? {
+            match self
+                .fetch(remote, dir, rel, &name, entry, job.options)
+                .await?
+            {
                 Transfer::Complete(temp, written) => break (temp, written),
                 Transfer::Failed => return Ok(()),
                 Transfer::Lost if self.reconnect().await => {}
@@ -653,7 +685,7 @@ impl Run {
                     return Ok(());
                 }
                 Err(e) if !overwrite && e.kind() == io::ErrorKind::AlreadyExists => {
-                    match self.target(dir, &parent_path, &shown, name).await {
+                    match self.target(dir, &parent_path, rel, name).await {
                         Ok(Some(target)) => {
                             (name, overwrite) = target;
                             *shown.last_mut().unwrap() = name.clone();
@@ -674,7 +706,8 @@ impl Run {
         &mut self,
         remote: &str,
         dir: &'a Dir,
-        shown: &[String],
+        source: &[String],
+        name: &str,
         entry: &Entry,
         options: Options,
     ) -> Result<Transfer<'a>, Halt> {
@@ -682,11 +715,10 @@ impl Run {
             Ok(file) => file,
             Err(_) if self.remote.closed().await => return Ok(Transfer::Lost),
             Err(reason) => {
-                self.fail(shown, reason);
+                self.fail(source, reason);
                 return Ok(Transfer::Failed);
             }
         };
-        let name = shown.last().unwrap();
         let local_error = |e: io::Error| Halt::Local(format!("Cannot write {name}: {e}"));
         let (temp, file_out) = local::Partial::create(dir).map_err(local_error)?;
         let mut out = tokio::fs::File::from_std(file_out);
@@ -705,7 +737,7 @@ impl Run {
                     break Ok(false);
                 }
                 Err(e) => {
-                    self.fail(shown, e.to_string());
+                    self.fail(source, e.to_string());
                     break Ok(false);
                 }
             };
@@ -767,12 +799,24 @@ fn keep_metadata(out: &std::fs::File, entry: &Entry, options: Options) -> std::i
     Ok(())
 }
 
+fn descendant(path: &str, parent: &str) -> bool {
+    path.strip_prefix(parent)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+struct Report {
+    summary: Summary,
+    retry: Option<Job>,
+}
+
 /// A Session's Downloads: the one running, those waiting, in order, and how the last one
 /// ended. Call [`Queue::poll`] every frame, whether or not the Session is on screen.
 #[derive(Default)]
 pub struct Queue {
     running: Option<Download>,
-    waiting: VecDeque<Job>,
+    waiting: VecDeque<(Job, Vec<String>)>,
+    current_job: Option<Job>,
+    reports: VecDeque<Report>,
     /// The running Download's question, until it is answered.
     pub conflict: Option<Conflict>,
     /// The last Download's summary, until it is dismissed.
@@ -782,7 +826,7 @@ pub struct Queue {
 impl Queue {
     /// Adds `job`, starting it at once when nothing is running.
     pub fn push(&mut self, session: &ssh::Session, job: Job) {
-        self.waiting.push_back(job);
+        self.waiting.push_back((job, Vec::new()));
         self.poll(session);
     }
 
@@ -796,6 +840,14 @@ impl Queue {
                 Event::Finished(summary) => {
                     self.running = None;
                     self.conflict = None;
+                    let job = self.current_job.take();
+                    if !summary.is_clean() {
+                        let retry = job.filter(|_| !summary.failed.is_empty());
+                        self.reports.push_back(Report {
+                            summary: summary.clone(),
+                            retry,
+                        });
+                    }
                     self.finished = Some(summary);
                     ended = true;
                 }
@@ -804,11 +856,45 @@ impl Queue {
         // The next waits while the connection is lost.
         if self.running.is_none()
             && session.lost().is_none()
-            && let Some(job) = self.waiting.pop_front()
+            && let Some((job, paths)) = self.waiting.pop_front()
         {
-            self.running = Some(start(session, job));
+            self.current_job = Some(job.clone());
+            self.running = Some(start_entries(session, job, paths));
         }
         ended
+    }
+
+    pub fn summary(&self) -> Option<&Summary> {
+        self.reports
+            .front()
+            .map(|r| &r.summary)
+            .or(self.finished.as_ref())
+    }
+
+    pub fn can_retry(&self) -> bool {
+        self.reports.front().is_some_and(|r| r.retry.is_some())
+    }
+
+    pub fn retry_failed(&mut self, session: &ssh::Session) {
+        if let Some(report) = self.reports.front_mut()
+            && let Some(job) = report.retry.take()
+        {
+            let paths = report
+                .summary
+                .failed
+                .iter()
+                .map(|note| note.path.clone())
+                .collect();
+            self.waiting.push_back((job, paths));
+            self.poll(session);
+        }
+    }
+
+    pub fn dismiss(&mut self) {
+        self.reports.pop_front();
+        if self.finished.as_ref().is_some_and(|s| !s.is_clean()) {
+            self.finished = None;
+        }
     }
 
     /// Hands the running Download `session`'s new connection after a drop, and starts

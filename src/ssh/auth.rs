@@ -452,7 +452,7 @@ impl Login<'_> {
         }
         let (answer, reply) = oneshot::channel();
         self.out.send(ask(saved, answer));
-        match reply.await {
+        match self.out.answer(reply).await {
             Ok(Some(text)) => Ok(Secret {
                 text: Zeroizing::new(text),
                 saved: false,
@@ -671,7 +671,7 @@ impl Login<'_> {
             rejected,
             answer,
         }));
-        match reply.await {
+        match self.out.answer(reply).await {
             Ok(Some(answers)) => Ok(answers),
             _ => Err(Failure::Cancelled),
         }

@@ -30,12 +30,11 @@ use crate::hosts::AuthMethod;
 use crate::known_hosts::{self, Recorded, Verdict};
 
 mod auth;
+mod opening;
 
 pub use auth::{NO_AGENT, PassphrasePrompt, Question, QuestionsPrompt, default_agent};
 
-/// How long the TCP connect may take before the Session fails, unless the config's
-/// `ConnectTimeout` says otherwise. The handshake itself has no limit, so a trust prompt
-/// can wait for the operator.
+/// Default opening inactivity deadline. Time spent answering prompts is excluded.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often a keepalive goes out, unless the config's `ServerAliveInterval` says.
@@ -48,7 +47,7 @@ pub struct Options {
     pub known_hosts: PathBuf,
     /// The config's `UserKnownHostsFile`s, checked as well; Trust never writes to them.
     pub also_known_hosts: Vec<PathBuf>,
-    /// How long the TCP connect may take; `None` for 30 s.
+    /// Maximum network inactivity while opening, excluding prompts; `None` for 30 s.
     pub connect_timeout: Option<Duration>,
     /// How often a keepalive goes out; `None` for every 30 s, zero for never.
     pub keepalive: Option<Duration>,
@@ -184,31 +183,56 @@ impl Ssh {
             sender,
             wake: self.wake.clone(),
             watch: Arc::default(),
+            progress: Arc::default(),
         };
         let folder = folder.trim().to_owned();
-        self.runtime.spawn(open(
+        let progress = out.progress.clone();
+        let task = self.runtime.spawn(open(
             target,
             options,
             Some(folder),
             auth::Held::new(),
             Arc::new(out),
         ));
-        Opening { events }
+        Opening {
+            events,
+            task: Some(task),
+            progress,
+        }
     }
 }
 
 /// A Session being opened: its events, in order. The last is [`Event::Opened`] or
 /// [`Event::Failed`].
 pub struct Opening {
+    progress: Arc<Mutex<opening::Progress>>,
+    task: Option<tokio::task::JoinHandle<()>>,
     events: mpsc::Receiver<Event>,
 }
 
+impl Drop for Opening {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.progress.lock().unwrap().close();
+    }
+}
+
 impl Opening {
+    pub fn stage(&self) -> &'static str {
+        self.progress.lock().unwrap().stage
+    }
+
     /// A Session that fails before it connects: its one event is [`Event::Failed`].
     pub fn failed(failure: Failure) -> Opening {
         let (sender, events) = mpsc::channel();
         let _ = sender.send(Event::Failed(failure));
-        Opening { events }
+        Opening {
+            events,
+            task: None,
+            progress: Arc::default(),
+        }
     }
 
     /// The next event, if one has arrived. Never blocks.
@@ -499,9 +523,11 @@ impl Session {
             sender,
             wake: self.wake.clone(),
             watch: Arc::default(),
+            progress: Arc::default(),
         });
         let redial = self.redial.clone();
-        self.runtime.spawn(async move {
+        let progress = out.progress.clone();
+        let task = self.runtime.spawn(async move {
             open(
                 redial.target.clone(),
                 redial.options.clone(),
@@ -511,7 +537,11 @@ impl Session {
             )
             .await
         });
-        Opening { events }
+        Opening {
+            events,
+            task: Some(task),
+            progress,
+        }
     }
 
     /// The connection's SFTP side, for work that runs on the SSH runtime, such as a
@@ -554,6 +584,36 @@ impl Session {
         Request {
             answer,
             task: Some(task.abort_handle()),
+        }
+    }
+
+    /// Resolves an entered path on the host. A file opens its parent with the file focused.
+    pub(crate) fn locate(&self, path: String) -> Request<(Listing, Option<String>)> {
+        let (sender, answer) = mpsc::channel();
+        let sftp = self.sftp.clone();
+        let wake = self.wake.clone();
+        self.runtime.spawn(async move {
+            let result = async {
+                let path = sftp.canonicalize(path).await?;
+                let attrs = sftp.metadata(&path).await?;
+                let (dir, focus) = if attrs.is_dir() {
+                    (path, None)
+                } else if let Some((dir, name)) = crate::folder::parent(&path) {
+                    (dir, Some(name))
+                } else {
+                    (path, None)
+                };
+                list(&sftp, dir).await.map(|listing| (listing, focus))
+            }
+            .await
+            .map_err(|e| reason(&e));
+            let _ = sender.send(result);
+            wake();
+        });
+        Request {
+            answer,
+            // A list already in progress must close its remote directory handle.
+            task: None,
         }
     }
 
@@ -798,6 +858,7 @@ impl Drop for Session {
 
 /// The sending end of an Opening.
 struct Events {
+    progress: Arc<Mutex<opening::Progress>>,
     sender: mpsc::Sender<Event>,
     wake: Wake,
     /// Why the connection being opened dropped, once open.
@@ -818,13 +879,20 @@ async fn open(
     held: auth::Held,
     out: Arc<Events>,
 ) {
-    let failure = match connect(&target, options, folder.as_deref(), &held, &out).await {
+    let limit = options.connect_timeout.unwrap_or(CONNECT_TIMEOUT);
+    let result = tokio::select! {
+        result = connect(&target, options, folder.as_deref(), &held, &out) => result,
+        failure = out.timeout(limit) => Err(failure),
+    };
+    let failure = match result {
         Ok(opened) => {
+            out.progress.lock().unwrap().socket.take();
             out.send(Event::Opened(opened));
             return;
         }
         Err(failure) => failure,
     };
+    out.progress.lock().unwrap().close();
     out.send(Event::Failed(failure));
 }
 
@@ -838,12 +906,15 @@ async fn connect(
     out: &Arc<Events>,
 ) -> Result<Opened, Failure> {
     let mut handle = dial(target, &options, out).await?;
+    out.stage("Authenticating");
     let logged_in = auth::authenticate(&mut handle, target, &options, held, out).await?;
     let kept = logged_in.kept;
 
+    out.stage("Starting SFTP");
     let sftp = start_sftp(&handle)
         .await
         .map_err(|e| Failure::Sftp(format!("The SFTP subsystem did not start: {e}")))?;
+    out.stage("Opening folder");
     let home = match folder {
         Some(folder) => list_folder(&sftp, folder).await.map_err(|e| {
             let folder = if folder.is_empty() {
@@ -951,6 +1022,10 @@ async fn dial(
         Ok(Err(e)) => return Err(Failure::Connection(e.to_string())),
         Err(_) => return Err(Failure::Connection("timed out".into())),
     };
+    out.stage("Negotiating SSH");
+    let stream = out
+        .opening_stream(stream)
+        .map_err(|e| Failure::Connection(e.to_string()))?;
     match client::connect_stream(Arc::new(config), stream, check).await {
         Ok(handle) => Ok(handle),
         Err(e) => {
@@ -1162,7 +1237,7 @@ impl client::Handler for HostCheck {
                     fingerprint: known_hosts::fingerprint(key),
                     answer,
                 }));
-                if reply.await != Ok(true) {
+                if self.out.answer(reply).await != Ok(true) {
                     return self.refuse(Failure::Cancelled);
                 }
                 match known_hosts::append(&self.known_hosts, &self.address, self.port, key) {

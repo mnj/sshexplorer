@@ -1,0 +1,80 @@
+name: Desktop smoke tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav libxkbcommon-dev xvfb xdotool
+      - if: runner.os == 'macOS'
+        run: brew install gstreamer pkgconf
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = 'gstreamer-1.0-msvc-x86_64-1.28.9.exe'
+          $installer = Join-Path $env:RUNNER_TEMP $name
+          Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/1.28.9/msvc/$name" -OutFile $installer
+          if ((Get-FileHash $installer).Hash -ne 'ce4008705e8c6fe92803535b82fb3d6551e183f438e6ef26682ac4d0aca61076') { throw 'Installer checksum mismatch' }
+          $root = 'C:\gst'
+          $setup = Start-Process $installer -ArgumentList '/VERYSILENT','/NORESTART','/CURRENTUSER','/TYPE=devel',"/DIR=$root" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "GStreamer setup failed with $($setup.ExitCode)" }
+          choco install pkgconfiglite -y
+          "$root\bin" >> $env:GITHUB_PATH
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
+      - run: rustup update stable --no-self-update
+      - run: cargo +stable build --locked --release
+      - name: Portable launch, storage, and media decoding
+        run: cargo +stable test --locked --release --test launch --test hosts --test media
+      - name: SSH and SFTP workflows
+        if: runner.os != 'Windows'
+        run: cargo +stable test --locked --release --test search --test download --test refresh_app
+      - name: Open the native Linux window
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a bash -ec '
+            target/release/sshexplorer &
+            app=$!
+            trap "kill $app" EXIT
+            timeout 45 xdotool search --sync --onlyvisible --pid "$app" --name "^sshexplorer$"
+          '
+      - name: Open the native macOS window
+        if: runner.os == 'macOS'
+        run: |
+          target/release/sshexplorer &
+          app=$!
+          trap 'kill "$app"' EXIT
+          swift - "$app" <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+          let owner = Int(CommandLine.arguments[1])!
+          for _ in 0..<90 {
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+              if windows.contains(where: { $0[kCGWindowOwnerPID as String] as? Int == owner && $0[kCGWindowLayer as String] as? Int == 0 }) { exit(0) }
+              Thread.sleep(forTimeInterval: 0.5)
+          }
+          exit(1)
+          SWIFT
+      - name: Open the native Windows window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $app = Start-Process target/release/sshexplorer.exe -PassThru
+          try {
+            for ($i = 0; $i -lt 90; $i++) {
+              $app.Refresh()
+              if ($app.HasExited) { throw "Exited with $($app.ExitCode)" }
+              if ($app.MainWindowTitle -eq 'sshexplorer') { return }
+              Start-Sleep -Milliseconds 500
+            }
+            throw 'Window did not open'
+          } finally { if (!$app.HasExited) { $app.Kill() } }

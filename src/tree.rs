@@ -139,6 +139,22 @@ impl Tree {
         self.reveal_path(&path)
     }
 
+    /// A path just confirmed by the server can be missing from a cached ancestor.
+    pub(crate) fn reveal_known(&mut self, dir: &str, name: Option<&str>) -> Vec<String> {
+        let mut fetch = self.reveal(dir, name);
+        let mut child = dir.to_owned();
+        while let Some((parent, name)) = parent(&child) {
+            if self
+                .listing(&parent)
+                .is_some_and(|listing| !listing.entries.iter().any(|e| e.name == name))
+            {
+                fetch.push(parent.clone());
+            }
+            child = parent;
+        }
+        fetch
+    }
+
     fn reveal_path(&mut self, path: &str) -> Vec<String> {
         let mut fetch = Vec::new();
         let mut ancestors = Vec::new();
@@ -298,7 +314,7 @@ impl Tree {
     }
 
     /// The entry at the absolute `path`, if its parent's listing is kept.
-    fn entry_of(&self, path: &str) -> Option<&Entry> {
+    pub(crate) fn entry_of(&self, path: &str) -> Option<&Entry> {
         let (up, name) = parent(path)?;
         match self.dirs.get(&up) {
             Some(Dir::Listed(listing)) => listing.entries.iter().find(|e| e.name == name),
@@ -372,6 +388,10 @@ impl Tree {
     pub fn focus(&self) -> Option<usize> {
         let focus = self.focus.as_deref()?;
         self.find(focus)
+    }
+
+    pub(crate) fn revealing(&self) -> bool {
+        self.pending.is_some()
     }
 
     pub fn focused_path(&self) -> Option<&str> {

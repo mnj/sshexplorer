@@ -74,6 +74,9 @@ pub enum Action {
     /// Tree view: collapses a directory, or moves to the parent.
     Collapse,
     /// Switches the active Session to Tree view.
+    GoToPath,
+    Back,
+    Forward,
     TreeView,
     /// Switches the active Session to Folder view.
     FolderView,
@@ -116,7 +119,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the binding editor's order within its area.
-    pub const ALL: [Action; 38] = [
+    pub const ALL: [Action; 41] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveFirst,
@@ -136,6 +139,9 @@ impl Action {
         Action::SelectAll,
         Action::ShowHidden,
         Action::Refresh,
+        Action::GoToPath,
+        Action::Back,
+        Action::Forward,
         Action::TreeView,
         Action::FolderView,
         Action::Sort,
@@ -180,6 +186,9 @@ impl Action {
             | Action::ParentFolder
             | Action::Expand
             | Action::Collapse
+            | Action::Back
+            | Action::Forward
+            | Action::GoToPath
             | Action::TreeView
             | Action::FolderView
             | Action::ExtendUp
@@ -215,6 +224,9 @@ impl Action {
             Action::ParentFolder => "Parent (Folder view)",
             Action::Expand => "Tree: expand / first child",
             Action::Collapse => "Tree: collapse / parent",
+            Action::Back => "Back",
+            Action::Forward => "Forward",
+            Action::GoToPath => "Go to path",
             Action::TreeView => "Tree view",
             Action::FolderView => "Folder view",
             Action::ExtendUp => "Extend Selection up",
@@ -262,6 +274,9 @@ impl Action {
             Action::ParentFolder => Binding::new(Modifiers::ALT, Key::ArrowUp),
             Action::Expand => Binding::new(none, Key::ArrowRight),
             Action::Collapse => Binding::new(none, Key::ArrowLeft),
+            Action::Back => Binding::new(Modifiers::ALT, Key::ArrowLeft),
+            Action::Forward => Binding::new(Modifiers::ALT, Key::ArrowRight),
+            Action::GoToPath => Binding::new(cmd, Key::L),
             Action::TreeView => Binding::new(cmd, Key::Num1),
             Action::FolderView => Binding::new(cmd, Key::Num2),
             Action::ExtendUp => Binding::new(shift, Key::ArrowUp),

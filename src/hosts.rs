@@ -1,7 +1,7 @@
 //! Hosts: what the operator saves to open Sessions from, kept in `hosts.toml` beside the
 //! app settings; and the rules of the Host dialog's Address and Port fields.
 
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -151,28 +151,115 @@ impl HostStore {
 
     /// The saved Hosts; none when the file is missing or is not TOML.
     pub fn load(&self) -> Vec<Host> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return Vec::new();
+        self.read().unwrap_or_default()
+    }
+
+    fn read(&self) -> io::Result<Vec<Host>> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
         };
         let Ok(file) = toml::from_str::<toml::Table>(&text) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let Some(toml::Value::Array(hosts)) = file.get("host") else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        hosts
+        Ok(hosts
             .iter()
             .filter_map(toml::Value::as_table)
             .map(Host::from_table)
-            .collect()
+            .collect())
     }
 
     /// Writes `hosts` to the file, creating its directory. A file there that is not TOML
     /// is first moved aside to `<name>.bad`.
     pub fn save(&self, hosts: &[Host]) -> io::Result<()> {
+        let _lock = self.lock()?;
+        self.write(hosts)
+    }
+
+    fn lock(&self) -> io::Result<std::fs::File> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let lock = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.path.with_extension("toml.lock"))?;
+        lock.try_lock().map_err(io::Error::from)?;
+        Ok(lock)
+    }
+
+    /// Assign stable IDs to legacy hosts under the same lock used for editing.
+    pub fn load_identified(&self) -> io::Result<Vec<Host>> {
+        let hosts = self.read()?;
+        if hosts.iter().all(|h| !h.id.is_empty()) {
+            return Ok(hosts);
+        }
+        let _lock = self.lock()?;
+        let mut hosts = self.read()?;
+        for host in hosts.iter_mut().filter(|h| h.id.is_empty()) {
+            host.id = new_id();
+        }
+        self.write(&hosts)?;
+        Ok(hosts)
+    }
+
+    /// Apply only local edits. An overlapping edit requires an explicit choice.
+    pub fn merge(&self, base: &[Host], edited: &[Host], overwrite: bool) -> io::Result<Vec<Host>> {
+        if base.iter().any(|h| h.id.is_empty()) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Reload saved Hosts to finish assigning IDs to older entries",
+            ));
+        }
+        let _lock = self.lock()?;
+        let mut disk = self.read()?;
+        let mut replaced = Vec::new();
+        let changes = base
+            .iter()
+            .map(|old| (Some(old), edited.iter().find(|h| h.id == old.id)))
+            .chain(
+                edited
+                    .iter()
+                    .filter(|new| !base.iter().any(|old| old.id == new.id))
+                    .map(|new| (None, Some(new))),
+            );
+        for (old, new) in changes {
+            if old == new {
+                continue;
+            }
+            let host = new.or(old).expect("a change has a host");
+            let at = disk.iter().position(|h| h.id == host.id);
+            let current = at.map(|i| &disk[i]);
+            if current == new {
+                continue;
+            }
+            if current != old && !overwrite {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} was changed in another window", host.address),
+                ));
+            }
+            replaced.extend(current.cloned());
+            match (at, new) {
+                (Some(i), Some(host)) => disk[i] = host.clone(),
+                (Some(i), None) => {
+                    disk.remove(i);
+                }
+                (None, Some(host)) => disk.push(host.clone()),
+                (None, None) => {}
+            }
+        }
+        self.write(&disk)?;
+        Ok(replaced)
+    }
+
+    fn write(&self, hosts: &[Host]) -> io::Result<()> {
         if let Ok(old) = std::fs::read_to_string(&self.path)
             && toml::from_str::<toml::Table>(&old).is_err()
         {
@@ -181,9 +268,15 @@ impl HostStore {
             std::fs::rename(&self.path, self.path.with_file_name(name))?;
         }
         let text = toml::to_string(&HostsFile { host: hosts }).map_err(io::Error::other)?;
-        let partial = self.path.with_extension("toml.partial");
-        std::fs::write(&partial, text)?;
-        std::fs::rename(&partial, &self.path)
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut partial = tempfile::NamedTempFile::new_in(parent)?;
+        partial.write_all(text.as_bytes())?;
+        partial.persist(&self.path)?;
+        Ok(())
     }
 }
 

@@ -406,3 +406,103 @@ fn a_host_save_can_be_retried_after_the_directory_becomes_writable() {
     assert!(h.query_by_role_and_label(Role::Button, "Retry").is_none());
     assert_eq!(hosts.load()[0].address, "build-host");
 }
+
+#[test]
+fn editing_address_keeps_the_draft_and_the_filtered_host_list_fits() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let hosts: Vec<_> = (0..40)
+        .map(|i| Host {
+            display_name: format!("Host {i}"),
+            ..fixture_host(&fixture, dir.path().into())
+        })
+        .collect();
+    let mut h = window_with_hosts(&dir, &fixture, &hosts, AppSettings::default());
+    h.set_size(egui::vec2(800., 600.)).run_ok();
+    ctrl_o(&mut h);
+    fill(&mut h, "Address", "unsaved.example");
+    h.key_press(Key::ArrowDown);
+    h.run_ok();
+    assert_eq!(field(&h, "Address"), "unsaved.example");
+    fill(&mut h, "Filter hosts", "Host 39");
+    let row = h.get_by_role_and_label(Role::ListItem, "Host 39");
+    assert!((0.0..600.0).contains(&row.rect().center().y));
+    row.click();
+    h.run_ok();
+    fill(&mut h, "Filter hosts", "Host 0");
+    h.get_by_role_and_label(Role::ListItem, "Host 0").click();
+    h.run_ok();
+    assert_eq!(field(&h, "Address"), "unsaved.example");
+}
+
+#[test]
+fn closing_a_background_tab_preserves_the_active_host_and_compact_search_is_visible() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let hosts: Vec<_> = ["Alpha", "Bravo", "Charlie"]
+        .into_iter()
+        .map(|name| Host {
+            display_name: name.into(),
+            ..fixture_host(&fixture, dir.path().into())
+        })
+        .collect();
+    let mut h = window_with_hosts(&dir, &fixture, &hosts, AppSettings::default());
+    for host in &hosts {
+        ctrl_o(&mut h);
+        h.get_by_role_and_label(Role::ListItem, &host.display_name)
+            .click();
+        h.run_ok();
+        press(&mut h, "Open Session");
+        enter_password(&mut h);
+        until(&mut h, "session tab", |h| {
+            tab_label_for(h, &host.display_name)
+        });
+    }
+    h.get_by_role_and_label(Role::Tab, "Bravo").click();
+    h.run_ok();
+    let tab = h.get_by_role_and_label(Role::Tab, "Alpha").rect();
+    let pos = egui::pos2(tab.right() - 19., tab.center().y);
+    h.hover_at(pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_ok();
+    assert!(!tab_label_for(&h, "Alpha"));
+    assert!(is_on(&h, Role::Tab, "Bravo"));
+    h.set_size(egui::vec2(640., 600.)).run_ok();
+    assert!(
+        h.get_by_role_and_label(Role::TextInput, "Search")
+            .rect()
+            .right()
+            <= 640.
+    );
+}
+
+#[test]
+fn an_opening_session_shows_the_target_and_can_be_cancelled_before_a_prompt() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let host = Host {
+        port: Some(listener.local_addr().unwrap().port()),
+        ..fixture_host(&fixture, dir.path().into())
+    };
+    let mut h = window_with_hosts(&dir, &fixture, &[host], AppSettings::default());
+    ctrl_o(&mut h);
+    press(&mut h, "Open Session");
+    let (_stream, _) = listener.accept().unwrap();
+    until(&mut h, "opening status", |h| {
+        h.query_by_label_contains("Fixture · Negotiating SSH")
+            .is_some()
+    });
+    press(&mut h, "Cancel");
+    assert!(h.query_by_role_and_label(Role::Button, "Cancel").is_none());
+    assert!(h.query_by_role(Role::Tab).is_none());
+}

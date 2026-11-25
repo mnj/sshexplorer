@@ -309,3 +309,28 @@ fn a_corrupt_archive_shows_one_failure_line_and_others_are_unsupported() {
     assert!(matches!(p.shown().unwrap().body, Body::Unsupported));
     assert_eq!(p.due(3.0, MIB), None);
 }
+
+#[test]
+fn unknown_sizes_check_one_extra_byte_and_never_display_a_partial_document_as_complete() {
+    for (name, data, truncated) in [
+        ("log.txt", &b"abcd"[..], false),
+        ("log.txt", &b"abcde"[..], true),
+        ("report.pdf", &b"abcde"[..], true),
+    ] {
+        let mut focus = file(name, 0, 1);
+        focus.entry.as_mut().unwrap().size = None;
+        let mut preview = Preview::default();
+        preview.focus(Some(focus), 0.);
+        let read = preview.due(1., 4).unwrap();
+        assert_eq!(read.len, 5);
+        preview.arrive(read.id, Ok(data.to_vec()), &Place::Memory);
+        match &preview.shown().unwrap().body {
+            Body::Text(text) => {
+                assert_eq!(text.text.as_ref(), "abcd");
+                assert_eq!(text.fetched.banner().is_some(), truncated);
+            }
+            Body::TooLarge(_) if name == "report.pdf" => {}
+            _ => panic!("unexpected preview"),
+        }
+    }
+}

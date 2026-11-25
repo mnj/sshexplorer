@@ -48,3 +48,7 @@ GStreamer is LGPL-2.1+. sshexplorer links it dynamically. A bundle must ship it 
 
 - **Linux:** a Secret Service provider (GNOME Keyring or KWallet) for Remember, and the usual X11/Wayland libraries eframe opens at run time.
 - **macOS and Windows:** nothing beyond GStreamer.
+
+### Desktop smoke tests
+
+The Desktop smoke tests workflow builds the release binary on Linux, macOS, and Windows, opens its native window, and checks that the bundled media fixtures decode. Its SSH search and download fixtures also run on Linux and macOS. To exercise the portable checks locally, run `cargo test --locked --test launch --test hosts --test media`.

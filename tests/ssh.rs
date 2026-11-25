@@ -321,6 +321,7 @@ fn opened(ssh: &Ssh, fixture: &Fixture) -> sshexplorer::ssh::Opened {
     opened
 }
 
+#[cfg(unix)]
 #[test]
 fn a_session_lists_a_directory_with_sizes_times_permissions_and_followed_links() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -455,4 +456,62 @@ fn owner_and_group_names_come_from_the_ls_style_line() {
         owner_and_group("-rw-r--r-- x alice staff 1 Jan 1 00:00 a"),
         None
     );
+}
+
+#[test]
+fn an_unresponsive_handshake_times_out_and_cancelling_an_opening_closes_the_socket() {
+    use std::io::Read as _;
+    use std::net::TcpListener;
+    let ssh = Ssh::new(|| {});
+    for cancel in [false, true] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let target = Target {
+            address: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            account: "tester".into(),
+        };
+        let mut options = sshexplorer::ssh::Options::new(std::path::PathBuf::new());
+        options.connect_timeout = Some(if cancel {
+            Duration::from_secs(20)
+        } else {
+            Duration::from_millis(250)
+        });
+        let opening = ssh.connect(target, options, "");
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut banner = [0u8; 4];
+        socket.read_exact(&mut banner).unwrap();
+        assert_eq!(&banner, b"SSH-");
+        if !cancel {
+            assert!(
+                matches!(opening.recv_timeout(Duration::from_secs(3)),Some(Event::Failed(Failure::Connection(e))) if e.contains("timed out"))
+            );
+        }
+        drop(opening);
+        let mut tail = Vec::new();
+        socket.read_to_end(&mut tail).unwrap();
+    }
+}
+
+#[test]
+fn waiting_for_the_operator_does_not_consume_the_opening_timeout() {
+    let fixture = Fixture::start();
+    let (_dir, path) = known_hosts("");
+    let mut options = Options::new(path);
+    options.connect_timeout = Some(Duration::from_millis(750));
+    let ssh = Ssh::new(|| {});
+    let opening = ssh.connect(target(&fixture), options, "");
+    let Event::TrustHostKey(trust) = next(&opening) else {
+        panic!("trust prompt");
+    };
+    std::thread::sleep(Duration::from_millis(900));
+    trust.trust();
+    let Event::Password(password) = next(&opening) else {
+        panic!("password prompt");
+    };
+    std::thread::sleep(Duration::from_millis(900));
+    password.enter(fixture::PASSWORD.into());
+    assert!(matches!(next(&opening), Event::Opened(_)));
 }

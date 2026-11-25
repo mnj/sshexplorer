@@ -127,6 +127,7 @@ pub struct Fixture {
     runtime: Option<tokio::runtime::Runtime>,
     /// How long each SFTP read waits before answering, in milliseconds.
     read_delay: Arc<AtomicU64>,
+    list_delay: Arc<AtomicU64>,
     attempts: Attempts,
     /// A second handle on each open connection's socket, shut by `drop_connections`.
     connections: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
@@ -142,6 +143,7 @@ pub struct Fixture {
 const EXEC_RUN: u8 = 0;
 const EXEC_REFUSE: u8 = 1;
 const EXEC_HOLD: u8 = 2;
+const EXEC_PORTABLE: u8 = 3;
 
 /// What clients tried, in order: "password", "keyboard-interactive", or "publickey "
 /// and the key's `SHA256:` fingerprint.
@@ -211,6 +213,8 @@ impl Fixture {
         let served = root.path().to_path_buf();
         let read_delay = Arc::new(AtomicU64::new(0));
         let delay = read_delay.clone();
+        let list_delay = Arc::new(AtomicU64::new(0));
+        let listing_delay = list_delay.clone();
         let attempts = Attempts::default();
         let tried = attempts.clone();
         let connections: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>> = Arc::default();
@@ -225,15 +229,24 @@ impl Fixture {
         );
         let exec = Arc::new(AtomicU8::new(EXEC_RUN));
         let bin = tempfile::tempdir().expect("fixture bin");
-        let find = find_on_path().expect("find is installed");
-        let wrapper = bin.path().join("find");
-        std::fs::write(
-            &wrapper,
-            format!("#!/bin/sh\n'{}' \"$@\"\nexec sleep 600\n", find.display()),
-        )
-        .unwrap();
+        #[cfg(unix)]
         {
+            let find = find_on_path().expect("find is installed");
+            let wrapper = bin.path().join("find");
             use std::os::unix::fs::PermissionsExt as _;
+            let script = format!(
+                r#"#!/bin/sh
+if [ "$SSHEX_TEST_FIND" = portable ]; then
+    [ "$2" != -prune ] || exit 1
+    exec '{find}' "$@"
+fi
+if [ "$2" = -prune ]; then exec '{find}' "$@"; fi
+'{find}' "$@"
+exec sleep 600
+"#,
+                find = find.display()
+            );
+            std::fs::write(&wrapper, script).unwrap();
             std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let execs = exec.clone();
@@ -248,6 +261,7 @@ impl Fixture {
                     root: served.clone(),
                     channels: Arc::default(),
                     read_delay: delay.clone(),
+                    list_delay: listing_delay.clone(),
                     accepts: accepts.clone(),
                     methods: offered.clone(),
                     attempts: tried.clone(),
@@ -284,6 +298,7 @@ impl Fixture {
             root,
             runtime: Some(runtime),
             read_delay,
+            list_delay,
             attempts,
             connections,
             stalled,
@@ -301,6 +316,10 @@ impl Fixture {
 
     /// Keeps each Search from now on running once `find` has printed everything, until
     /// the client kills it.
+    pub fn portable_search(&self) {
+        self.exec.store(EXEC_PORTABLE, Ordering::SeqCst);
+    }
+
     pub fn hold_search(&self) {
         self.exec.store(EXEC_HOLD, Ordering::SeqCst);
     }
@@ -332,6 +351,11 @@ impl Fixture {
 
     /// Makes every SFTP read from now on wait `delay` before it answers, so that a
     /// transfer stays in flight long enough to watch or cancel.
+    pub fn slow_listings(&self, delay: Duration) {
+        self.list_delay
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
+    }
+
     pub fn slow_reads(&self, delay: Duration) {
         self.read_delay
             .store(delay.as_millis() as u64, Ordering::SeqCst);
@@ -383,6 +407,7 @@ struct SshHandler {
     root: PathBuf,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     read_delay: Arc<AtomicU64>,
+    list_delay: Arc<AtomicU64>,
     accepts: Accepts,
     /// The methods offered, which every refusal offers again, as OpenSSH does.
     methods: MethodSet,
@@ -575,7 +600,10 @@ impl russh::server::Handler for SshHandler {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        if mode == EXEC_HOLD {
+        if matches!(mode, EXEC_HOLD | EXEC_PORTABLE) {
+            if mode == EXEC_PORTABLE {
+                child.env("SSHEX_TEST_FIND", "portable");
+            }
             let path = std::env::var("PATH").unwrap_or_default();
             child.env("PATH", format!("{}:{path}", self.bin.display()));
         }
@@ -599,6 +627,7 @@ impl russh::server::Handler for SshHandler {
                     files: HashMap::new(),
                     next: 0,
                     read_delay: self.read_delay.clone(),
+                    list_delay: self.list_delay.clone(),
                 };
                 russh_sftp::server::run(channel.into_stream(), sftp).await;
             }
@@ -710,6 +739,7 @@ struct SftpHandler {
     files: HashMap<String, std::fs::File>,
     next: u64,
     read_delay: Arc<AtomicU64>,
+    list_delay: Arc<AtomicU64>,
 }
 
 impl SftpHandler {
@@ -778,7 +808,14 @@ impl russh_sftp::server::Handler for SftpHandler {
             std::fs::canonicalize(self.local(&path)),
         ) && let Ok(inside) = target.strip_prefix(&root)
         {
-            real = format!("/{}", inside.to_string_lossy());
+            real = format!(
+                "/{}",
+                inside
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
         }
         Ok(Name {
             id,
@@ -811,6 +848,10 @@ impl russh_sftp::server::Handler for SftpHandler {
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+        let delay = self.list_delay.load(Ordering::SeqCst);
+        if delay != 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         let mut files = Vec::new();
         for entry in std::fs::read_dir(self.local(&path)).map_err(status)? {
             let entry = entry.map_err(status)?;

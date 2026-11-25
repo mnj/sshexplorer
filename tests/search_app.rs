@@ -2,6 +2,8 @@
 //! of the listing, moving into them, opening one, stopping and clearing, Refresh during
 //! and after a Search, a host that cannot search, and the Search settings page.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::path::PathBuf;

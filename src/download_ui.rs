@@ -34,7 +34,6 @@ impl Panel {
     /// A Download ended at `now`.
     pub fn ended(&mut self, now: f64) {
         self.finished_at = Some(now);
-        self.details = false;
     }
 }
 
@@ -68,7 +67,7 @@ pub fn has_strip(queue: &mut Queue, panel: &mut Panel, ctx: &Context, now: f64) 
     if queue.is_busy() {
         return true;
     }
-    let Some(summary) = &queue.finished else {
+    let Some(summary) = queue.summary() else {
         return false;
     };
     if summary.is_clean() {
@@ -85,7 +84,8 @@ pub fn has_strip(queue: &mut Queue, panel: &mut Panel, ctx: &Context, now: f64) 
 }
 
 /// The strip, in a row as wide as `ui`.
-pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) {
+pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) -> bool {
+    let mut retry = false;
     let t = ui.tokens();
     let mut cancel = false;
     let mut dismiss = false;
@@ -127,7 +127,14 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) {
                 muted(ui, format!("+{} queued", queue.queued()));
             }
             // Progress arrives off the frame thread, which wakes the frame for it.
-        } else if let Some(summary) = &queue.finished {
+        }
+    });
+    if let Some(summary) = queue
+        .summary()
+        .filter(|s| !s.is_clean() || !queue.is_busy())
+    {
+        widgets::status_bar(ui, |ui| {
+            let gap = |ui: &mut egui::Ui| ui.add_space(t.space.gap);
             ui.label(
                 t.ty.small
                     .rich(summary_text(summary))
@@ -138,26 +145,31 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) {
                 if ui.add(widgets::button("Details").flat()).clicked() {
                     panel.details = true;
                 }
+                if queue.can_retry() {
+                    gap(ui);
+                    retry = ui.add(widgets::button("Retry failed").flat()).clicked();
+                }
                 dismiss = ui
                     .add(widgets::button("Dismiss").flat())
                     .tooltip("Clear the strip")
                     .clicked();
             }
-        }
-    });
+        });
+    }
     if cancel {
         queue.cancel();
     }
     if dismiss {
-        queue.finished = None;
+        queue.dismiss();
         panel.finished_at = None;
         panel.details = false;
     }
+    retry
 }
 
 /// The Details window for the shown summary, when it is open.
 pub fn details(ctx: &Context, id: Id, queue: &Queue, panel: &mut Panel) {
-    let Some(summary) = queue.finished.as_ref().filter(|_| panel.details) else {
+    let Some(summary) = queue.summary().filter(|_| panel.details) else {
         panel.details = false;
         return;
     };

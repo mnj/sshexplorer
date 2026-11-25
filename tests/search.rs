@@ -2,6 +2,8 @@
 //! command under the local `sh` and `find`: what matches, the kinds, following symlinked
 //! directories, unreadable directories, the cap, stopping, and a host that cannot run it.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
@@ -297,4 +299,35 @@ fn the_pattern_is_a_substring_unless_it_holds_glob_characters() {
     assert_eq!(search::pattern("a[b]"), "*a\\[b\\]*");
     assert_eq!(search::pattern("a*b"), "a*b");
     assert_eq!(search::pattern("a?"), "a?");
+}
+
+#[test]
+fn native_and_portable_find_stream_identical_results_over_ssh() {
+    let s = Setup::new();
+    for i in 0..1000 {
+        s.file(&format!("{}/large/report-{i}", fixture::HOME));
+    }
+    let measure = || {
+        let start = std::time::Instant::now();
+        let mut query = s.query("report");
+        query.cap = 1001;
+        let search = search::start(&s.session, query);
+        let Some(Event::Found(mut found)) = search.recv_timeout(WAIT) else {
+            panic!("expected first results");
+        };
+        let first = start.elapsed();
+        let (rest, ended) = collect(&search);
+        found.extend(rest);
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(ended, FINISHED);
+        eprintln!(
+            "first result {first:?}, all 1,000 results {:?}",
+            start.elapsed()
+        );
+        found
+    };
+    let native = measure();
+    assert_eq!(native.len(), 1000);
+    s.fixture.portable_search();
+    assert_eq!(measure(), native);
 }
