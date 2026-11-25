@@ -1,4 +1,4 @@
-//! The Preview panel in the window, against the test server: the details header, text
+//! The Preview panel in the window, against the test server: file properties, text
 //! and source bodies, the size cap, failures, and moving the keyboard to and from it.
 
 mod common;
@@ -76,14 +76,10 @@ fn browsing(
         .get_by_role_and_label(Role::Button, "Connect")
         .click();
     harness.run_ok();
-    // A Session opens in Tree view, at the home directory, which Preview describes.
+    // A Session opens in Tree view, at the home directory.
     until(&mut harness, "the tree", |h| {
         h.query_by_role_and_label(Role::Row, "tester").is_some()
     });
-    until(&mut harness, "the home's details", |h| {
-        detail(h, "Name", "tester")
-    });
-    assert!(detail(&harness, "Kind", "Directory"));
     // The rest of these tests browse in Folder view.
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
     harness.run_ok();
@@ -98,12 +94,24 @@ fn click_row(harness: &mut Harness<'static, App>, name: &str) {
     harness.run_ok();
 }
 
+fn properties(h: &mut Harness<'static, App>, name: &str) {
+    h.get_by_role_and_label(Role::Row, name).click_secondary();
+    h.run_ok();
+    h.get_by_role_and_label(Role::Button, "Properties").click();
+    h.run_ok();
+}
+
+fn close_properties(h: &mut Harness<'static, App>) {
+    h.get_by_role_and_label(Role::Button, "Close").click();
+    h.run_ok();
+}
+
 fn press(harness: &mut Harness<'static, App>, key: egui::Key) {
     harness.key_press(key);
     harness.run_ok();
 }
 
-/// Whether the details header shows `value` beside `name`.
+/// Whether file properties shows `value` beside `name`.
 fn detail(harness: &Harness<'static, App>, name: &str, value: &str) -> bool {
     harness
         .query_by(|n| n.value().as_deref() == Some(value) && n.label().as_deref() == Some(name))
@@ -119,7 +127,7 @@ fn preview_focused(harness: &Harness<'static, App>) -> bool {
 }
 
 #[test]
-fn a_focused_file_shows_its_details_and_then_its_text() {
+fn the_preview_shows_contents_and_properties_describes_the_clicked_entry() {
     let fixture = Fixture::start();
     std::fs::write(
         fixture.root().join(HOME).join("todo.txt"),
@@ -132,7 +140,14 @@ fn a_focused_file_shows_its_details_and_then_its_text() {
     harness.get_by_role_and_label(Role::Row, "todo.txt").click();
     harness.step();
     harness.step();
-    // At once: the header, and the loading line until the bytes are fetched.
+    assert!(!detail(&harness, "Name", "todo.txt"));
+    assert!(has_label(&harness, "Loading preview…"));
+    until(&mut harness, "the text", |h| has_label(h, "second line"));
+    assert!(has_label(&harness, "first line"));
+    assert!(!has_label(&harness, "Loading preview…"));
+
+    properties(&mut harness, "todo.txt");
+    assert!(detail(&harness, "Path", "/home/tester/todo.txt"));
     assert!(detail(&harness, "Name", "todo.txt"));
     assert!(detail(&harness, "Kind", "Text"));
     assert!(detail(&harness, "Size", "23 B"));
@@ -144,21 +159,21 @@ fn a_focused_file_shows_its_details_and_then_its_text() {
         n.label().as_deref() == Some("Modified") && n.value().is_some_and(|v| !v.is_empty())
     };
     assert!(harness.query_by(modified).is_some());
-    assert!(has_label(&harness, "Loading preview…"));
-    until(&mut harness, "the text", |h| has_label(h, "second line"));
-    assert!(has_label(&harness, "first line"));
-    assert!(!has_label(&harness, "Loading preview…"));
+    close_properties(&mut harness);
 
-    // A directory shows the header only.
-    click_row(&mut harness, "docs");
+    properties(&mut harness, "docs");
     assert!(detail(&harness, "Kind", "Directory"));
+    assert!(has_label(&harness, "first line"));
+    close_properties(&mut harness);
+    // A directory has no preview body.
+    click_row(&mut harness, "docs");
     assert!(!has_label(&harness, "second line"));
     for _ in 0..30 {
         std::thread::sleep(Duration::from_millis(10));
         harness.step();
     }
     assert!(!has_label(&harness, "Loading preview…"));
-    click_row(&mut harness, "..");
+    properties(&mut harness, "..");
     assert!(detail(&harness, "Name", ".."));
     assert!(detail(&harness, "Kind", "Directory"));
 }
@@ -179,7 +194,7 @@ fn source_shows_with_numbered_lines_and_an_unknown_binary_file_says_so() {
     let mut harness = browsing(&fixture, &dir, AppSettings::default());
 
     click_row(&mut harness, "main.rs");
-    assert!(detail(&harness, "Kind", "Source"));
+
     until(&mut harness, "the source", |h| has_label(h, "fn main() {"));
     assert!(has_label(&harness, "    println!(\"hi\");"));
 
@@ -188,8 +203,7 @@ fn source_shows_with_numbered_lines_and_an_unknown_binary_file_says_so() {
         has_label(h, "No preview for this file type.")
     });
 
-    // A symlink names its target in the header.
-    click_row(&mut harness, "current");
+    properties(&mut harness, "current");
     assert!(detail(&harness, "Link to", "main.rs"));
 }
 
@@ -238,7 +252,7 @@ fn an_archive_lists_its_members_and_one_over_the_cap_says_it_is_too_large() {
     let mut harness = browsing(&fixture, &dir, settings);
 
     click_row(&mut harness, "bundle.zip");
-    assert!(detail(&harness, "Kind", "Archive"));
+
     until(&mut harness, "the listing", |h| {
         h.query_by_label_contains("docs/guide.txt").is_some()
     });
@@ -316,7 +330,13 @@ fn enter_moves_the_keyboard_to_preview_escape_returns_and_tab_cycles() {
     press(&mut harness, egui::Key::Escape);
     assert!(!preview_focused(&harness));
     press(&mut harness, egui::Key::ArrowUp);
-    assert!(!detail(&harness, "Name", "long.txt"));
+    assert_ne!(
+        harness
+            .get_by_role_and_label(Role::Row, "long.txt")
+            .accesskit_node()
+            .is_selected(),
+        Some(true)
+    );
 
     // Tab goes to the search field, then Preview, and on round to the listing;
     // Shift+Tab goes back.

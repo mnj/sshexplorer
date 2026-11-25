@@ -1,7 +1,7 @@
 //! Preview's model, apart from egui and the network: which kind a file is, when its fetch
 //! is due, and what the panel shows once the bytes arrive.
 //!
-//! The panel always shows the Focused entry's details header. Below it is the [`Body`]:
+//! The panel displays the [`Body`] of the Focused entry:
 //! nothing for a directory, "Loading preview…" until the bytes arrive, the text, one
 //! failure line, or [`UNSUPPORTED`]. The fetch is due once focus has rested [`DELAY`]
 //! seconds on a file; focusing another entry first means it never starts, and the caller
@@ -99,7 +99,7 @@ impl Shown {
     }
 }
 
-/// What shows under the details header.
+/// What Preview shows for the Focused entry.
 pub enum Body {
     /// Nothing: a directory, `.` or `..`.
     Header,

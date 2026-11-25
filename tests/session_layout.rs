@@ -46,6 +46,7 @@ fn browsing(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App>
         .known_hosts_at(known_hosts)
         .agent_at(None);
     let mut harness = Harness::builder()
+        .with_step_dt(1.0 / 60.0)
         .with_size(egui::vec2(WIDTH, 700.0))
         .with_context_setup(app::setup)
         .build_ui_state(|ui, app: &mut App| app.ui(ui), app);
@@ -80,11 +81,23 @@ fn browsing(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App>
 
 /// Where the edge between the listing and Preview is, across the window.
 fn edge(harness: &Harness<'static, App>) -> f32 {
-    harness.get_by_role(Role::Splitter).rect().center().x
+    pane_edge(harness).center().x
+}
+
+fn pane_edge(harness: &Harness<'static, App>) -> egui::Rect {
+    harness
+        .get_all_by_role(Role::Splitter)
+        .map(|n| n.rect())
+        .max_by(|a, b| a.height().total_cmp(&b.height()))
+        .unwrap()
 }
 
 fn drag(harness: &mut Harness<'static, App>, from: f32, to: f32) {
-    let y = harness.get_by_role(Role::Splitter).rect().center().y;
+    let y = pane_edge(harness).center().y;
+    drag_at(harness, from, to, y);
+}
+
+fn drag_at(harness: &mut Harness<'static, App>, from: f32, to: f32, y: f32) {
     let at = |x| egui::pos2(x, y);
     harness.hover_at(at(from));
     harness.run_ok();
@@ -219,23 +232,65 @@ fn the_session_bar_sits_under_its_tab_and_the_app_toolbar_above() {
 }
 
 #[test]
-fn the_details_sit_below_the_preview_in_the_bottom_quarter() {
+fn the_tree_context_menu_copies_the_clicked_path() {
     let fixture = Fixture::start();
     let dir = tempfile::tempdir().unwrap();
-    let harness = browsing(&fixture, &dir);
-    // The home directory is focused, so Preview describes it.
-    let name = harness
-        .query_by(|n| {
-            n.label().as_deref() == Some("Name") && n.value().as_deref() == Some("tester")
-        })
-        .expect("the details' Name")
-        .rect();
-    let splitter = harness.get_by_role(Role::Splitter).rect();
-    let top = splitter.top();
-    let height = splitter.height();
+    let mut h = browsing(&fixture, &dir);
+    h.get_by_role_and_label(Role::Row, "/").click_secondary();
+    h.run_ok();
+    let download = h
+        .get_all_by_role_and_label(Role::Button, "Download")
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap();
+    assert!(download.accesskit_node().is_disabled());
+    h.get_by_role_and_label(Role::Button, "Copy path").click();
+    h.step();
     assert!(
-        name.top() >= top + height * 0.7,
-        "the details start at {} in a pane from {top} that is {height} tall",
-        name.top()
+        h.output()
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(path) if path == "/"))
     );
+}
+
+#[test]
+fn tree_column_dividers_can_be_dragged_from_the_edge_of_their_hit_area() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = browsing(&fixture, &dir);
+    let divider = |h: &Harness<'static, App>| h.get_by_label("Resize column 1").rect();
+    let before = divider(&h);
+    let from = before.center().x + 4.0;
+    drag_at(&mut h, from, from - 65.0, before.center().y);
+    assert!((divider(&h).center().x - (before.center().x - 65.0)).abs() < 5.0);
+    h.get_by_label("Resize column 1").click();
+    h.step();
+    h.get_by_label("Resize column 1").click();
+    h.run_ok();
+    assert!((divider(&h).center().x - before.center().x).abs() < 2.0);
+}
+
+#[test]
+fn preview_text_uses_the_bottom_of_the_pane() {
+    let fixture = Fixture::start();
+    let text: String = (1..=100).map(|i| format!("preview line {i}\n")).collect();
+    std::fs::write(fixture.root().join("home/tester/notes.txt"), text).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = browsing(&fixture, &dir);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run_ok();
+    until(&mut h, "the listing", |h| {
+        h.query_by_role_and_label(Role::Row, "notes.txt").is_some()
+    });
+    h.get_by_role_and_label(Role::Row, "notes.txt").click();
+    h.run_ok();
+    until(&mut h, "preview text", |h| {
+        h.query_by_label("preview line 1").is_some()
+    });
+    let edge = pane_edge(&h);
+    assert!(h.query_all_by_label_contains("preview line ").any(|n| {
+        let y = n.rect().center().y;
+        y > edge.top() + 0.85 * edge.height() && y <= edge.bottom()
+    }));
 }

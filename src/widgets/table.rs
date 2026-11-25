@@ -29,6 +29,7 @@ use egui::{
     Stroke, Ui, UiBuilder, WidgetInfo, pos2, vec2,
 };
 
+use super::Tooltip as _;
 use super::glyph::{self, Glyph};
 use super::mark::{Status, status_mark};
 use super::paint::{self, State};
@@ -37,6 +38,7 @@ use crate::theme::{Text, Tokens, TokensExt as _};
 
 /// Between two columns of a table.
 pub const COLUMN_GAP: f32 = 12.0;
+const MIN_COLUMN_WIDTH: f32 = 36.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Width {
@@ -147,6 +149,7 @@ pub fn table(id_salt: impl egui::AsIdSalt) -> Table {
         id_salt: egui::IdSalt::new(id_salt),
         columns: Vec::new(),
         width: None,
+        resizable: false,
     }
 }
 
@@ -155,11 +158,18 @@ pub struct Table {
     id_salt: egui::IdSalt,
     columns: Vec<Column>,
     width: Option<f32>,
+    resizable: bool,
 }
 
 impl Table {
     pub fn columns(mut self, columns: impl IntoIterator<Item = Column>) -> Self {
         self.columns = columns.into_iter().collect();
+        self
+    }
+
+    /// Give the header draggable column boundaries. Double-click to restore automatic sizing.
+    pub fn resizable(mut self) -> Self {
+        self.resizable = true;
         self
     }
 
@@ -181,10 +191,29 @@ impl Table {
         let known: Option<Arc<Vec<f32>>> = ui.data(|d| d.get_temp(id));
         let first = known.as_ref().is_none_or(|k| k.len() != self.columns.len());
         let has_auto = self.columns.iter().any(|c| c.width == Width::Auto);
-        let measuring = first && has_auto;
+        let manual: Option<Vec<f32>> = ui.data(|d| d.get_temp(id.with("widths")));
+        let manual = manual.filter(|w| self.resizable && w.len() == self.columns.len());
+        let measuring = first && has_auto && manual.is_none();
         let available = self.width.unwrap_or_else(|| ui.available_width());
-        let widths = resolve(&t, &self.columns, known.as_deref(), available, measuring);
-        let gaps = COLUMN_GAP * self.columns.len().saturating_sub(1) as f32;
+        let mut columns = self.columns;
+        if let Some(widths) = &manual {
+            for (column, &width) in columns.iter_mut().zip(widths) {
+                column.width = Width::Fixed(width);
+            }
+        }
+        let mut widths = resolve(&t, &columns, known.as_deref(), available, measuring);
+        if self.resizable && !measuring {
+            for width in &mut widths {
+                *width = width.max(MIN_COLUMN_WIDTH);
+            }
+        }
+        let gaps = COLUMN_GAP * columns.len().saturating_sub(1) as f32;
+        if manual.is_some() {
+            let spare = available - gaps - 2.0 * t.space.row_x - widths.iter().sum::<f32>();
+            if let Some(last) = widths.last_mut() {
+                *last += spare.max(0.0);
+            }
+        }
         // A column still being measured has no width yet.
         let columns_width: f32 = widths.iter().filter(|w| w.is_finite()).sum();
         let width = columns_width + gaps + 2.0 * t.space.row_x;
@@ -201,9 +230,10 @@ impl Table {
                 ui,
                 t: t.clone(),
                 id,
-                columns: &self.columns,
+                columns: &columns,
+                resizable: self.resizable && !measuring,
                 widths: &widths,
-                measured: vec![0.0; self.columns.len()],
+                measured: vec![0.0; columns.len()],
                 width,
                 rows: 0,
             };
@@ -211,7 +241,7 @@ impl Table {
             (inner, body.measured)
         });
         let (inner, measured) = out.inner;
-        if known.as_deref() != Some(&measured) {
+        if manual.is_none() && known.as_deref() != Some(&measured) {
             ui.data_mut(|d| d.insert_temp(id, Arc::new(measured)));
             if !measuring {
                 ui.ctx().request_repaint();
@@ -255,6 +285,7 @@ fn resolve(
 
 /// The table being shown: add its header, then its rows.
 pub struct TableBody<'a> {
+    resizable: bool,
     ui: &'a mut Ui,
     t: Arc<Tokens>,
     id: Id,
@@ -275,7 +306,64 @@ impl TableBody<'_> {
         // The hairline is the last pixel row of the header.
         let y = rect.bottom() - t.stroke.hairline / 2.0;
         self.ui.painter().hline(rect.x_range(), y, line);
+        if self.resizable {
+            self.dividers(rect);
+        }
         inner
+    }
+
+    fn dividers(&mut self, header: Rect) {
+        let mut x = header.left() + self.t.space.row_x;
+        for (i, &width) in self
+            .widths
+            .iter()
+            .take(self.widths.len().saturating_sub(1))
+            .enumerate()
+        {
+            x += width + COLUMN_GAP / 2.0;
+            let hit = Rect::from_center_size(
+                pos2(x, header.center().y),
+                vec2(COLUMN_GAP, header.height()),
+            );
+            let response = self
+                .ui
+                .interact(hit, self.id.with(("divider", i)), Sense::click_and_drag())
+                .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
+            response.widget_info(|| {
+                WidgetInfo::labeled(
+                    Role::Splitter,
+                    self.ui.is_enabled(),
+                    format!("Resize column {}", i + 1),
+                )
+            });
+            let color = if response.hovered() || response.dragged() {
+                self.t.color.accent.text
+            } else {
+                self.t.color.stroke.hairline
+            };
+            self.ui.painter().vline(
+                x,
+                header.shrink(self.t.space.row_y).y_range(),
+                Stroke::new(self.t.stroke.hairline, color),
+            );
+            let key = self.id.with("widths");
+            if response.double_clicked() {
+                self.ui.data_mut(|d| d.remove::<Vec<f32>>(key));
+                self.ui.ctx().request_repaint();
+            } else if response.dragged_by(egui::PointerButton::Primary)
+                && response.drag_delta().x != 0.0
+            {
+                let mut widths = self
+                    .ui
+                    .data(|d| d.get_temp::<Vec<f32>>(key))
+                    .unwrap_or_else(|| self.widths.to_vec());
+                widths[i] = (widths[i] + response.drag_delta().x).max(MIN_COLUMN_WIDTH);
+                self.ui.data_mut(|d| d.insert_temp(key, widths));
+                self.ui.ctx().request_repaint();
+            }
+            response.tooltip("Drag to resize. Double-click to reset column widths.");
+            x += COLUMN_GAP / 2.0;
+        }
     }
 
     /// A row that only shows its cells.
@@ -289,10 +377,19 @@ impl TableBody<'_> {
     /// target, and its response says when it is clicked. Name it for AccessKit with
     /// `widget_info` when its cells do not say enough.
     pub fn row_with(&mut self, look: RowLook, add: impl FnOnce(&mut TableRow<'_>)) -> Response {
+        self.row_with_key(self.rows, look, add)
+    }
+
+    /// A stable row identity keeps its context menu attached to the same entry across refreshes.
+    pub fn row_with_key(
+        &mut self,
+        key: impl egui::AsIdSalt,
+        look: RowLook,
+        add: impl FnOnce(&mut TableRow<'_>),
+    ) -> Response {
         let t = self.t.clone();
-        let index = self.rows;
         self.rows += 1;
-        let id = self.id.with(("row", index));
+        let id = self.id.with(("row", key));
         let width = self.width;
         let builder = if look.state == State::Disabled {
             UiBuilder::new().disabled()
@@ -323,6 +420,7 @@ impl TableBody<'_> {
                     t: t.clone(),
                     id,
                     columns,
+                    resizable: false,
                     widths,
                     measured: std::mem::take(measured),
                     width,
@@ -474,6 +572,12 @@ impl TableRow<'_> {
         let mut cell = self
             .ui
             .new_child(UiBuilder::new().max_rect(rect).layout(layout));
+        if matches!(column.width, Width::Fill | Width::Fixed(_)) {
+            let mut clip = cell.clip_rect();
+            clip.min.x = clip.min.x.max(rect.left());
+            clip.max.x = clip.max.x.min(rect.right());
+            cell.set_clip_rect(clip);
+        }
         let inner = add(&mut cell);
         let used = cell.min_rect();
         let measured = &mut self.measured[self.column];

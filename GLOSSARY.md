@@ -52,7 +52,7 @@ The one entry in a listing that the keyboard is on. Preview shows it.
 _Avoid_: Cursor, current entry
 
 **Preview**:
-The panel beside the listing that shows the Focused entry: a details header for every entry, and below it the file's contents when its kind is one sshexplorer can show.
+The panel beside the listing that shows the Focused entry’s contents when its file type supports preview. An entry’s metadata is available from Properties in its context menu.
 _Avoid_: Viewer, inspector
 
 **Scratch folder**:

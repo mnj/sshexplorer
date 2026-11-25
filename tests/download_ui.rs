@@ -117,6 +117,48 @@ fn select(h: &mut Harness<'static, App>, name: &str) {
 }
 
 #[test]
+fn a_context_download_uses_the_clicked_item_or_its_selection() {
+    let fixture = Fixture::start();
+    let mut w = window(&fixture, &["Fixture"]);
+    let h = &mut w.harness;
+    open(h, "Fixture");
+    let from_menu = |h: &mut Harness<'static, App>, name| {
+        h.get_by_role_and_label(Role::Row, name).click_secondary();
+        h.run_ok();
+        // The popup's Download is below the session toolbar's.
+        h.get_all_by_role_and_label(Role::Button, "Download")
+            .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+            .unwrap()
+            .click();
+        h.run_ok();
+    };
+    select(h, "notes.txt");
+    from_menu(h, "readme.md");
+    until(h, "one context download", |h| has(h, "Downloaded 1 file"));
+    assert_eq!(
+        std::fs::read(w.local.join("readme.md")).unwrap(),
+        b"# readme\n"
+    );
+    assert!(!w.local.join("notes.txt").exists());
+    std::fs::remove_file(w.local.join("readme.md")).unwrap();
+    h.get_by_role_and_label(Role::Row, "notes.txt")
+        .click_modifiers(CTRL);
+    h.run_ok();
+    from_menu(h, "readme.md");
+    until(h, "the selected downloads", |h| {
+        has(h, "Downloaded 2 files")
+    });
+    assert_eq!(
+        std::fs::read(w.local.join("notes.txt")).unwrap(),
+        b"notes\n"
+    );
+    assert_eq!(
+        std::fs::read(w.local.join("readme.md")).unwrap(),
+        b"# readme\n"
+    );
+}
+
+#[test]
 fn ctrl_s_downloads_the_selection_and_a_clean_finish_clears_the_strip() {
     let fixture = Fixture::start();
     let mut w = window(&fixture, &["Fixture"]);

@@ -198,6 +198,7 @@ impl Session {
         focused: bool,
         reveal: bool,
         show_icons: bool,
+        settings: &AppSettings,
     ) {
         let Some(searching) = &self.search else {
             return;
@@ -252,6 +253,7 @@ impl Session {
         }
         let live = focused && ui.input(|i| i.focused);
         let mut command = None;
+        let mut menu_action = None;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -269,12 +271,21 @@ impl Session {
                             let ringed = focused && Some(i) == focus;
                             let look = RowLook::of(matches.is_selected(i), live, ringed);
                             let kind = Kind::of(matches::name(&m.path), m.is_dir);
-                            let response = table.row_with(look, |row| {
-                                row.ui(|ui| {
-                                    ui.add(widgets::entry_name(&m.path, kind).icon(show_icons));
-                                });
-                                row.muted(if m.is_dir { "Directory" } else { "File" });
-                            });
+                            let response = table.row_with_key(
+                                (&matches.query().start, &m.path),
+                                look,
+                                |row| {
+                                    row.ui(|ui| {
+                                        ui.add(widgets::entry_name(&m.path, kind).icon(show_icons));
+                                    });
+                                    row.muted(if m.is_dir { "Directory" } else { "File" });
+                                },
+                            );
+                            if let Some(action) =
+                                RowAction::menu(&response, !self.is_disconnected(), true, false)
+                            {
+                                menu_action = Some((action, i));
+                            }
                             let label = m.path.clone();
                             response.ctx.accesskit_node_builder(response.id, |node| {
                                 node.set_label(label);
@@ -297,6 +308,9 @@ impl Session {
                         });
                     });
             });
+        if let Some((action, i)) = menu_action {
+            self.run_row_action(action, i, ui, settings);
+        }
         if let Some(command) = command {
             ui.memory_mut(|m| m.request_focus(self.id));
             let now = ui.input(|i| i.time);

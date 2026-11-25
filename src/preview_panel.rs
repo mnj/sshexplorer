@@ -1,5 +1,4 @@
-//! The Preview panel on the right of a Session: the Focused entry's details header and,
-//! below it, what [`Preview`] has for the file.
+//! The Preview panel on the right of a Session: what [`Preview`] has for the file.
 //!
 //! The panel fetches over the Session's connection when the model says a fetch is due,
 //! and drops the read when the preview changes, which stops it. The bytes go to the
@@ -14,12 +13,12 @@ mod tail;
 use egui::{EventFilter, Id, Key, Modifiers, Sense};
 
 use crate::archive::{Listing, Stamp};
-use crate::folder::{modified_text, permissions_text, size_text};
+use crate::folder::{modified_text, size_text};
 use crate::image_view::ImageView;
 use crate::keymap::{Action, KeyMap};
 use crate::media_view::{MediaFrame, MediaView};
 use crate::pdf_view::PdfView;
-use crate::preview::{self, Body, Focused, MarkdownView, Preview, Text, UNSUPPORTED};
+use crate::preview::{Body, Focused, MarkdownView, Preview, Text, UNSUPPORTED};
 use crate::scratch::Place;
 use crate::settings::AppSettings;
 use crate::source::Highlighting;
@@ -78,10 +77,6 @@ pub const TOO_LARGE_HINT: &str = "Download it to open it locally.";
 /// An archive with no members.
 pub const EMPTY_ARCHIVE: &str = "The archive is empty.";
 
-/// How much of the panel's height the preview takes; the details have the rest.
-// theme-exempt: a share of the panel's height, not a size
-const BODY_SHARE: f32 = 0.75;
-
 impl PreviewPanel {
     pub fn new(id: Id) -> Self {
         PreviewPanel {
@@ -109,6 +104,16 @@ impl PreviewPanel {
     /// The Session's tab is not shown: playback pauses.
     pub fn hidden(&mut self) {
         self.media.pause();
+    }
+
+    pub(crate) fn kind_for(&self, entry: &Focused) -> crate::kind::Kind {
+        self.preview
+            .shown()
+            .filter(|shown| shown.focused == *entry)
+            .map_or_else(
+                || crate::kind::Kind::of(&entry.name, entry.is_dir()),
+                |shown| shown.kind,
+            )
     }
 
     pub fn has_focus(&self, ui: &egui::Ui) -> bool {
@@ -200,26 +205,12 @@ impl PreviewPanel {
         let Some(shown) = self.preview.shown_mut() else {
             return leave;
         };
-        // The preview takes the top three quarters and the details the quarter below it.
+        // Keep wide preview content inside the user-sized pane.
+        ui.advance_cursor_after_rect(area);
+        let mut contents = ui.new_child(egui::UiBuilder::new().max_rect(area));
+        contents.set_clip_rect(area.intersect(ui.clip_rect()));
+        let ui = &mut contents;
         let t = ui.tokens();
-        let full = ui.available_rect_before_wrap();
-        let split = full.top() + full.height() * BODY_SHARE;
-        let body_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.right(), split));
-        let details_rect =
-            egui::Rect::from_min_max(egui::pos2(full.left(), split + t.space.stack), full.max);
-        let clip = ui.clip_rect();
-        let mut below = ui.new_child(egui::UiBuilder::new().max_rect(details_rect));
-        below.set_clip_rect(details_rect.intersect(clip));
-        egui::ScrollArea::vertical()
-            .id_salt(self.id.with("details"))
-            .auto_shrink(false)
-            .show(&mut below, |ui| {
-                details(ui, &shown.focused, shown.kind, frame.zone)
-            });
-        ui.advance_cursor_after_rect(full);
-        let mut above = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
-        above.set_clip_rect(body_rect.intersect(clip));
-        let ui = &mut above;
         if matches!(
             shown.kind,
             crate::kind::Kind::Text | crate::kind::Kind::Source
@@ -480,44 +471,4 @@ fn archive_rows(listing: &Listing, zone: &jiff::tz::TimeZone) -> Vec<String> {
             format!("{size:>10}  {modified:<16}  {}", m.path)
         })
         .collect()
-}
-
-/// The details header: name, kind, size, modified, permissions, owner and group, and a
-/// symlink's target.
-fn details(
-    ui: &mut egui::Ui,
-    focused: &Focused,
-    kind: crate::kind::Kind,
-    zone: &jiff::tz::TimeZone,
-) {
-    let mut rows = vec![
-        ("Name", focused.name.clone()),
-        ("Kind", preview::kind_name(kind).to_owned()),
-    ];
-    if let Some(e) = &focused.entry {
-        if let Some(size) = e.size.filter(|_| !e.is_dir) {
-            rows.push(("Size", size_text(size)));
-        }
-        if let Some(at) = e.modified {
-            rows.push(("Modified", modified_text(at, zone)));
-        }
-        if let Some(mode) = e.permissions {
-            rows.push(("Permissions", permissions_text(mode)));
-        }
-        // The names when the host gave them, else the ids.
-        if let Some(owner) = e.owner.clone().or_else(|| e.uid.map(|id| id.to_string())) {
-            rows.push(("Owner", owner));
-        }
-        if let Some(group) = e.group.clone().or_else(|| e.gid.map(|id| id.to_string())) {
-            rows.push(("Group", group));
-        }
-        if let Some(target) = &e.link {
-            rows.push(("Link to", target.clone()));
-        }
-    }
-    widgets::form(ui.scope_id().with("details")).show(ui, |ui| {
-        for (name, value) in rows {
-            widgets::form_row(ui, name, |ui| ui.add(widgets::detail_value(name, value)));
-        }
-    });
 }

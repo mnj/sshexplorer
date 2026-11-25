@@ -59,6 +59,8 @@ use crate::tree::{self, Line, Tree};
 use crate::widgets::{self, RowLook, Tooltip as _};
 
 mod navigation;
+mod properties;
+use properties::{Properties, RowAction};
 mod reconnecting;
 mod searching;
 
@@ -174,6 +176,7 @@ pub struct Session {
     reveal: bool,
     /// The Preview panel, dropped before the connection its read uses.
     preview: PreviewPanel,
+    properties: Option<Properties>,
     /// Preview takes the keyboard on the next frame: Enter on a file.
     focus_preview: bool,
     /// The Session's Downloads; dropped, and so cancelled, before the connection.
@@ -236,6 +239,7 @@ impl Session {
             timer: Timer::default(),
             id,
             preview: PreviewPanel::new(id.with("preview")),
+            properties: None,
             focus_preview: false,
             focus_listing: true,
             reveal: false,
@@ -258,6 +262,15 @@ impl Session {
 
     pub fn label(&self) -> &str {
         &self.details.label
+    }
+
+    pub(crate) fn download_options(&self, settings: &AppSettings) -> download::Options {
+        download::Options {
+            compress: self.details.compress_downloads,
+            keep_modified: settings.download.keep_modified,
+            keep_executable: settings.download.keep_executable,
+            follow_links: settings.search.follow_links,
+        }
     }
 
     /// Queues a Download of the Selection into the Local folder. Nothing when the
@@ -493,6 +506,7 @@ impl Session {
             &mut self.downloads,
             &mut self.downloads_panel,
         );
+        self.properties_window(&ctx);
         download_ui::queue_window(
             &ctx,
             self.id.with("queue"),
@@ -658,7 +672,7 @@ impl Session {
         if self.search.is_some() {
             let reveal = std::mem::take(&mut self.reveal);
             let show_icons = frame.settings.appearance.show_icons;
-            self.matches_view(ui, focused, reveal, show_icons);
+            self.matches_view(ui, focused, reveal, show_icons, frame.settings);
             if std::mem::take(&mut self.focus_preview) {
                 ui.memory_mut(|m| m.request_focus(self.preview.id));
             }
@@ -675,6 +689,7 @@ impl Session {
         }
         let show_icons = frame.settings.appearance.show_icons;
         let mut command = None;
+        let mut menu_action = None;
         let mut sort = None;
         let reveal = std::mem::take(&mut self.reveal) | self.tree.take_reveal();
         // The Selection is live while the listing holds the keyboard and the window is in
@@ -684,75 +699,98 @@ impl Session {
             // Kept listings stay browsable while Disconnected, greyed.
             ui.multiply_opacity(t.opacity.disabled);
         }
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                widgets::table(self.id.with("table"))
-                    .columns([
-                        widgets::Column::fill(),
-                        widgets::Column::auto().number(),
-                        widgets::Column::auto(),
-                        widgets::Column::auto(),
-                    ])
-                    .show(ui, |table| {
-                        table.header(|h| {
-                            for column in Column::ALL {
-                                let sorted =
-                                    (self.sort.column == column).then_some(widgets::Sorted {
-                                        ascending: self.sort.ascending,
-                                        rank: None,
-                                    });
-                                if h.sort(column.title(), sorted).clicked() {
-                                    sort = Some(self.sort.by(column));
-                                }
-                            }
-                        });
-                        let rows = self.rows();
-                        let focus = rows.focus();
-                        let shown = reveal.then_some(focus).flatten();
-                        table.rows(rows.len(), shown, |table, i| {
-                            let selected = rows.is_selected(i);
-                            let ringed = focused && Some(i) == focus;
-                            let look = RowLook::of(selected, live, ringed);
-                            let shown = self.shown(i);
-                            let mut chevron = None;
-                            let response = table.row_with(look, |row| {
-                                chevron = self.cells(row, &shown, show_icons);
+        egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+            widgets::table(self.id.with("table"))
+                .resizable()
+                .columns([
+                    widgets::Column::fill(),
+                    widgets::Column::auto().number(),
+                    widgets::Column::auto(),
+                    widgets::Column::auto(),
+                ])
+                .show(ui, |table| {
+                    table.header(|h| {
+                        for column in Column::ALL {
+                            let sorted = (self.sort.column == column).then_some(widgets::Sorted {
+                                ascending: self.sort.ascending,
+                                rank: None,
                             });
-                            let (label, expanded) = (shown.label, shown.expanded);
-                            response.ctx.accesskit_node_builder(response.id, |node| {
-                                node.set_label(label);
-                                if let Some(expanded) = expanded {
-                                    node.set_expanded(expanded);
-                                }
-                            });
-                            if reveal && Some(i) == focus {
-                                response.scroll_to_me(None);
+                            if h.sort(column.title(), sorted).clicked() {
+                                sort = Some(self.sort.by(column));
                             }
-                            let on_chevron = chevron.is_some_and(|rect: egui::Rect| {
-                                response
-                                    .interact_pointer_pos()
-                                    .is_some_and(|at| rect.expand(t.space.gap).contains(at))
-                            });
-                            if on_chevron && response.clicked() {
-                                command = Some(Command::Disclose(i));
-                            } else if on_chevron && response.double_clicked() {
-                                // The first click already opened it.
-                            } else if response.double_clicked() {
-                                command = Some(Command::DoubleClick(i));
-                            } else if response.clicked() {
-                                let m = response.ctx.input(|i| i.modifiers);
-                                command = Some(if m.command {
-                                    Command::CtrlClick(i)
-                                } else if m.shift {
-                                    Command::ShiftClick(i)
-                                } else {
-                                    Command::Click(i)
-                                });
-                            }
-                        });
+                        }
                     });
-            });
+                    let rows = self.rows();
+                    let focus = rows.focus();
+                    let shown = reveal.then_some(focus).flatten();
+                    table.rows(rows.len(), shown, |table, i| {
+                        let selected = rows.is_selected(i);
+                        let ringed = focused && Some(i) == focus;
+                        let look = RowLook::of(selected, live, ringed);
+                        let shown = self.shown(i);
+                        let mut chevron = None;
+                        let key = match self.view {
+                            View::Tree => self.tree.path(i).map_or_else(
+                                || self.id.with(("tree-status", i)),
+                                |path| self.id.with(("tree", path)),
+                            ),
+                            View::Folder => {
+                                self.id.with(("folder", self.folder.path(), &shown.label))
+                            }
+                        };
+                        let response = table.row_with_key(key, look, |row| {
+                            chevron = self.cells(row, &shown, show_icons);
+                        });
+                        if !shown.status
+                            && let Some(action) = RowAction::menu(
+                                &response,
+                                !self.is_disconnected(),
+                                match self.view {
+                                    View::Tree => self.tree.path(i).is_some_and(|p| p != "/"),
+                                    View::Folder => shown.entry.is_some(),
+                                },
+                                shown.expanded == Some(true),
+                            )
+                        {
+                            menu_action = Some((action, i));
+                        }
+                        let (label, expanded) = (shown.label, shown.expanded);
+                        response.ctx.accesskit_node_builder(response.id, |node| {
+                            node.set_label(label);
+                            if let Some(expanded) = expanded {
+                                node.set_expanded(expanded);
+                            }
+                        });
+                        if reveal && Some(i) == focus {
+                            response.scroll_to_me(None);
+                        }
+                        let on_chevron = chevron.is_some_and(|rect: egui::Rect| {
+                            response
+                                .interact_pointer_pos()
+                                .is_some_and(|at| rect.expand(t.space.gap).contains(at))
+                        });
+                        if on_chevron && response.clicked() {
+                            command = Some(Command::Disclose(i));
+                        } else if on_chevron && response.double_clicked() {
+                            // The first click already opened it.
+                        } else if response.double_clicked() {
+                            command = Some(Command::DoubleClick(i));
+                        } else if response.clicked() {
+                            let m = response.ctx.input(|i| i.modifiers);
+                            command = Some(if m.command {
+                                Command::CtrlClick(i)
+                            } else if m.shift {
+                                Command::ShiftClick(i)
+                            } else {
+                                Command::Click(i)
+                            });
+                        }
+                    });
+                });
+        });
+        if let Some((action, i)) = menu_action {
+            self.run_row_action(action, i, ui, frame.settings);
+        }
         if let Some(sort) = sort {
             self.sort = sort;
             self.folder.arrange(sort, self.show_hidden);
@@ -770,9 +808,17 @@ impl Session {
 
     /// The Focused entry, as Preview shows it.
     fn focused(&self) -> Option<Focused> {
+        let i = match &self.search {
+            Some(s) => s.matches.focus()?,
+            None => self.rows().focus()?,
+        };
+        self.entry_at(i)
+    }
+
+    fn entry_at(&self, i: usize) -> Option<Focused> {
         if let Some(searching) = &self.search {
             let matches = &searching.matches;
-            let m = matches.get(matches.focus()?);
+            let m = matches.get(i);
             let name = matches::name(&m.path).to_owned();
             let path = matches.absolute(m);
             let entry = self.tree.entry_of(&path).cloned().unwrap_or_else(|| Entry {
@@ -787,7 +833,7 @@ impl Session {
             });
         }
         if self.view == View::Tree {
-            let row = self.tree.row(self.tree.focus()?);
+            let row = self.tree.row(i);
             return match row.line {
                 tree::Line::Entry {
                     name, path, entry, ..
@@ -802,7 +848,6 @@ impl Session {
         if self.folder.is_empty() {
             return None;
         }
-        let i = self.folder.focus();
         let path = self.folder.path();
         Some(match self.folder.line(i) {
             folder::Line::Here => Focused {

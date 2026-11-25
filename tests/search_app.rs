@@ -134,6 +134,41 @@ fn refresh_enabled(harness: &Harness<'static, App>) -> bool {
 }
 
 #[test]
+fn match_properties_load_metadata_from_its_parent_and_open_reveals_the_file() {
+    let fixture = Fixture::start();
+    std::fs::write(fixture.root().join("home/tester/docs/needle"), "content").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = session(&fixture, &dir);
+    search_for(&mut h, "needle");
+    until(&mut h, "the match", |h| has_row(h, "docs/needle"));
+    let menu = |h: &mut Harness<'static, App>, action| {
+        h.get_by_role_and_label(Role::Row, "docs/needle")
+            .click_secondary();
+        h.run_ok();
+        h.get_by_role_and_label(Role::Button, action).click();
+        h.run_ok();
+    };
+    menu(&mut h, "Properties");
+    until(&mut h, "the remote owner", |h| {
+        h.query_by(|n| {
+            n.label().as_deref() == Some("Owner") && n.value().as_deref() == Some(fixture::OWNER)
+        })
+        .is_some()
+    });
+    assert!(
+        h.query_by(|n| n.label().as_deref() == Some("Path")
+            && n.value().as_deref() == Some("/home/tester/docs/needle"))
+            .is_some()
+    );
+    h.get_by_role_and_label(Role::Button, "Close").click();
+    h.run_ok();
+    menu(&mut h, "Open");
+    until(&mut h, "the file in its parent", |h| {
+        selected_rows(h) == ["needle"]
+    });
+}
+
+#[test]
 fn matches_replace_the_listing_and_escape_brings_it_back() {
     let fixture = Fixture::start();
     std::fs::write(fixture.root().join("home/tester/docs/Notes-2.txt"), "n").unwrap();
