@@ -2,9 +2,11 @@
 //! modal to that Session only, and the Details window.
 //!
 //! The strip shows the running Download: the current file, files and bytes done of the
-//! total ("counting…" until known), the rate, Cancel, and "+N queued". A clean finish
+//! total ("Discovering files…" until known), the rate, Cancel, and "+N queued". A clean finish
 //! says "Downloaded N files" and clears after [`CLEAR_AFTER`]; a skip, failure, cancel
 //! or stop keeps the strip, with Details, until dismissed.
+
+mod reveal;
 
 use egui::{Context, Id, Key, Rect};
 
@@ -26,6 +28,9 @@ pub struct Panel {
     suggestion: Option<String>,
     apply_all: bool,
     details: bool,
+    pub queue_open: bool,
+    revealing: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    reveal_error: Option<String>,
     /// When the shown summary arrived, in egui seconds.
     finished_at: Option<f64>,
 }
@@ -118,7 +123,7 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) -> bool {
                         },
                     );
                 }
-                _ => muted(ui, "counting…".to_owned()),
+                _ => muted(ui, format!("Discovering files… · {} copied", p.files_done)),
             }
             if p.lost {
                 muted(ui, PAUSED.to_owned());
@@ -127,10 +132,15 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) -> bool {
             }
             gap(ui);
             cancel = ui.add(widgets::button("Cancel").flat()).clicked();
-            if queue.queued() > 0 {
-                muted(ui, format!("+{} queued", queue.queued()));
+        }
+        if queue.queued() > 0 {
+            gap(ui);
+            if ui
+                .add(widgets::button(format!("+{} queued", queue.queued())).flat())
+                .clicked()
+            {
+                panel.queue_open = true;
             }
-            // Progress arrives off the frame thread, which wakes the frame for it.
         }
     });
     if let Some(summary) = queue
@@ -171,6 +181,68 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) -> bool {
     retry
 }
 
+fn job_name(job: &crate::download::Job) -> String {
+    match job.entries.as_slice() {
+        [one] => crate::folder::join(&job.dir, &one.name),
+        entries => format!("{} entries in {}", entries.len(), job.dir),
+    }
+}
+
+pub fn queue_window(ctx: &Context, id: Id, queue: &mut Queue, panel: &mut Panel) {
+    if !panel.queue_open {
+        return;
+    }
+    let mut remove = None;
+    widgets::window(id, "Download queue")
+        .open(&mut panel.queue_open)
+        .centred()
+        .show(ctx, |ui| {
+            if let Some(job) = queue.current_job() {
+                ui.label(format!("Downloading {}", job_name(job)));
+            }
+            if !queue.is_busy() {
+                ui.label("No downloads queued");
+            }
+            egui::ScrollArea::vertical()
+                .max_height(ui.available_height() * 0.6)
+                .show(ui, |ui| {
+                    for (i, job) in queue.waiting_jobs().enumerate() {
+                        ui.push_id(i, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.add(widgets::button("Remove").flat()).clicked() {
+                                    remove = Some(i);
+                                }
+                                ui.add(egui::Label::new(job_name(job)).truncate())
+                                    .tooltip(job_name(job).as_str());
+                            })
+                        });
+                    }
+                });
+            if let Some(path) = queue.last_destination() {
+                ui.label(path.display().to_string());
+                if ui
+                    .add_enabled(
+                        panel.revealing.is_none(),
+                        widgets::button("Show in file manager"),
+                    )
+                    .clicked()
+                {
+                    panel.reveal_error = None;
+                    panel.revealing = Some(reveal::start(ctx.clone(), path.to_owned()));
+                }
+            }
+            if let Some(result) = panel.revealing.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                panel.revealing = None;
+                panel.reveal_error = result.err();
+            }
+            if let Some(e) = &panel.reveal_error {
+                ui.add(widgets::invalid_message(e.as_str()));
+            }
+        });
+    if let Some(i) = remove {
+        queue.remove_waiting(i);
+    }
+}
 /// The Details window for the shown summary, when it is open.
 pub fn details(ctx: &Context, id: Id, queue: &Queue, panel: &mut Panel) {
     let Some(summary) = queue.summary().filter(|_| panel.details) else {

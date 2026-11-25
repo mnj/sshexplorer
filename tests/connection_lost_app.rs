@@ -126,12 +126,14 @@ fn open(h: &mut Harness<'static, App>) {
 fn drop_connection(fixture: &Fixture, h: &mut Harness<'static, App>) {
     fixture.drop_connections();
     until(h, "the strip", |h| has(h, "Connection lost"));
+    assert!(h.query_by_label("Disconnected").is_some());
 }
 
 fn reconnect(h: &mut Harness<'static, App>) {
     h.key_press(Key::F5);
     h.run_ok();
     until(h, "the reconnect", |h| !has(h, "Connection lost"));
+    assert!(h.query_by_label("Connected").is_some());
 }
 
 fn disabled(h: &Harness<'static, App>, role: Role, label: &str) -> bool {

@@ -255,3 +255,18 @@ fn typing_jumps_to_a_visible_name() {
     tree.apply(Command::Type('o'), 5.0);
     assert_eq!(focused(&tree), Some("/home/other"));
 }
+
+#[test]
+#[ignore = "local performance measurement"]
+fn refresh_ten_thousand_directories() {
+    let entries = (0..10_000).map(|n| dir(&format!("dir-{n:05}"))).collect();
+    let original = listing("/", entries);
+    let mut tree = Tree::new(Sort::default(), false);
+    tree.open_at(original.clone());
+    for _ in 0..3 {
+        let listing = original.clone();
+        let start = std::time::Instant::now();
+        tree.refreshed("/", Ok(listing));
+        eprintln!("10,000-directory refresh: {:?}", start.elapsed());
+    }
+}

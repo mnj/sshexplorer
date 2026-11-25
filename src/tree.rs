@@ -12,7 +12,7 @@
 //! under another parent starts a new Selection. A command that needs the host answers
 //! with an [`Effect`] for the Session to carry out.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::folder::{Command, Sort, TYPE_RESET, by_column, join, parent};
 use crate::ssh::{Entry, Listing, NO_SUCH_FILE};
@@ -242,11 +242,17 @@ impl Tree {
         match answer {
             Ok(listing) => {
                 if let Some(Dir::Listed(old)) = self.dirs.get(path) {
+                    let directories: HashSet<_> = listing
+                        .entries
+                        .iter()
+                        .filter(|e| e.is_dir)
+                        .map(|e| e.name.as_str())
+                        .collect();
                     let dropped: Vec<String> = old
                         .entries
                         .iter()
                         .filter(|o| o.is_dir)
-                        .filter(|o| !listing.entries.iter().any(|n| n.is_dir && n.name == o.name))
+                        .filter(|o| !directories.contains(o.name.as_str()))
                         .map(|o| join(path, &o.name))
                         .collect();
                     for dir in dropped {

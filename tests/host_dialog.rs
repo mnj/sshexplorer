@@ -513,3 +513,52 @@ fn an_opening_session_shows_the_target_and_can_be_cancelled_before_a_prompt() {
     assert!(h.query_by_role_and_label(Role::Button, "Cancel").is_none());
     assert!(h.query_by_role(Role::Tab).is_none());
 }
+
+#[test]
+fn saved_host_pins_persist_and_navigate_from_location() {
+    let fixture = Fixture::start();
+    let dir = tempfile::tempdir().unwrap();
+    let host = fixture_host(&fixture, dir.path().join("downloads"));
+    let mut h = window_with_hosts(&dir, &fixture, &[host], AppSettings::default());
+    ctrl_o(&mut h);
+    h.key_press(Key::Enter);
+    h.run_ok();
+    enter_password(&mut h);
+    until(&mut h, "the initial folder", |h| {
+        h.query_by_role_and_label(Role::Row, "docs").is_some()
+    });
+    let endpoint = format!(
+        "{}@{}:{}",
+        fixture::ACCOUNT,
+        fixture.address(),
+        fixture.port()
+    );
+    assert!(h.query_by_label(&endpoint).is_some());
+    assert!(h.query_by_label("Connected").is_some());
+    let location = |h: &mut Harness<'static, App>| {
+        h.get_by_label("Location").click();
+        h.run_ok();
+    };
+    location(&mut h);
+    h.get_by_label("Pin current folder").click();
+    h.run_ok();
+    let store = HostStore::at(dir.path().join("hosts.toml"));
+    assert_eq!(store.load()[0].bookmarks, ["/home/tester/docs"]);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Num2);
+    h.run_ok();
+    h.key_press(Key::Backspace);
+    h.run_ok();
+    until(&mut h, "parent", |h| {
+        h.query_by_role_and_label(Role::Row, "notes.txt").is_some()
+    });
+    location(&mut h);
+    h.get_by_label("/home/tester/docs").click();
+    h.run_ok();
+    until(&mut h, "bookmarked folder", |h| {
+        h.query_by_role_and_label(Role::Row, "notes.txt").is_none()
+    });
+    location(&mut h);
+    h.get_by_label("Unpin current folder").click();
+    h.run_ok();
+    assert!(store.load()[0].bookmarks.is_empty());
+}

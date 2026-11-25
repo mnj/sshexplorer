@@ -63,7 +63,7 @@ impl Session {
         self.navigation.focus = true;
     }
 
-    fn navigate(&mut self, path: String, history_index: Option<usize>) {
+    pub(super) fn navigate(&mut self, path: String, history_index: Option<usize>) {
         if self.is_disconnected() {
             return;
         }

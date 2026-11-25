@@ -334,3 +334,52 @@ fn enter_moves_the_keyboard_to_preview_escape_returns_and_tab_cycles() {
     harness.run_ok();
     assert!(preview_focused(&harness));
 }
+
+#[test]
+fn latest_and_follow_handle_append_truncation_and_rotation() {
+    use std::io::Write as _;
+    let fixture = Fixture::start();
+    let path = fixture.root().join(HOME).join("active.log");
+    std::fs::write(
+        &path,
+        format!("first record\n{}\nlast record\n", "x".repeat(70_000)),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = browsing(&fixture, &dir, AppSettings::default());
+    click_row(&mut h, "active.log");
+    h.get_by_role_and_label(Role::Button, "Show latest").click();
+    h.run_ok();
+    until(&mut h, "the log tail", |h| has_label(h, "last record"));
+    assert!(!has_label(&h, "first record"));
+    h.get_by_role_and_label(Role::Switch, "Follow").click();
+    h.run_ok();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "appended record"
+    )
+    .unwrap();
+    until(&mut h, "appended text", |h| has_label(h, "appended record"));
+    std::fs::write(&path, "truncated record\n").unwrap();
+    until(&mut h, "truncation", |h| has_label(h, "truncated record"));
+    assert!(!has_label(&h, "appended record"));
+    std::fs::rename(&path, path.with_extension("old")).unwrap();
+    std::fs::write(&path, "rotated log with more bytes\n").unwrap();
+    until(&mut h, "replacement by path", |h| {
+        has_label(h, "rotated log with more bytes")
+    });
+    assert!(!has_label(&h, "truncated record"));
+    h.get_by_role_and_label(Role::Button, "Show beginning")
+        .click();
+    h.run_ok();
+    until(&mut h, "normal preview", |h| {
+        has_label(h, "rotated log with more bytes")
+    });
+    assert!(
+        h.query_by_role_and_label(Role::Button, "Show beginning")
+            .is_none()
+    );
+}

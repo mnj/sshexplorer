@@ -1,8 +1,8 @@
 //! Download: copying the Selection into a Session's Local folder, in the background.
 //!
 //! [`start`] runs one Download on the SSH runtime and returns a [`Download`] at once.
-//! It first walks the Selection, so the totals are known ("counting…" until then), and
-//! then copies up to four files concurrently. A file is copied flat into the Local folder.
+//! Discovery feeds up to four concurrent file copies. Totals become known at the end
+//! of the walk. A file is copied flat into the Local folder.
 //! A directory is recreated with its relative structure. An existing local directory is merged into;
 //! only a file that would replace an existing local file is a conflict, which pauses the
 //! Download on a [`Conflict`] until it is answered.
@@ -21,14 +21,16 @@
 //! once [`Download::resume`] hands it the new connection it retries those files.
 
 mod compressed;
+mod discovery;
 mod local;
 mod transfer;
 
+use discovery::Found;
 use futures_util::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 pub(crate) use local::valid_name;
 
 use cap_std::fs::Dir;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,6 +173,8 @@ impl Conflict {
 /// How a Download ended, and what it copied, skipped and could not copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
+    /// Local file or directory to show in the file manager.
+    pub destination: Option<PathBuf>,
     pub copied: usize,
     pub skipped: Vec<Note>,
     pub failed: Vec<Note>,
@@ -260,6 +264,7 @@ fn start_entries(session: &ssh::Session, job: Job, paths: Vec<String>) -> Downlo
     let run = Run {
         remote: session.remote(),
         resumed,
+        generation: 0,
         progress: progress.clone(),
         unavailable: Arc::default(),
         sender,
@@ -268,6 +273,7 @@ fn start_entries(session: &ssh::Session, job: Job, paths: Vec<String>) -> Downlo
         paths,
         policy: None,
         summary: Summary {
+            destination: None,
             copied: 0,
             skipped: Vec::new(),
             failed: Vec::new(),
@@ -344,6 +350,7 @@ struct Run {
     /// For a retry, copy only these failed paths, traversing their ancestors.
     paths: Vec<String>,
     remote: Remote,
+    generation: u64,
     /// New connections, after drops.
     resumed: tokio::sync::mpsc::UnboundedReceiver<Remote>,
     progress: Arc<Mutex<Progress>>,
@@ -386,35 +393,70 @@ impl Run {
     }
 
     async fn run(&mut self, job: &Job) -> Result<(), Halt> {
-        let items = self.walk(job).await;
-        let files = items
-            .iter()
-            .filter(|i| matches!(i, Item::File { .. }))
-            .count();
-        let bytes = items.iter().try_fold(0u64, |sum, item| match item {
-            Item::File { entry, .. } => sum.checked_add(entry.size?),
-            Item::Dir { .. } => Some(sum),
-        });
-        self.update(|p| {
-            p.files_total = Some(files);
-            p.bytes_total = bytes;
-        });
-        self.copy_items(job, items).await
+        let (tx, mut rx) = tokio::sync::mpsc::channel(PARALLEL_FILES);
+        let paths = std::mem::take(&mut self.paths);
+        let remote = self.remote.clone();
+        let progress = self.progress.clone();
+        let wake = self.wake.clone();
+        let walk = async move {
+            let (files, bytes) = discovery::walk(job, &paths, remote, tx).await?;
+            if let Ok(mut p) = progress.lock() {
+                p.files_total = Some(files);
+                p.bytes_total = bytes;
+            }
+            wake();
+            Ok(())
+        };
+        tokio::try_join!(walk, self.copy_items(job, &mut rx))?;
+        Ok(())
     }
 
-    async fn copy_items(&mut self, job: &Job, items: Vec<Item>) -> Result<(), Halt> {
-        if items.is_empty() {
-            return Ok(());
-        }
-        let root = &job.local_folder;
-        std::fs::create_dir_all(root)
-            .map_err(|e| Halt::Local(format!("Cannot create {}: {e}", root.display())))?;
-        let root_dir = Dir::open_ambient_dir(root, cap_std::ambient_authority())
-            .map_err(|e| Halt::Local(format!("Cannot open {}: {e}", root.display())))?;
-        // The walk is depth-first. A handle stays open until we leave its subtree.
-        let mut parents = vec![Arc::new(root_dir)];
+    async fn copy_items(
+        &mut self,
+        job: &Job,
+        rx: &mut tokio::sync::mpsc::Receiver<Found>,
+    ) -> Result<(), Halt> {
+        let mut parents = Vec::new();
         let mut flights = Flights::new();
-        for item in items {
+        loop {
+            while flights.len() >= PARALLEL_FILES {
+                self.finish_one(&mut flights, job).await?;
+            }
+            let found = tokio::select! {
+                completed = flights.next(), if !flights.is_empty() => {
+                    self.finish(completed.unwrap(), &mut flights, job).await?;
+                    continue;
+                }
+                found = rx.recv() => found,
+            };
+            let item = match found {
+                Some(Found::Item(item)) => item,
+                Some(Found::Failed(note)) => {
+                    self.summary.failed.push(note);
+                    continue;
+                }
+                Some(Found::Skipped(note)) => {
+                    self.summary.skipped.push(note);
+                    continue;
+                }
+                Some(Found::Lost(generation, reply)) => {
+                    self.drain(&mut flights, job).await?;
+                    if self.generation == generation && !self.reconnect().await {
+                        return Err(Halt::Cancelled);
+                    }
+                    let _ = reply.send((self.remote.clone(), self.generation));
+                    continue;
+                }
+                None => break,
+            };
+            if parents.is_empty() {
+                let root = &job.local_folder;
+                std::fs::create_dir_all(root)
+                    .map_err(|e| Halt::Local(format!("Cannot create {}: {e}", root.display())))?;
+                let dir = Dir::open_ambient_dir(root, cap_std::ambient_authority())
+                    .map_err(|e| Halt::Local(format!("Cannot open {}: {e}", root.display())))?;
+                parents.push(Arc::new(dir));
+            }
             let rel = match &item {
                 Item::File { rel, .. } | Item::Dir { rel } => rel,
             };
@@ -428,7 +470,16 @@ impl Run {
             let name = &rel[depth - 1];
             match item {
                 Item::Dir { ref rel } => match local::child(parent, name) {
-                    Ok(Some(dir)) => parents.push(Arc::new(dir)),
+                    Ok(Some(dir)) => {
+                        if self.summary.destination.is_none() {
+                            self.summary.destination = Some(if job.entries.len() == 1 {
+                                job.local_folder.join(&rel[0])
+                            } else {
+                                job.local_folder.clone()
+                            });
+                        }
+                        parents.push(Arc::new(dir));
+                    }
                     Ok(None) => self.fail(rel, "A local file is in the way"),
                     Err(e) => {
                         return Err(Halt::Local(format!("Cannot create {}: {e}", rel.join("/"))));
@@ -455,9 +506,7 @@ impl Run {
                             continue;
                         }
                     }
-                    while flights.len() >= PARALLEL_FILES {
-                        self.finish_one(&mut flights, job).await?;
-                    }
+
                     self.schedule(&flights, file, job.options);
                 }
             }
@@ -509,8 +558,21 @@ impl Run {
     }
 
     async fn finish_one(&mut self, flights: &mut Flights, job: &Job) -> Result<(), Halt> {
+        if let Some(completed) = flights.next().await {
+            self.finish(completed, flights, job).await?;
+        }
+        Ok(())
+    }
+
+    async fn finish(
+        &mut self,
+        completed: Completed,
+        flights: &mut Flights,
+        job: &Job,
+    ) -> Result<(), Halt> {
         let mut retry = Vec::new();
-        while let Some((mut file, result)) = flights.next().await {
+        let mut next = Some(completed);
+        while let Some((mut file, result)) = next {
             let path = file.local_name();
             if let Some(index) = self.active.iter().position(|name| *name == path) {
                 self.active.swap_remove(index);
@@ -521,6 +583,14 @@ impl Run {
                     match staged.partial.publish(&file.name, file.overwrite) {
                         Ok(()) => {
                             staged.published();
+                            if self.summary.destination.is_none() {
+                                self.summary.destination =
+                                    Some(if job.entries.len() == 1 && file.rel.len() == 1 {
+                                        job.local_folder.join(&file.name)
+                                    } else {
+                                        job.local_folder.clone()
+                                    });
+                            }
                             self.summary.copied += 1;
                             self.update(|p| p.files_done += 1);
                             break;
@@ -552,6 +622,7 @@ impl Run {
             }
             // Collect all results from this connection before pausing. Only files
             // that lost their read go back into the pool after reconnect.
+            next = flights.next().await;
         }
         if !retry.is_empty() {
             if !self.reconnect().await {
@@ -572,6 +643,7 @@ impl Run {
             match self.resumed.recv().await {
                 Some(remote) if remote.is_closed() => continue,
                 Some(remote) => {
+                    self.generation += 1;
                     self.remote = remote;
                     self.unavailable.store(false, Ordering::Relaxed);
                     break true;
@@ -612,103 +684,6 @@ impl Run {
             path: rel.join("/"),
             reason: reason.into(),
         });
-    }
-
-    /// Everything to make, directories before what is in them. Each remote directory is
-    /// walked once, even when links reach it twice.
-    async fn walk(&mut self, job: &Job) -> Vec<Item> {
-        let mut items = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut names = BTreeSet::new();
-        let mut stack: Vec<(String, Vec<String>, Entry)> = job
-            .entries
-            .iter()
-            .filter(|e| names.insert(e.name.clone()))
-            .rev()
-            .map(|e| (join(&job.dir, &e.name), vec![e.name.clone()], e.clone()))
-            .collect();
-        while let Some((remote, rel, mut entry)) = stack.pop() {
-            if !self.paths.is_empty() {
-                let path = rel.join("/");
-                if !self.paths.iter().any(|failed| {
-                    path == *failed || descendant(failed, &path) || descendant(&path, failed)
-                }) {
-                    continue;
-                }
-            }
-            if !local::valid_name(&entry.name) {
-                self.fail(&rel, "Invalid local filename");
-                continue;
-            }
-            if !entry.is_dir {
-                if (entry.size.is_none()
-                    || (job.options.keep_modified && entry.modified.is_none())
-                    || (job.options.keep_executable && entry.permissions.is_none()))
-                    && self
-                        .remote
-                        .complete_file_metadata(&remote, &mut entry)
-                        .await
-                        .is_err()
-                    && self.remote.closed().await
-                {
-                    stack.push((remote, rel, entry));
-                    if !self.reconnect().await {
-                        break;
-                    }
-                    continue;
-                }
-                items.push(Item::File { remote, rel, entry });
-                continue;
-            }
-            if entry.link.is_some() && !job.options.follow_links {
-                self.skip(&rel, NOT_FOLLOWED);
-                continue;
-            }
-            let real = self
-                .remote
-                .canonicalize(remote.clone())
-                .await
-                .unwrap_or_else(|_| remote.clone());
-            if !seen.insert(real.clone()) {
-                continue;
-            }
-            match self.remote.list(remote.clone()).await {
-                Err(_) if self.remote.closed().await => {
-                    // Walked again on the new connection.
-                    seen.remove(&real);
-                    stack.push((remote, rel, entry));
-                    if !self.reconnect().await {
-                        break;
-                    }
-                }
-                Ok(listing) => {
-                    items.push(Item::Dir { rel: rel.clone() });
-                    let dir = rel.join("/");
-                    for path in &self.paths {
-                        if let Some(rest) =
-                            path.strip_prefix(&dir).and_then(|s| s.strip_prefix('/'))
-                        {
-                            let child = rest.split('/').next().unwrap_or(rest);
-                            if !listing.entries.iter().any(|e| e.name == child) {
-                                self.summary.failed.push(Note {
-                                    path: path.clone(),
-                                    reason: "No such file".into(),
-                                });
-                            }
-                        }
-                    }
-                    let mut entries = listing.entries;
-                    entries.sort_by(|a, b| b.name.cmp(&a.name));
-                    for child in entries {
-                        let mut child_rel = rel.clone();
-                        child_rel.push(child.name.clone());
-                        stack.push((join(&remote, &child.name), child_rel, child));
-                    }
-                }
-                Err(reason) => self.fail(&rel, reason),
-            }
-        }
-        items
     }
 
     async fn resolve(&mut self, dir: &Dir, path: &Path, name: &str) -> Result<Choice, Halt> {
@@ -810,6 +785,7 @@ pub struct Queue {
     running: Option<Download>,
     waiting: VecDeque<(Job, Vec<String>)>,
     current_job: Option<Job>,
+    last_destination: Option<PathBuf>,
     reports: VecDeque<Report>,
     /// The running Download's question, until it is answered.
     pub conflict: Option<Conflict>,
@@ -842,6 +818,9 @@ impl Queue {
                             retry,
                         });
                     }
+                    if let Some(path) = &summary.destination {
+                        self.last_destination = Some(path.clone());
+                    }
                     self.finished = Some(summary);
                     ended = true;
                 }
@@ -863,6 +842,22 @@ impl Queue {
             .front()
             .map(|r| &r.summary)
             .or(self.finished.as_ref())
+    }
+
+    pub fn waiting_jobs(&self) -> impl Iterator<Item = &Job> {
+        self.waiting.iter().map(|(job, _)| job)
+    }
+
+    pub fn remove_waiting(&mut self, index: usize) {
+        self.waiting.remove(index);
+    }
+
+    pub fn current_job(&self) -> Option<&Job> {
+        self.current_job.as_ref()
+    }
+
+    pub fn last_destination(&self) -> Option<&Path> {
+        self.last_destination.as_deref()
     }
 
     pub fn can_retry(&self) -> bool {

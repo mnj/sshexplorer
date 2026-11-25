@@ -31,6 +31,7 @@ use crate::known_hosts::{self, Recorded, Verdict};
 
 mod auth;
 mod opening;
+pub(crate) mod tail;
 
 pub use auth::{NO_AGENT, PassphrasePrompt, Question, QuestionsPrompt, default_agent};
 
@@ -507,6 +508,10 @@ fn drop_reason(reason: &DisconnectReason<russh::Error>) -> String {
 }
 
 impl Session {
+    pub(crate) fn target(&self) -> &Target {
+        &self.redial.target
+    }
+
     /// Why the connection dropped, once it has: then the Session is Disconnected.
     pub fn lost(&self) -> Option<String> {
         self.handle

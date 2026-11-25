@@ -9,6 +9,8 @@
 //! The panel is a focus target of its own. While it holds the keyboard, the move keys
 //! scroll it, Escape gives the keyboard back to the listing, and the cycle keys move on.
 
+mod tail;
+
 use egui::{EventFilter, Id, Key, Modifiers, Sense};
 
 use crate::archive::{Listing, Stamp};
@@ -54,6 +56,7 @@ pub enum Leave {
 pub struct PreviewPanel {
     pub id: Id,
     preview: Preview,
+    tail: Option<tail::Tail>,
     /// The read in flight, and the fetch it answers.
     reading: Option<(u64, Request<Vec<u8>>)>,
     /// Rows the text view showed last frame, for paging.
@@ -84,6 +87,7 @@ impl PreviewPanel {
         PreviewPanel {
             id,
             preview: Preview::default(),
+            tail: None,
             reading: None,
             page: 1,
             image: ImageView::default(),
@@ -113,6 +117,15 @@ impl PreviewPanel {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: PanelFrame<'_>) -> Leave {
         let now = ui.input(|i| i.time);
+        if self.tail.is_some()
+            && !self
+                .preview
+                .shown()
+                .zip(frame.focused.as_ref())
+                .is_some_and(|(old, new)| old.focused.path == new.path && !new.is_dir())
+        {
+            self.tail = None;
+        }
         if self.preview.focus(frame.focused, now) {
             self.reading = None;
             self.fresh();
@@ -129,11 +142,15 @@ impl PreviewPanel {
             self.fresh();
         }
         let cap = frame.settings.preview.size_cap_bytes();
-        if let Some(fetch) = self.preview.due(now, cap) {
+        if self.tail.is_none()
+            && let Some(fetch) = self.preview.due(now, cap)
+        {
             let request = frame.connection.read(fetch.path, 0, fetch.len as usize);
             self.reading = Some((fetch.id, request));
         }
-        if let Some(wait) = self.preview.wait(now) {
+        if self.tail.is_none()
+            && let Some(wait) = self.preview.wait(now)
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs_f64(wait));
         }
@@ -203,6 +220,53 @@ impl PreviewPanel {
         let mut above = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
         above.set_clip_rect(body_rect.intersect(clip));
         let ui = &mut above;
+        if matches!(
+            shown.kind,
+            crate::kind::Kind::Text | crate::kind::Kind::Source
+        ) || self.tail.is_some()
+        {
+            let was_tail = self.tail.is_some();
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(!frame.disconnected, widgets::button("Show latest").flat())
+                    .clicked()
+                {
+                    self.tail.get_or_insert_with(Default::default).latest();
+                }
+                let mut follow = self.tail.as_ref().is_some_and(|tail| tail.follow);
+                if ui.add(widgets::switch(&mut follow, "Follow")).changed() {
+                    let tail = self.tail.get_or_insert_with(Default::default);
+                    tail.follow = follow;
+                    if follow {
+                        tail.latest();
+                    }
+                }
+                if self.tail.is_some() && ui.add(widgets::button("Show beginning").flat()).clicked()
+                {
+                    self.tail = None;
+                }
+            });
+            if was_tail && self.tail.is_none() {
+                self.preview = Preview::default();
+                ui.ctx().request_repaint();
+                return leave;
+            }
+            if let Some(tail) = &mut self.tail {
+                if !was_tail {
+                    self.reading = None;
+                    shown.body = Body::Loading;
+                }
+                self.page = tail.ui(
+                    ui,
+                    self.id,
+                    &shown.focused.path,
+                    frame.connection,
+                    frame.disconnected,
+                    scroll * self.page as f32,
+                );
+                return leave;
+            }
+        }
         match &mut shown.body {
             Body::Header => {}
             Body::Loading => {

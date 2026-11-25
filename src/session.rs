@@ -126,6 +126,8 @@ pub struct Frame<'a> {
 /// What a Session takes from the Host it was opened from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Details {
+    /// Empty for a Session opened without a saved Host.
+    pub host_id: String,
     /// The tab's label: a saved Host's display name, else [`label`].
     pub label: String,
     /// The tab's tooltip: for a saved Host, where it connects, port and all.
@@ -357,6 +359,10 @@ impl Session {
         self.view
     }
 
+    pub fn open_bookmark(&mut self, path: &str) {
+        self.navigate(path.to_owned(), None);
+    }
+
     /// The place the toolbar shows: the Current directory.
     pub fn place(&self) -> String {
         self.rows().current_dir()
@@ -459,6 +465,7 @@ impl Session {
         let area = ui.available_rect_before_wrap();
         let keys = frame.keys;
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            self.host_status(ui);
             if strip && download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel) {
                 self.downloads.retry_failed(&self.connection);
             }
@@ -482,12 +489,44 @@ impl Session {
             &mut self.downloads,
             &mut self.downloads_panel,
         );
+        download_ui::queue_window(
+            &ctx,
+            self.id.with("queue"),
+            &mut self.downloads,
+            &mut self.downloads_panel,
+        );
         download_ui::details(
             &ctx,
             self.id.with("details"),
             &self.downloads,
             &mut self.downloads_panel,
         );
+    }
+
+    fn host_status(&mut self, ui: &mut egui::Ui) {
+        let target = self.connection.target();
+        let address = if target.address.contains(':') && !target.address.starts_with('[') {
+            format!("[{}]", target.address)
+        } else {
+            target.address.clone()
+        };
+        let endpoint = format!("{}@{}:{}", target.account, address, target.port);
+        let state = if self.reconnecting.is_some() || self.handover.is_some() {
+            "Reconnecting"
+        } else if self.is_disconnected() {
+            "Disconnected"
+        } else {
+            "Connected"
+        };
+        widgets::status_bar(ui, |ui| {
+            if ui.add(widgets::status_item("Downloads")).clicked() {
+                self.downloads_panel.queue_open = true;
+            }
+            ui.add(widgets::muted(state));
+            ui.add_space(ui.tokens().space.gap);
+            ui.add(egui::Label::new(&endpoint).truncate())
+                .tooltip(&endpoint);
+        });
     }
 
     /// The listing in the Session's view.

@@ -89,6 +89,8 @@ rustix = { version = "1.1", features = ["fs"] }
 
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]
+# FileManager1 takes file URIs for revealing completed downloads.
+url = "2.5.9"
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

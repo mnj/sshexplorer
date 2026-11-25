@@ -320,3 +320,42 @@ fn no_new_preview_load_starts_while_the_connection_is_lost() {
     );
     assert!(preview.due(1.0, 1 << 20).is_none());
 }
+
+#[test]
+fn directory_discovery_and_in_flight_copies_share_one_reconnect() {
+    let s = Setup::new();
+    let data = big();
+    s.write("/home/tester/branch/first.bin", &data);
+    s.write("/home/tester/branch/subdir/deeper/last.txt", b"last");
+    let local = tempfile::tempdir().unwrap();
+    let job = Job {
+        dir: fixture::HOME.to_owned(),
+        entries: vec![s.entry(fixture::HOME, "branch")],
+        local_folder: local.path().to_owned(),
+        options: Options::default(),
+    };
+    s.fixture.slow_reads(Duration::from_millis(100));
+    s.fixture.slow_listings(Duration::from_millis(150));
+    let running = download::start(&s.session, job);
+    until("first read during discovery", || {
+        running.progress().active_files != 0
+    });
+    assert!(running.progress().files_total.is_none());
+    let reconnected = s.drop_and_reconnect();
+    s.fixture.slow_reads(Duration::ZERO);
+    s.fixture.slow_listings(Duration::ZERO);
+    running.resume(&reconnected);
+    let Some(DownloadEvent::Finished(summary)) = running.recv_timeout(WAIT) else {
+        panic!("discovery and transfers should finish after one reconnect");
+    };
+    assert!(summary.is_clean(), "{summary:?}");
+    assert_eq!(summary.copied, 2);
+    assert_eq!(
+        std::fs::read(local.path().join("branch/first.bin")).unwrap(),
+        data
+    );
+    assert_eq!(
+        std::fs::read(local.path().join("branch/subdir/deeper/last.txt")).unwrap(),
+        b"last"
+    );
+}

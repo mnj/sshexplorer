@@ -750,3 +750,29 @@ fn a_later_success_preserves_the_failure_and_retry_copies_only_failed_files() {
     queue.dismiss();
     assert!(queue.summary().unwrap().is_clean());
 }
+
+#[test]
+fn publishes_a_file_while_later_directories_are_being_discovered() {
+    let s = Setup::new();
+    s.write("/srv/tree/first.txt", "first");
+    let mut dir = s.remote("/srv/tree");
+    for _ in 0..12 {
+        dir = dir.join("subdir");
+        std::fs::create_dir(&dir).unwrap();
+    }
+    let job = s.job("/srv", &["tree"], Options::default());
+    s.fixture.slow_listings(Duration::from_millis(35));
+    let start = std::time::Instant::now();
+    let run = download::start(&s.session, job);
+    let output = s.local("tree/first.txt");
+    while !output.exists() {
+        assert!(start.elapsed() < WAIT);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        run.progress().files_total.is_none(),
+        "discovery is still running"
+    );
+    eprintln!("Time to first published file: {:?}", start.elapsed());
+    assert!(finished(&run).is_clean());
+}

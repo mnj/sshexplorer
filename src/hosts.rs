@@ -35,6 +35,8 @@ pub struct Host {
     pub local_folder: PathBuf,
     /// Empty means the account's home directory.
     pub initial_folder: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<String>,
     pub readonly: bool,
     pub compress_downloads: bool,
     /// Whether its password or key passphrase is kept in the OS credential store.
@@ -54,6 +56,7 @@ impl Default for Host {
             key_file: String::new(),
             local_folder: downloads_dir(),
             initial_folder: String::new(),
+            bookmarks: Vec::new(),
             readonly: true,
             compress_downloads: false,
             remember: false,
@@ -116,6 +119,7 @@ impl Host {
             key_file,
             local_folder,
             initial_folder,
+            bookmarks,
             readonly,
             compress_downloads,
             remember

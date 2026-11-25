@@ -348,3 +348,40 @@ fn in_tree_view_the_selected_directory_is_downloaded() {
     assert!(w.local.join("tester/docs").is_dir());
     assert!(w.local.join("tester/.profile").is_file());
 }
+
+#[test]
+fn queued_jobs_can_be_inspected_and_removed_without_cancelling_the_active_download() {
+    let fixture = Fixture::start();
+    std::fs::write(
+        fixture.root().join("home/tester/current.bin"),
+        vec![7; 512 * 1024],
+    )
+    .unwrap();
+    let mut w = window(&fixture, &["Fixture"]);
+    let h = &mut w.harness;
+    open(h, "Fixture");
+    std::fs::write(w.local.join("notes.txt"), "local").unwrap();
+    fixture.slow_reads(Duration::from_millis(100));
+    select(h, "current.bin");
+    h.key_press_modifiers(CTRL, Key::S);
+    h.run_ok();
+    select(h, "notes.txt");
+    h.key_press_modifiers(CTRL, Key::S);
+    h.run_ok();
+    until(h, "queued", |h| has(h, "+1 queued"));
+    h.get_by_role_and_label(Role::Button, "+1 queued").click();
+    h.run_ok();
+    assert!(has(h, "/home/tester/notes.txt"));
+    h.get_by_role_and_label(Role::Button, "Remove").click();
+    h.run_ok();
+    until(h, "completed destination", |h| {
+        h.query_by_role_and_label(Role::Button, "Show in file manager")
+            .is_some()
+    });
+    assert!(has(h, "No downloads queued"));
+    assert!(w.local.join("current.bin").exists());
+    assert_eq!(
+        std::fs::read_to_string(w.local.join("notes.txt")).unwrap(),
+        "local"
+    );
+}

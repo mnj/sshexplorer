@@ -537,6 +537,11 @@ impl App {
             .binding(Action::Download)
             .map(|b| b.label(cfg!(target_os = "macos")));
         let details = session.details.clone();
+        let host = self
+            .hosts
+            .iter()
+            .find(|h| !details.host_id.is_empty() && h.id == details.host_id);
+        let mut toggle_pin = false;
         let busy = session.is_searching() || session.is_disconnected();
         let (view, place, refreshing) = (session.view(), session.place(), session.is_refreshing());
         let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
@@ -582,6 +587,34 @@ impl App {
                             .clicked()
                         {
                             session.move_in_history(step);
+                        }
+                    }
+                    if let Some(host) = host {
+                        let pinned = host.bookmarks.contains(&place);
+                        let action = if pinned {
+                            "Unpin current folder"
+                        } else {
+                            "Pin current folder"
+                        };
+                        toggle_pin = ui.add(widgets::menu_item(action)).clicked();
+                        if !host.bookmarks.is_empty() {
+                            widgets::menu_separator(ui);
+                            ui.label("Pinned folders");
+                            egui::ScrollArea::vertical()
+                                .max_height(ui.available_height())
+                                .show(ui, |ui| {
+                                    for path in &host.bookmarks {
+                                        if ui
+                                            .add_enabled(
+                                                !session.is_disconnected(),
+                                                widgets::menu_item(path),
+                                            )
+                                            .clicked()
+                                        {
+                                            session.open_bookmark(path);
+                                        }
+                                    }
+                                });
                         }
                     }
                     if compact {
@@ -637,6 +670,14 @@ impl App {
                     ui.add(widgets::warning_message(note));
                 }
             });
+        }
+        if toggle_pin && let Some(host) = self.hosts.iter_mut().find(|h| h.id == details.host_id) {
+            if host.bookmarks.contains(&place) {
+                host.bookmarks.retain(|path| path != &place);
+            } else {
+                host.bookmarks.push(place);
+            }
+            self.persist_hosts(ui.ctx(), false);
         }
         if dismiss && let Some(session) = self.sessions.get_mut(self.active) {
             session.details.dismissible = None;

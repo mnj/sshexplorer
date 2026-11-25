@@ -5689,6 +5689,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "url",
  "windows",
  "winx",
  "zbus",
