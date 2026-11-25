@@ -2,14 +2,14 @@
 //!
 //! [`start`] runs one Download on the SSH runtime and returns a [`Download`] at once.
 //! It first walks the Selection, so the totals are known ("counting…" until then), and
-//! then copies file by file. A file is copied flat into the Local folder; a directory is
-//! recreated with its relative structure. An existing local directory is merged into;
+//! then copies up to four files concurrently. A file is copied flat into the Local folder.
+//! A directory is recreated with its relative structure. An existing local directory is merged into;
 //! only a file that would replace an existing local file is a conflict, which pauses the
 //! Download on a [`Conflict`] until it is answered.
 //!
 //! Each file is written under a temporary name beside its target and renamed into place
 //! when complete, so no partial file ever sits under the real name. Cancelling keeps the
-//! finished files and removes the one in flight. A remote failure on one entry (it
+//! finished files and removes all staged files. A remote failure on one entry (it
 //! vanished, permission denied, a read error) is recorded and the Download goes on; a
 //! local write error stops it.
 //!
@@ -17,10 +17,14 @@
 //! is not is skipped as "symlink, not followed". A link to a file is copied as the file.
 //! No local symlinks are made. [`Queue`] runs a Session's Downloads one after another.
 //!
-//! When the connection drops, a Download pauses: the file in flight is discarded, and
-//! once [`Download::resume`] hands it the new connection it fetches that file again.
+//! When the connection drops, a Download pauses: incomplete files are discarded, and
+//! once [`Download::resume`] hands it the new connection it retries those files.
 
+mod compressed;
 mod local;
+mod transfer;
+
+use futures_util::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 pub(crate) use local::valid_name;
 
 use cap_std::fs::Dir;
@@ -31,8 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncReadExt as _;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use crate::folder::join;
 use crate::ssh::{self, Entry, Remote};
@@ -47,6 +50,8 @@ pub const NOT_FOLLOWED: &str = "symlink, not followed";
 /// The Download settings, read when a Download starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
+    /// Use remote zstd for large text files when the host permits it.
+    pub compress: bool,
     /// Give each file the remote modification time.
     pub keep_modified: bool,
     /// Make a file executable locally when it is remotely. No effect on Windows.
@@ -58,6 +63,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            compress: false,
             keep_modified: true,
             keep_executable: true,
             follow_links: false,
@@ -80,8 +86,10 @@ pub struct Job {
 /// How far a Download has got.
 #[derive(Clone, Debug)]
 pub struct Progress {
-    /// The file being copied, relative to the Local folder.
+    /// One active file, relative to the Local folder.
     pub current: Option<String>,
+    /// Files currently scheduled or being copied.
+    pub active_files: usize,
     pub files_done: usize,
     /// `None` while counting.
     pub files_total: Option<usize>,
@@ -99,6 +107,7 @@ impl Progress {
     fn new() -> Progress {
         Progress {
             current: None,
+            active_files: 0,
             files_done: 0,
             files_total: None,
             bytes_done: 0,
@@ -197,7 +206,7 @@ pub enum End {
 pub struct Download {
     progress: Arc<Mutex<Progress>>,
     events: mpsc::Receiver<Event>,
-    cancel: Arc<AtomicBool>,
+    cancel: watch::Sender<()>,
     resume: tokio::sync::mpsc::UnboundedSender<Remote>,
 }
 
@@ -228,7 +237,7 @@ impl Download {
 
     /// Stops after the current chunk, removing the file in flight.
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        self.cancel.send_replace(());
     }
 }
 
@@ -246,16 +255,16 @@ pub fn start(session: &ssh::Session, job: Job) -> Download {
 fn start_entries(session: &ssh::Session, job: Job, paths: Vec<String>) -> Download {
     let (sender, events) = mpsc::channel();
     let progress = Arc::new(Mutex::new(Progress::new()));
-    let cancel = Arc::new(AtomicBool::new(false));
+    let (cancel, cancelled) = watch::channel(());
     let (resume, resumed) = tokio::sync::mpsc::unbounded_channel();
     let run = Run {
         remote: session.remote(),
         resumed,
         progress: progress.clone(),
-        cancel: cancel.clone(),
+        unavailable: Arc::default(),
         sender,
         wake: session.waker(),
-        woken: Instant::now(),
+        active: Vec::new(),
         paths,
         policy: None,
         summary: Summary {
@@ -265,7 +274,7 @@ fn start_entries(session: &ssh::Session, job: Job, paths: Vec<String>) -> Downlo
             end: End::Finished,
         },
     };
-    session.spawn(run.go(job));
+    session.spawn(run.go(job, cancelled));
     Download {
         progress,
         events,
@@ -326,11 +335,9 @@ enum Item {
     },
 }
 
-enum Transfer<'a> {
-    Complete(local::Partial<'a>, u64),
-    Failed,
-    Lost,
-}
+const PARALLEL_FILES: usize = 4;
+type Completed = (transfer::File, Result<transfer::Staged, transfer::Error>);
+type Flights = FuturesUnordered<BoxFuture<'static, Completed>>;
 
 /// The task's state.
 struct Run {
@@ -340,10 +347,10 @@ struct Run {
     /// New connections, after drops.
     resumed: tokio::sync::mpsc::UnboundedReceiver<Remote>,
     progress: Arc<Mutex<Progress>>,
-    cancel: Arc<AtomicBool>,
+    unavailable: Arc<AtomicBool>,
     sender: mpsc::Sender<Event>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    woken: Instant,
+    active: Vec<String>,
     /// An answer to apply to every later conflict.
     policy: Option<Choice>,
     summary: Summary,
@@ -358,8 +365,28 @@ enum Halt {
 }
 
 impl Run {
-    async fn go(mut self, job: Job) {
-        let items = self.walk(&job).await;
+    async fn go(mut self, job: Job, mut cancelled: watch::Receiver<()>) {
+        let result = tokio::select! {
+            biased;
+            _ = cancelled.changed() => Err(Halt::Cancelled),
+            result = self.run(&job) => result,
+        };
+        self.summary.end = match result {
+            Ok(()) => End::Finished,
+            Err(Halt::Cancelled) => End::Cancelled,
+            Err(Halt::Local(reason)) => End::Stopped(reason),
+        };
+        self.update(|p| {
+            p.current = None;
+            p.active_files = 0;
+            p.lost = false;
+        });
+        let _ = self.sender.send(Event::Finished(self.summary));
+        (self.wake)();
+    }
+
+    async fn run(&mut self, job: &Job) -> Result<(), Halt> {
+        let items = self.walk(job).await;
         let files = items
             .iter()
             .filter(|i| matches!(i, Item::File { .. }))
@@ -368,24 +395,14 @@ impl Run {
             Item::File { entry, .. } => sum.checked_add(entry.size?),
             Item::Dir { .. } => Some(sum),
         });
-        self.update(true, |p| {
+        self.update(|p| {
             p.files_total = Some(files);
             p.bytes_total = bytes;
         });
-        self.summary.end = match self.copy_items(&job, items).await {
-            Ok(()) => End::Finished,
-            Err(Halt::Cancelled) => End::Cancelled,
-            Err(Halt::Local(reason)) => End::Stopped(reason),
-        };
-        self.update(true, |p| p.current = None);
-        let _ = self.sender.send(Event::Finished(self.summary));
-        (self.wake)();
+        self.copy_items(job, items).await
     }
 
     async fn copy_items(&mut self, job: &Job, items: Vec<Item>) -> Result<(), Halt> {
-        if self.cancelled() {
-            return Err(Halt::Cancelled);
-        }
         if items.is_empty() {
             return Ok(());
         }
@@ -395,11 +412,9 @@ impl Run {
         let root_dir = Dir::open_ambient_dir(root, cap_std::ambient_authority())
             .map_err(|e| Halt::Local(format!("Cannot open {}: {e}", root.display())))?;
         // The walk is depth-first. A handle stays open until we leave its subtree.
-        let mut parents = vec![root_dir];
+        let mut parents = vec![Arc::new(root_dir)];
+        let mut flights = Flights::new();
         for item in items {
-            if self.cancelled() {
-                return Err(Halt::Cancelled);
-            }
             let rel = match &item {
                 Item::File { rel, .. } | Item::Dir { rel } => rel,
             };
@@ -411,62 +426,178 @@ impl Run {
             }
             let parent = &parents[depth - 1];
             let name = &rel[depth - 1];
-            match &item {
-                Item::Dir { .. } => match local::child(parent, name) {
-                    Ok(Some(dir)) => parents.push(dir),
+            match item {
+                Item::Dir { ref rel } => match local::child(parent, name) {
+                    Ok(Some(dir)) => parents.push(Arc::new(dir)),
                     Ok(None) => self.fail(rel, "A local file is in the way"),
                     Err(e) => {
                         return Err(Halt::Local(format!("Cannot create {}: {e}", rel.join("/"))));
                     }
                 },
-                Item::File { remote, entry, .. } => {
-                    self.copy(parent, job, remote, rel, entry).await?
+                Item::File { remote, entry, rel } => {
+                    let name = entry.name.clone();
+                    let mut file = transfer::File {
+                        dir: parent.clone(),
+                        path: remote,
+                        rel,
+                        entry,
+                        name,
+                        overwrite: false,
+                    };
+                    // Publish earlier files before asking a conflict question. A cancel
+                    // at the prompt keeps already-copied siblings in traversal order.
+                    if !matches!(file.dir.symlink_metadata(&file.name), Err(e) if e.kind() == io::ErrorKind::NotFound)
+                    {
+                        if self.policy.is_none() {
+                            self.drain(&mut flights, job).await?;
+                        }
+                        if !self.choose_target(&mut file, job).await? {
+                            continue;
+                        }
+                    }
+                    while flights.len() >= PARALLEL_FILES {
+                        self.finish_one(&mut flights, job).await?;
+                    }
+                    self.schedule(&flights, file, job.options);
                 }
+            }
+        }
+        self.drain(&mut flights, job).await
+    }
+
+    async fn choose_target(&mut self, file: &mut transfer::File, job: &Job) -> Result<bool, Halt> {
+        let parent = file.rel[..file.rel.len() - 1]
+            .iter()
+            .fold(job.local_folder.clone(), |dir, name| dir.join(name));
+        if let Some((name, overwrite)) = self
+            .target(&file.dir, &parent, &file.rel, file.name.clone())
+            .await?
+        {
+            file.name = name;
+            file.overwrite = overwrite;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn schedule(&mut self, flights: &Flights, file: transfer::File, options: Options) {
+        let (remote, progress, wake, unavailable) = (
+            self.remote.clone(),
+            self.progress.clone(),
+            self.wake.clone(),
+            self.unavailable.clone(),
+        );
+        self.active.push(file.local_name());
+        self.update_active();
+        flights.push(
+            async move {
+                let result = file
+                    .fetch(&remote, options, progress, wake, &unavailable)
+                    .await;
+                (file, result)
+            }
+            .boxed(),
+        );
+    }
+
+    async fn drain(&mut self, flights: &mut Flights, job: &Job) -> Result<(), Halt> {
+        while !flights.is_empty() {
+            self.finish_one(flights, job).await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_one(&mut self, flights: &mut Flights, job: &Job) -> Result<(), Halt> {
+        let mut retry = Vec::new();
+        while let Some((mut file, result)) = flights.next().await {
+            let path = file.local_name();
+            if let Some(index) = self.active.iter().position(|name| *name == path) {
+                self.active.swap_remove(index);
+            }
+            self.update_active();
+            match result {
+                Ok(mut staged) => loop {
+                    match staged.partial.publish(&file.name, file.overwrite) {
+                        Ok(()) => {
+                            staged.published();
+                            self.summary.copied += 1;
+                            self.update(|p| p.files_done += 1);
+                            break;
+                        }
+                        Err(e) if !file.overwrite && e.kind() == io::ErrorKind::AlreadyExists => {
+                            if !self.choose_target(&mut file, job).await? {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            return Err(Halt::Local(format!("Cannot write {}: {e}", file.name)));
+                        }
+                    }
+                },
+                Err(transfer::Error::Local(e)) => {
+                    return Err(Halt::Local(format!("Cannot write {}: {e}", file.name)));
+                }
+                Err(transfer::Error::Remote(e)) => {
+                    if self.remote.closed().await {
+                        retry.push(file);
+                    } else {
+                        self.fail(&file.rel, e);
+                    }
+                }
+                Err(transfer::Error::Lost) => retry.push(file),
+            }
+            if retry.is_empty() {
+                break;
+            }
+            // Collect all results from this connection before pausing. Only files
+            // that lost their read go back into the pool after reconnect.
+        }
+        if !retry.is_empty() {
+            if !self.reconnect().await {
+                return Err(Halt::Cancelled);
+            }
+            for file in retry {
+                self.schedule(flights, file, job.options);
             }
         }
         Ok(())
     }
 
-    fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::SeqCst)
-    }
-
     /// The connection dropped: waits, paused, for a live one. False when cancelled.
     async fn reconnect(&mut self) -> bool {
         let since = Instant::now();
-        self.update(true, |p| p.lost = true);
+        self.update(|p| p.lost = true);
         let resumed = loop {
-            if self.cancelled() {
-                break false;
-            }
-            match tokio::time::timeout(Duration::from_millis(50), self.resumed.recv()).await {
-                // One handed over before this drop may be dead already.
-                Ok(Some(remote)) if remote.is_closed() => {}
-                Ok(Some(remote)) => {
+            match self.resumed.recv().await {
+                Some(remote) if remote.is_closed() => continue,
+                Some(remote) => {
                     self.remote = remote;
+                    self.unavailable.store(false, Ordering::Relaxed);
                     break true;
                 }
-                Ok(None) => break false,
-                Err(_) => {}
+                None => break false,
             }
         };
-        self.update(true, |p| {
+        self.update(|p| {
             p.lost = false;
             p.paused += since.elapsed();
         });
         resumed
     }
 
-    /// Changes the progress, waking the frame when `now` or when it has not been woken
-    /// for a while.
-    fn update(&mut self, now: bool, change: impl FnOnce(&mut Progress)) {
+    fn update_active(&self) {
+        self.update(|p| {
+            p.active_files = self.active.len();
+            p.current = self.active.first().cloned();
+        });
+    }
+
+    fn update(&self, change: impl FnOnce(&mut Progress)) {
         if let Ok(mut p) = self.progress.lock() {
             change(&mut p);
         }
-        if now || self.woken.elapsed() >= WAKE_EVERY {
-            self.woken = Instant::now();
-            (self.wake)();
-        }
+        (self.wake)();
     }
 
     fn fail(&mut self, rel: &[String], reason: impl Into<String>) {
@@ -497,9 +628,6 @@ impl Run {
             .map(|e| (join(&job.dir, &e.name), vec![e.name.clone()], e.clone()))
             .collect();
         while let Some((remote, rel, mut entry)) = stack.pop() {
-            if self.cancelled() {
-                break;
-            }
             if !self.paths.is_empty() {
                 let path = rel.join("/");
                 if !self.paths.iter().any(|failed| {
@@ -601,7 +729,7 @@ impl Run {
         }));
         (self.wake)();
         let (choice, all) = reply.await.unwrap_or((Choice::Cancel, false));
-        self.update(true, |p| p.paused += asked.elapsed());
+        self.update(|p| p.paused += asked.elapsed());
         let hand_edited = matches!(&choice, Choice::Rename(n) if *n != suggestion);
         if all && !hand_edited && choice != Choice::Cancel {
             self.policy = Some(choice.clone());
@@ -640,140 +768,6 @@ impl Run {
                 },
             }
         }
-    }
-
-    async fn copy(
-        &mut self,
-        dir: &Dir,
-        job: &Job,
-        remote: &str,
-        rel: &[String],
-        entry: &Entry,
-    ) -> Result<(), Halt> {
-        let (name, parents) = rel.split_last().expect("a selected file has a name");
-        // This full path is for display only. All writes use the directory handle.
-        let parent_path = parents
-            .iter()
-            .fold(job.local_folder.clone(), |p, n| p.join(n));
-        let Some((mut name, mut overwrite)) =
-            self.target(dir, &parent_path, rel, name.clone()).await?
-        else {
-            return Ok(());
-        };
-        let mut shown = parents.to_vec();
-        shown.push(name.clone());
-        self.update(true, |p| p.current = Some(shown.join("/")));
-        let (mut temp, written) = loop {
-            match self
-                .fetch(remote, dir, rel, &name, entry, job.options)
-                .await?
-            {
-                Transfer::Complete(temp, written) => break (temp, written),
-                Transfer::Failed => return Ok(()),
-                Transfer::Lost if self.reconnect().await => {}
-                Transfer::Lost => return Err(Halt::Cancelled),
-            }
-        };
-        let result = loop {
-            if self.cancelled() {
-                break Err(Halt::Cancelled);
-            }
-            match temp.publish(&name, overwrite) {
-                Ok(()) => {
-                    self.summary.copied += 1;
-                    self.update(true, |p| p.files_done += 1);
-                    return Ok(());
-                }
-                Err(e) if !overwrite && e.kind() == io::ErrorKind::AlreadyExists => {
-                    match self.target(dir, &parent_path, rel, name).await {
-                        Ok(Some(target)) => {
-                            (name, overwrite) = target;
-                            *shown.last_mut().unwrap() = name.clone();
-                            self.update(true, |p| p.current = Some(shown.join("/")));
-                        }
-                        Ok(None) => break Ok(()),
-                        Err(halt) => break Err(halt),
-                    }
-                }
-                Err(e) => break Err(Halt::Local(format!("Cannot write {name}: {e}"))),
-            }
-        };
-        self.update(true, |p| p.bytes_done -= written);
-        result
-    }
-
-    async fn fetch<'a>(
-        &mut self,
-        remote: &str,
-        dir: &'a Dir,
-        source: &[String],
-        name: &str,
-        entry: &Entry,
-        options: Options,
-    ) -> Result<Transfer<'a>, Halt> {
-        let mut file = match self.remote.open(remote.to_owned()).await {
-            Ok(file) => file,
-            Err(_) if self.remote.closed().await => return Ok(Transfer::Lost),
-            Err(reason) => {
-                self.fail(source, reason);
-                return Ok(Transfer::Failed);
-            }
-        };
-        let local_error = |e: io::Error| Halt::Local(format!("Cannot write {name}: {e}"));
-        let (temp, file_out) = local::Partial::create(dir).map_err(local_error)?;
-        let mut out = tokio::fs::File::from_std(file_out);
-        let mut buf = vec![0; CHUNK];
-        let mut written = 0u64;
-        let mut lost = false;
-        let outcome = loop {
-            if self.cancelled() {
-                break Err(Halt::Cancelled);
-            }
-            let n = match file.read(&mut buf).await {
-                Ok(0) => break Ok(true),
-                Ok(n) => n,
-                Err(_) if self.remote.closed().await => {
-                    lost = true;
-                    break Ok(false);
-                }
-                Err(e) => {
-                    self.fail(source, e.to_string());
-                    break Ok(false);
-                }
-            };
-            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut out, &buf[..n]).await {
-                break Err(local_error(e));
-            }
-            written += n as u64;
-            self.update(false, |p| p.bytes_done += n as u64);
-        };
-        drop(file);
-        let outcome = match outcome {
-            Ok(true) => tokio::io::AsyncWriteExt::flush(&mut out)
-                .await
-                .map(|()| true)
-                .map_err(local_error),
-            other => other,
-        };
-        let out = out.into_std().await;
-        let outcome = outcome.and_then(|complete| {
-            if complete {
-                keep_metadata(&out, entry, options).map_err(local_error)?;
-            }
-            Ok(complete)
-        });
-        drop(out);
-        if matches!(outcome, Ok(true)) {
-            return Ok(Transfer::Complete(temp, written));
-        }
-        self.update(true, |p| p.bytes_done -= written);
-        outcome.map(|_| {
-            if lost {
-                Transfer::Lost
-            } else {
-                Transfer::Failed
-            }
-        })
     }
 }
 

@@ -660,10 +660,37 @@ pub struct Remote {
     handle: Arc<client::Handle<HostCheck>>,
 }
 
+/// `text` with every byte but ASCII letters and digits written as a `\ooo` octal
+/// escape, which `printf` decodes.
+pub(crate) fn shell_arg(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\{b:03o}"));
+        }
+    }
+    out
+}
+
+pub(crate) const EXEC_REFUSED: &str = "The host refused to run the command";
+
 /// A command running on the host: what it prints, as it prints it, and how it ended.
 /// Dropping it closes its channel.
 pub struct Exec {
-    channel: russh::Channel<client::Msg>,
+    channel: Option<russh::Channel<client::Msg>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for Exec {
+    fn drop(&mut self) {
+        if let Some(channel) = self.channel.take() {
+            self.runtime.spawn(async move {
+                let _ = channel.close().await;
+            });
+        }
+    }
 }
 
 /// One piece of what a command does.
@@ -676,10 +703,19 @@ pub enum Output {
 }
 
 impl Exec {
+    async fn message(&mut self) -> Option<russh::ChannelMsg> {
+        let message = self.channel.as_mut()?.wait().await;
+        if matches!(message, None | Some(russh::ChannelMsg::Close)) {
+            self.channel.take();
+            return None;
+        }
+        message
+    }
+
     /// The next piece of output, or `None` once the channel has closed.
     pub async fn next(&mut self) -> Option<Output> {
         loop {
-            match self.channel.wait().await? {
+            match self.message().await? {
                 russh::ChannelMsg::Data { data } => return Some(Output::Stdout(data.to_vec())),
                 russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
                     return Some(Output::Stderr(data.to_vec()));
@@ -687,15 +723,17 @@ impl Exec {
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     return Some(Output::Exit(exit_status));
                 }
-                russh::ChannelMsg::Close => return None,
                 _ => {}
             }
         }
     }
 
     /// Closes the channel.
-    pub async fn close(self) {
-        let _ = self.channel.close().await;
+    pub async fn close(mut self) {
+        if let Some(channel) = &self.channel {
+            let _ = channel.close().await;
+            self.channel.take();
+        }
     }
 }
 
@@ -738,21 +776,25 @@ impl Remote {
     /// Runs `command` through the account's login shell. Fails when no channel opens or
     /// the host refuses to run commands.
     pub async fn exec(&self, command: &str) -> Result<Exec, String> {
-        let mut channel = self
+        let channel = self
             .handle
             .channel_open_session()
             .await
             .map_err(|e| e.to_string())?;
-        channel
+        let mut exec = Exec {
+            channel: Some(channel),
+            runtime: tokio::runtime::Handle::current(),
+        };
+        exec.channel
+            .as_ref()
+            .unwrap()
             .exec(true, command)
             .await
             .map_err(|e| e.to_string())?;
         loop {
-            match channel.wait().await {
-                Some(russh::ChannelMsg::Success) => return Ok(Exec { channel }),
-                Some(russh::ChannelMsg::Failure) | None | Some(russh::ChannelMsg::Close) => {
-                    return Err("The host refused to run the command".to_owned());
-                }
+            match exec.message().await {
+                Some(russh::ChannelMsg::Success) => return Ok(exec),
+                Some(russh::ChannelMsg::Failure) | None => return Err(EXEC_REFUSED.to_owned()),
                 _ => {}
             }
         }

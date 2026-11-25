@@ -74,6 +74,9 @@ hayro = "0.9.0"
 gstreamer = "0.25.4"
 gstreamer-app = "0.25.2"
 gstreamer-video = "0.25.4"
+# Concurrent transfers and in-app decoding of compressed downloads.
+futures-util = "0.3.34"
+zstd = { version = "0.13.3", default-features = false }
 # Downloads use directory handles for local writes and exclusive publication.
 fastrand = "2.5"
 tempfile = "3.27"

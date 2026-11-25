@@ -127,6 +127,7 @@ pub struct Fixture {
     runtime: Option<tokio::runtime::Runtime>,
     /// How long each SFTP read waits before answering, in milliseconds.
     read_delay: Arc<AtomicU64>,
+    opened_files: Arc<AtomicU64>,
     list_delay: Arc<AtomicU64>,
     attempts: Attempts,
     /// A second handle on each open connection's socket, shut by `drop_connections`.
@@ -213,6 +214,8 @@ impl Fixture {
         let served = root.path().to_path_buf();
         let read_delay = Arc::new(AtomicU64::new(0));
         let delay = read_delay.clone();
+        let opened_files = Arc::new(AtomicU64::new(0));
+        let opens = opened_files.clone();
         let list_delay = Arc::new(AtomicU64::new(0));
         let listing_delay = list_delay.clone();
         let attempts = Attempts::default();
@@ -261,6 +264,7 @@ exec sleep 600
                     root: served.clone(),
                     channels: Arc::default(),
                     read_delay: delay.clone(),
+                    opened_files: opens.clone(),
                     list_delay: listing_delay.clone(),
                     accepts: accepts.clone(),
                     methods: offered.clone(),
@@ -298,6 +302,7 @@ exec sleep 600
             root,
             runtime: Some(runtime),
             read_delay,
+            opened_files,
             list_delay,
             attempts,
             connections,
@@ -361,6 +366,18 @@ exec sleep 600
             .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
+    pub fn sftp_file_opens(&self) -> u64 {
+        self.opened_files.load(Ordering::SeqCst)
+    }
+
+    #[cfg(unix)]
+    pub fn install_zstd(&self, script: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let wrapper = self.bin.path().join("zstd");
+        std::fs::write(&wrapper, script).unwrap();
+        std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     /// What clients have tried so far, in order (see [`Attempts`]).
     pub fn attempts(&self) -> Vec<String> {
         self.attempts.lock().unwrap().clone()
@@ -407,6 +424,7 @@ struct SshHandler {
     root: PathBuf,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     read_delay: Arc<AtomicU64>,
+    opened_files: Arc<AtomicU64>,
     list_delay: Arc<AtomicU64>,
     accepts: Accepts,
     /// The methods offered, which every refusal offers again, as OpenSSH does.
@@ -600,7 +618,7 @@ impl russh::server::Handler for SshHandler {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        if matches!(mode, EXEC_HOLD | EXEC_PORTABLE) {
+        if matches!(mode, EXEC_HOLD | EXEC_PORTABLE) || self.bin.join("zstd").is_file() {
             if mode == EXEC_PORTABLE {
                 child.env("SSHEX_TEST_FIND", "portable");
             }
@@ -627,6 +645,7 @@ impl russh::server::Handler for SshHandler {
                     files: HashMap::new(),
                     next: 0,
                     read_delay: self.read_delay.clone(),
+                    opened_files: self.opened_files.clone(),
                     list_delay: self.list_delay.clone(),
                 };
                 russh_sftp::server::run(channel.into_stream(), sftp).await;
@@ -739,6 +758,7 @@ struct SftpHandler {
     files: HashMap<String, std::fs::File>,
     next: u64,
     read_delay: Arc<AtomicU64>,
+    opened_files: Arc<AtomicU64>,
     list_delay: Arc<AtomicU64>,
 }
 
@@ -902,6 +922,7 @@ impl russh_sftp::server::Handler for SftpHandler {
         self.next += 1;
         let handle = format!("file{}", self.next);
         self.files.insert(handle.clone(), file);
+        self.opened_files.fetch_add(1, Ordering::SeqCst);
         Ok(Handle {
             id,
             handle: SftpHandle::from(&handle),

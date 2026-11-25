@@ -1,5 +1,5 @@
 //! Local Download operations relative to an already-open destination directory.
-use std::{fs::File, io, path::Path};
+use std::{fs::File, io, path::Path, sync::Arc};
 
 use cap_fs_ext::DirExt;
 use cap_std::fs::{Dir, OpenOptions};
@@ -51,14 +51,14 @@ pub(super) fn child(parent: &Dir, name: &str) -> io::Result<Option<Dir>> {
     }
 }
 
-pub(super) struct Partial<'a> {
-    dir: &'a Dir,
+pub(super) struct Partial {
+    dir: Arc<Dir>,
     name: String,
     staging_name_moved: bool,
 }
 
-impl<'a> Partial<'a> {
-    pub(super) fn create(dir: &'a Dir) -> io::Result<(Self, File)> {
+impl Partial {
+    pub(super) fn create(dir: Arc<Dir>) -> io::Result<(Self, File)> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         loop {
@@ -83,7 +83,7 @@ impl<'a> Partial<'a> {
     pub(super) fn publish(&mut self, name: &str, overwrite: bool) -> io::Result<()> {
         #[cfg(windows)]
         {
-            let path = windows_path(self.dir)?;
+            let path = windows_path(&self.dir)?;
             let from = path.join(&self.name);
             let to = path.join(name);
             if overwrite {
@@ -96,23 +96,23 @@ impl<'a> Partial<'a> {
         #[cfg(not(windows))]
         {
             if overwrite {
-                self.dir.rename(&self.name, self.dir, name)?;
+                self.dir.rename(&self.name, &self.dir, name)?;
                 self.staging_name_moved = true;
             } else {
-                self.staging_name_moved = move_exclusive(self.dir, &self.name, name)?;
+                self.staging_name_moved = move_exclusive(&self.dir, &self.name, name)?;
             }
         }
         Ok(())
     }
 }
 
-impl Drop for Partial<'_> {
+impl Drop for Partial {
     fn drop(&mut self) {
         if !self.staging_name_moved {
             #[cfg(not(windows))]
             let _ = self.dir.remove_file(&self.name);
             #[cfg(windows)]
-            let _ = windows_path(self.dir).and_then(|p| std::fs::remove_file(p.join(&self.name)));
+            let _ = windows_path(&self.dir).and_then(|p| std::fs::remove_file(p.join(&self.name)));
         }
     }
 }

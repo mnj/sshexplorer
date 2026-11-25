@@ -99,7 +99,11 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) -> bool {
         gap(ui);
         if let Some(download) = queue.running() {
             let p = download.progress();
-            let current = p.current.clone().unwrap_or_else(|| "Download".to_owned());
+            let current = if p.active_files > 1 {
+                format!("Downloading {} files", p.active_files)
+            } else {
+                p.current.clone().unwrap_or_else(|| "Download".to_owned())
+            };
             ui.label(t.ty.small.rich(current).color(t.color.text.primary));
             match p.files_total {
                 Some(files) => {

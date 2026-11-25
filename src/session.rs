@@ -131,6 +131,7 @@ pub struct Details {
     /// The tab's tooltip: for a saved Host, where it connects, port and all.
     pub tooltip: Option<String>,
     pub readonly: bool,
+    pub compress_downloads: bool,
     pub local_folder: PathBuf,
     /// Why the OpenSSH config was not applied, naming the file and line.
     pub note: Option<String>,

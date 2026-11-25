@@ -44,6 +44,10 @@ Sound goes through `autoaudiosink`, which picks PipeWire, PulseAudio or ALSA.
 
 GStreamer is LGPL-2.1+. sshexplorer links it dynamically. A bundle must ship it unmodified and replaceable, with its licence notices. gst-libav brings FFmpeg, which is LGPL unless it was built with GPL parts. The gstreamer-rs bindings are MIT or Apache-2.0.
 
+## Optional download compression
+
+Enable **Compress downloads** in the Host dialog when the remote shell and SFTP expose the same filesystem paths. The host needs a POSIX shell and the `zstd` command on its `PATH`. The app streams and decodes recognized text, source, and Markdown files of at least 1 MiB. The decoder ships with the app. Smaller files and other file types use SFTP, as do retries when the command is unavailable or produces an incomplete stream.
+
 ## Other system libraries
 
 - **Linux:** a Secret Service provider (GNOME Keyring or KWallet) for Remember, and the usual X11/Wayland libraries eframe opens at run time.

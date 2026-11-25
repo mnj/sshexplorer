@@ -124,6 +124,7 @@ fn ctrl_o_opens_a_new_host_with_every_field_and_escape_dismisses() {
     );
     assert_eq!(field(&harness, "Initial remote folder"), "");
     assert!(is_on(&harness, Role::Switch, "Readonly"));
+    assert!(!is_on(&harness, Role::Switch, "Compress downloads"));
     assert!(!is_on(&harness, Role::Switch, "Remember"));
 
     // Down picks Unsaved Session, which has no Remember.
@@ -153,6 +154,10 @@ fn save_keeps_the_dialog_open_and_the_host_persists_and_delete_removes_it() {
     fill(&mut harness, "Address", "web.example.org");
     fill(&mut harness, "Port", "2222");
     fill(&mut harness, "Initial remote folder", "/var/www");
+    harness
+        .get_by_role_and_label(Role::Switch, "Compress downloads")
+        .click();
+    harness.run_ok();
     press(&mut harness, "Save");
 
     assert!(dialog_open(&harness));
@@ -164,6 +169,7 @@ fn save_keeps_the_dialog_open_and_the_host_persists_and_delete_removes_it() {
     assert_eq!(saved[0].port, Some(2222));
     assert_eq!(saved[0].initial_folder, "/var/www");
     assert!(saved[0].readonly);
+    assert!(saved[0].compress_downloads);
 
     // A new run lists it, first and picked.
     drop(harness);
@@ -172,6 +178,7 @@ fn save_keeps_the_dialog_open_and_the_host_persists_and_delete_removes_it() {
     assert!(is_on(&harness, Role::ListItem, "Web"));
     assert_eq!(field(&harness, "Address"), "web.example.org");
     assert_eq!(field(&harness, "Port"), "2222");
+    assert!(is_on(&harness, Role::Switch, "Compress downloads"));
 
     press(&mut harness, "Delete");
     assert!(dialog_open(&harness));

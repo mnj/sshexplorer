@@ -801,12 +801,13 @@ impl App {
 
     /// Queues a Download of the active Session's Selection.
     fn download(&mut self) {
-        let options = crate::download::Options {
-            keep_modified: self.settings.download.keep_modified,
-            keep_executable: self.settings.download.keep_executable,
-            follow_links: self.settings.search.follow_links,
-        };
         if let Some(session) = self.sessions.get_mut(self.active) {
+            let options = crate::download::Options {
+                compress: session.details.compress_downloads,
+                keep_modified: self.settings.download.keep_modified,
+                keep_executable: self.settings.download.keep_executable,
+                follow_links: self.settings.search.follow_links,
+            };
             session.download(options);
         }
     }

@@ -167,24 +167,10 @@ fn command(dir: &str, fast: &[String], portable: &[String]) -> String {
     line.push_str("; fi' sh");
     for arg in args {
         line.push_str(" '");
-        line.push_str(&escape(arg));
+        line.push_str(&crate::ssh::shell_arg(arg));
         line.push('\'');
     }
     line
-}
-
-/// `text` with every byte but ASCII letters and digits written as a `\ooo` octal
-/// escape, which `printf` decodes.
-fn escape(text: &str) -> String {
-    let mut out = String::new();
-    for b in text.bytes() {
-        if b.is_ascii_alphanumeric() {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("\\{b:03o}"));
-        }
-    }
-    out
 }
 
 /// `find`'s expression: directories in `prunes` (relative, `./…`) are not entered, a

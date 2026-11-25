@@ -102,23 +102,31 @@ fn big() -> Vec<u8> {
 }
 
 #[test]
-fn a_download_pauses_on_a_drop_discards_its_temp_file_and_fetches_it_again_when_resumed() {
+fn parallel_files_restart_on_reconnect_and_queued_files_finish() {
     let s = Setup::new();
-    s.write("/home/tester/big.bin", &big());
+    let files = ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"];
+    let contents = big();
+    for name in files {
+        s.write(&format!("/home/tester/{name}"), &contents);
+    }
     let local = tempfile::tempdir().unwrap();
-    let entry = s.entry(fixture::HOME, "big.bin");
+    let entries = files
+        .iter()
+        .map(|name| s.entry(fixture::HOME, name))
+        .collect();
     s.fixture.slow_reads(Duration::from_millis(30));
     let running = download::start(
         &s.session,
         Job {
             dir: fixture::HOME.to_string(),
-            entries: vec![entry],
+            entries,
             local_folder: local.path().to_path_buf(),
             options: Options::default(),
         },
     );
     until("bytes to arrive", || running.progress().bytes_done > 0);
 
+    assert_eq!(running.progress().active_files, 4);
     s.fixture.drop_connections();
     until("the pause", || running.progress().lost);
     assert!(std::fs::read_dir(local.path()).unwrap().next().is_none());
@@ -135,9 +143,15 @@ fn a_download_pauses_on_a_drop_discards_its_temp_file_and_fetches_it_again_when_
         panic!("expected the Download to finish");
     };
     assert_eq!(summary.end, End::Finished);
-    assert_eq!(summary.copied, 1);
+    assert_eq!(summary.copied, files.len());
     assert!(summary.failed.is_empty(), "{:?}", summary.failed);
-    assert_eq!(std::fs::read(local.path().join("big.bin")).unwrap(), big());
+    for name in files {
+        assert_eq!(std::fs::read(local.path().join(name)).unwrap(), contents);
+    }
+    assert_eq!(
+        running.progress().bytes_done,
+        (files.len() * contents.len()) as u64
+    );
     assert!(!running.progress().lost);
 }
 

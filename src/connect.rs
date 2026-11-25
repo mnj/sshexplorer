@@ -25,7 +25,7 @@ use crate::ssh::{
     TrustPrompt,
 };
 use crate::theme::TokensExt as _;
-use crate::widgets;
+use crate::widgets::{self, Tooltip as _};
 
 /// Shows a modal dialog: the scrim over the window and the dialog centred on it.
 fn modal<R>(
@@ -89,6 +89,7 @@ struct Fields {
     local_folder: String,
     initial_folder: String,
     readonly: bool,
+    compress_downloads: bool,
     remember: bool,
 }
 
@@ -104,6 +105,7 @@ impl Fields {
             key_file: host.key_file.clone(),
             local_folder: host.local_folder.display().to_string(),
             initial_folder: host.initial_folder.clone(),
+            compress_downloads: host.compress_downloads,
             readonly: host.readonly,
             remember: host.remember,
         }
@@ -121,6 +123,7 @@ impl Fields {
             key_file: self.key_file.trim().to_owned(),
             local_folder: PathBuf::from(self.local_folder.trim()),
             initial_folder: self.initial_folder.trim().to_owned(),
+            compress_downloads: self.compress_downloads,
             readonly: self.readonly,
             remember: self.remember,
         }
@@ -220,6 +223,7 @@ impl OpenRequest {
             details: Details {
                 label,
                 tooltip,
+                compress_downloads: host.compress_downloads,
                 readonly: host.readonly,
                 local_folder: host.local_folder,
                 note: config.note(),
@@ -633,6 +637,10 @@ impl HostDialog {
             widgets::form_row(ui, "Initial remote folder", |ui| {
                 ui.add(widgets::text_field(&mut f.initial_folder).hint("Home directory"))
                     .accessible_name("Initial remote folder");
+            });
+            widgets::form_row(ui, "Compress downloads", |ui| {
+                ui.add(widgets::switch(&mut f.compress_downloads, "").name("Compress downloads"))
+                    .tooltip("Stream large text files with zstd when available on this host");
             });
             widgets::form_row(ui, "Readonly", |ui| {
                 ui.add(widgets::switch(&mut f.readonly, "").name("Readonly"));

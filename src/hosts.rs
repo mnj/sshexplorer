@@ -36,6 +36,7 @@ pub struct Host {
     /// Empty means the account's home directory.
     pub initial_folder: String,
     pub readonly: bool,
+    pub compress_downloads: bool,
     /// Whether its password or key passphrase is kept in the OS credential store.
     pub remember: bool,
 }
@@ -54,6 +55,7 @@ impl Default for Host {
             local_folder: downloads_dir(),
             initial_folder: String::new(),
             readonly: true,
+            compress_downloads: false,
             remember: false,
         }
     }
@@ -115,6 +117,7 @@ impl Host {
             local_folder,
             initial_folder,
             readonly,
+            compress_downloads,
             remember
         );
         host.port = get::<u16>(table, "port").filter(|p| *p != 0);

@@ -301,29 +301,136 @@ fn cancel_at_a_conflict_keeps_finished_files_and_leaves_no_temporary_file() {
 }
 
 #[test]
-fn cancel_during_a_file_removes_the_file_in_flight() {
+fn cancel_discards_all_four_in_flight_files_and_leaves_the_fifth_queued() {
     let s = Setup::new();
     std::fs::create_dir_all(s.remote("/srv")).unwrap();
-    std::fs::write(s.remote("/srv/big.bin"), vec![7u8; 4 << 20]).unwrap();
-    s.fixture.slow_reads(Duration::from_millis(50));
+    let names = ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"];
+    for name in names {
+        std::fs::write(s.remote("/srv").join(name), vec![7u8; 2 << 20]).unwrap();
+    }
+    s.fixture.slow_reads(Duration::from_millis(40));
 
-    let download = s.start("/srv", &["big.bin"]);
+    let download = s.start("/srv", &names);
     let deadline = std::time::Instant::now() + WAIT;
-    while download.progress().bytes_done == 0 {
-        assert!(std::time::Instant::now() < deadline, "the copy starts");
+    while download.progress().bytes_done == 0 || s.fixture.sftp_file_opens() < 4 {
+        assert!(std::time::Instant::now() < deadline, "four files start");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(download.progress().current.as_deref(), Some("big.bin"));
+    assert_eq!(download.progress().active_files, 4);
+    assert_eq!(s.fixture.sftp_file_opens(), 4);
     download.cancel();
     let summary = finished(&download);
-
     assert_eq!(summary.end, End::Cancelled);
     assert_eq!(summary.copied, 0);
-    assert!(
-        tree(s.local.path()).is_empty(),
-        "{:?}",
-        tree(s.local.path())
+    assert_eq!(download.progress().bytes_done, 0);
+    assert_eq!(download.progress().active_files, 0);
+    assert!(tree(s.local.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn compression_streams_large_text_and_bypasses_small_or_already_compressed_files() {
+    let s = Setup::new();
+    let large = "line of text ".repeat(100_000);
+    let name = "a '$file\ncopy.log";
+    s.write(&format!("/srv/{name}"), &large);
+    s.write("/srv/small.txt", "small");
+    s.write("/srv/archive.gz", &large);
+    let encoded = zstd::stream::encode_all(large.as_bytes(), 1).unwrap();
+    std::fs::write(s.remote(&format!("/srv/{name}.zst")), encoded).unwrap();
+    s.fixture.install_zstd("#!/bin/sh\ncat \"$5.zst\"\n");
+    let job = s.job(
+        "/srv",
+        &[name, "small.txt", "archive.gz"],
+        Options {
+            compress: true,
+            ..Default::default()
+        },
     );
+    let run = download::start(&s.session, job);
+    assert!(finished(&run).is_clean());
+    assert_eq!(s.fixture.sftp_file_opens(), 2);
+    assert_eq!(read(s.local(name)), large);
+    assert_eq!(read(s.local("small.txt")), "small");
+    assert_eq!(read(s.local("archive.gz")), large);
+    assert_eq!(run.progress().bytes_done, (large.len() * 2 + 5) as u64);
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_zstd_streams_retry_over_sftp_without_publishing_or_counting_partial_data() {
+    let s = Setup::new();
+    let contents = "log record\n".repeat(110_000);
+    let frame = zstd::stream::encode_all(contents.as_bytes(), 1).unwrap();
+    let names = [
+        "truncated.txt",
+        "oversized.txt",
+        "failed.txt",
+        "missing.txt",
+    ];
+    for name in names {
+        s.write(&format!("/srv/{name}"), &contents);
+    }
+    std::fs::write(
+        s.remote("/srv/truncated.txt.zst"),
+        &frame[..frame.len() - 1],
+    )
+    .unwrap();
+    let oversized = zstd::stream::encode_all(format!("{contents}extra").as_bytes(), 1).unwrap();
+    std::fs::write(s.remote("/srv/oversized.txt.zst"), oversized).unwrap();
+    std::fs::write(s.remote("/srv/failed.txt.zst"), frame).unwrap();
+    s.fixture.install_zstd(
+        r#"#!/bin/sh
+case "$5" in
+    *missing.txt) exit 127 ;;
+    *failed.txt) cat "$5.zst"; exit 1 ;;
+    *) cat "$5.zst" ;;
+esac
+"#,
+    );
+    for (i, name) in names.iter().enumerate() {
+        let job = s.job(
+            "/srv",
+            &[name],
+            Options {
+                compress: true,
+                ..Default::default()
+            },
+        );
+        let run = download::start(&s.session, job);
+        assert!(finished(&run).is_clean());
+        assert_eq!(read(s.local(name)), contents);
+        assert_eq!(run.progress().bytes_done, contents.len() as u64);
+        assert_eq!(s.fixture.sftp_file_opens(), i as u64 + 1);
+    }
+    assert_eq!(tree(s.local.path()).len(), names.len());
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_a_stalled_compressor_discards_its_staging_file() {
+    let s = Setup::new();
+    s.write("/srv/slow.log", &"x".repeat(1 << 20));
+    s.fixture
+        .install_zstd("#!/bin/sh\ntouch started\nexec sleep 30\n");
+    let job = s.job(
+        "/srv",
+        &["slow.log"],
+        Options {
+            compress: true,
+            ..Default::default()
+        },
+    );
+    let run = download::start(&s.session, job);
+    let deadline = std::time::Instant::now() + WAIT;
+    while !s.remote("/started").exists() {
+        assert!(std::time::Instant::now() < deadline, "compressor starts");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    run.cancel();
+    assert_eq!(finished(&run).end, End::Cancelled);
+    assert!(tree(s.local.path()).is_empty());
+    assert_eq!(s.fixture.sftp_file_opens(), 0);
 }
 
 #[cfg(unix)]
@@ -466,7 +573,7 @@ fn modification_time_and_executable_bit_are_kept_when_on() {
         Options {
             keep_modified: false,
             keep_executable: false,
-            follow_links: false,
+            ..Options::default()
         },
     );
     job.local_folder = off.path().to_path_buf();
