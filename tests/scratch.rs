@@ -41,6 +41,20 @@ fn leftovers_are_cleared_and_nothing_else_in_a_chosen_directory() {
     std::fs::write(&lock, "").unwrap();
     std::fs::write(dir.path().join("mine.txt"), "keep me").unwrap();
 
+    let personal = [
+        "notes.txt",
+        "123-backup",
+        "123.lock.old",
+        "123-01",
+        "0123-0",
+    ];
+    for suffix in personal {
+        std::fs::write(
+            dir.path().join(format!("{}{suffix}", scratch::PREFIX)),
+            "keep",
+        )
+        .unwrap();
+    }
     let settings = PreviewSettings {
         scratch: ScratchChoice::Chosen,
         scratch_dir: Some(dir.path().to_owned()),
@@ -50,6 +64,13 @@ fn leftovers_are_cleared_and_nothing_else_in_a_chosen_directory() {
     assert!(!left.exists());
     assert!(!lock.exists());
     assert!(dir.path().join("mine.txt").exists());
+    for suffix in personal {
+        assert!(
+            dir.path()
+                .join(format!("{}{suffix}", scratch::PREFIX))
+                .exists()
+        );
+    }
 }
 
 #[test]

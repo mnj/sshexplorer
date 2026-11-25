@@ -101,12 +101,17 @@ pub fn strip(ui: &mut egui::Ui, queue: &mut Queue, panel: &mut Panel) {
             let p = download.progress();
             let current = p.current.clone().unwrap_or_else(|| "Download".to_owned());
             ui.label(t.ty.small.rich(current).color(t.color.text.primary));
-            match (p.files_total, p.bytes_total) {
-                (Some(files), Some(bytes)) => {
+            match p.files_total {
+                Some(files) => {
                     muted(ui, format!("{} of {files} files", p.files_done));
                     muted(
                         ui,
-                        format!("{} of {}", size_text(p.bytes_done), size_text(bytes)),
+                        match p.bytes_total {
+                            Some(bytes) => {
+                                format!("{} of {}", size_text(p.bytes_done), size_text(bytes))
+                            }
+                            None => size_text(p.bytes_done),
+                        },
                     );
                 }
                 _ => muted(ui, "counting…".to_owned()),
@@ -235,8 +240,7 @@ pub fn conflict(
             });
             widgets::button_row(ui, |ui| {
                 let name = panel.rename.trim();
-                let valid =
-                    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != "..";
+                let valid = !name.contains('\\') && crate::download::valid_name(name);
                 if ui
                     .add_enabled(valid, widgets::button("Rename").primary())
                     .clicked()

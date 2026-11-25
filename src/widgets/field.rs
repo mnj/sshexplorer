@@ -372,3 +372,15 @@ impl Widget for WarningMessage {
         response
     }
 }
+
+/// Shows a pending save error and lets the operator retry the same edits.
+pub fn retry_save(ui: &mut Ui, error: Option<&str>) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    ui.push_id(error, |ui| {
+        ui.add(warning_message(error));
+        ui.add(super::button("Retry")).clicked()
+    })
+    .inner
+}

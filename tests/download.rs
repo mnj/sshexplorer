@@ -506,3 +506,102 @@ fn a_session_queue_runs_its_downloads_in_order() {
     assert_eq!(read(s.local("two.txt")), "two");
     assert!(queue.finished.as_ref().is_some_and(Summary::is_clean));
 }
+
+#[test]
+fn a_late_conflict_keeps_both_sessions_contents_on_rename() {
+    let slow = Setup::new();
+    let fast = Setup::new();
+    let content = "x".repeat(1 << 20);
+    slow.write("/srv/report", &content);
+    slow.fixture.slow_reads(Duration::from_millis(20));
+    fast.write("/srv/report", "short report");
+    let mut fast_job = fast.job("/srv", &["report"], Options::default());
+    fast_job.local_folder = slow.local.path().to_owned();
+
+    let first = slow.start("/srv", &["report"]);
+    let deadline = std::time::Instant::now() + WAIT;
+    while first.progress().bytes_done == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(finished(&download::start(&fast.session, fast_job)).is_clean());
+    let prompt = conflict(&first);
+    assert_eq!(prompt.name, "report");
+    assert_eq!(read(slow.local("report")), "short report");
+    prompt.answer(Choice::Rename("slow report".into()), false);
+    assert!(finished(&first).is_clean());
+    assert_eq!(read(slow.local("slow report")), content);
+    assert_eq!(tree(slow.local.path()), ["report", "slow report"]);
+}
+
+#[test]
+fn a_blocked_directory_skips_its_descendants_and_copies_the_next_selection() {
+    let s = Setup::new();
+    s.write("/srv/blocked/nested/data", "data");
+    s.write("/srv/ok", "ok");
+    let other = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(other.path(), s.local("blocked")).unwrap();
+    let summary = finished(&s.start("/srv", &["blocked", "ok"]));
+    assert_eq!(summary.end, End::Finished);
+    assert_eq!(summary.copied, 1);
+    assert_eq!(summary.failed.len(), 1);
+    assert_eq!(summary.failed[0].path, "blocked");
+    assert_eq!(read(s.local("ok")), "ok");
+    assert!(tree(other.path()).is_empty());
+}
+
+#[test]
+fn a_file_selected_in_search_keeps_its_size_time_and_mode() {
+    use sshexplorer::folder::Command;
+    use sshexplorer::matches::Matches;
+    use sshexplorer::search::{Match, Query};
+
+    let s = Setup::new();
+    s.write("/srv/run.sh", "hello");
+    let file = std::fs::File::open(s.remote("/srv/run.sh")).unwrap();
+    let old = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    file.set_modified(old).unwrap();
+    file.set_permissions(std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    let mut matches = Matches::new(Query {
+        start: "/srv".into(),
+        text: "run".into(),
+        follow: false,
+        cap: 10,
+    });
+    matches.found(vec![Match {
+        path: "run.sh".into(),
+        is_dir: false,
+        link: false,
+    }]);
+    matches.apply(Command::Click(0));
+    let (dir, entries) = matches.selection().unwrap();
+    let job = Job {
+        dir,
+        entries,
+        local_folder: s.local.path().to_owned(),
+        options: Options::default(),
+    };
+    let download = download::start(&s.session, job);
+    assert!(finished(&download).is_clean());
+    assert_eq!(download.progress().bytes_total, Some(5));
+    let meta = std::fs::metadata(s.local("run.sh")).unwrap();
+    assert_eq!(meta.modified().unwrap(), old);
+    assert_ne!(meta.permissions().mode() & 0o100, 0);
+}
+
+#[test]
+fn rename_suggestion_fits_even_when_the_existing_name_is_full_length() {
+    let s = Setup::new();
+    let name = format!("{}.tar.gz", "n".repeat(248));
+    s.write(&format!("/srv/{name}"), "new");
+    std::fs::write(s.local(&name), "original").unwrap();
+    let transfer = s.start("/srv", &[&name]);
+    let prompt = conflict(&transfer);
+    let suggested = prompt.suggestion.clone();
+    assert!(suggested.ends_with(" (1).tar.gz"));
+    prompt.answer(Choice::Rename(suggested.clone()), false);
+    assert!(finished(&transfer).is_clean());
+    assert_eq!(read(s.local(&name)), "original");
+    assert_eq!(read(s.local(&suggested)), "new");
+}

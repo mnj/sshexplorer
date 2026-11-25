@@ -134,6 +134,8 @@ pub struct App {
     /// Where Hosts are saved; `None` keeps them for this run only.
     host_store: Option<HostStore>,
     host_dialog: Option<HostDialog>,
+    host_save_error: Option<String>,
+    settings_save_error: Option<String>,
     /// Where remembered secrets are kept: the OS credential store in the app, a store in
     /// memory unless [`App::credentials_at`] says otherwise.
     credentials: Arc<dyn credentials::Store>,
@@ -206,6 +208,8 @@ impl App {
             hosts: Vec::new(),
             host_store: None,
             host_dialog: None,
+            host_save_error: None,
+            settings_save_error: None,
             credentials: Arc::new(credentials::MemoryStore::default()),
             audio: crate::media::AudioOut::Silent,
             forgetting: Vec::new(),
@@ -230,7 +234,7 @@ impl App {
             host.id = crate::hosts::new_id();
             named = true;
         }
-        let app = App {
+        let mut app = App {
             settings: store.load(),
             hosts,
             host_store: Some(host_store),
@@ -321,26 +325,22 @@ impl App {
         self.applied = Some(a.clone());
     }
 
-    fn save_hosts(&self) {
-        if let Some(store) = &self.host_store
-            && let Err(err) = store.save(&self.hosts)
-        {
-            eprintln!(
-                "sshexplorer: cannot save Hosts to {}: {err}",
-                store.path().display()
-            );
-        }
+    fn save_hosts(&mut self) {
+        self.host_save_error = self.host_store.as_ref().and_then(|store| {
+            store
+                .save(&self.hosts)
+                .err()
+                .map(|e| format!("Cannot save Hosts to {}: {e}", store.path().display()))
+        });
     }
 
-    fn save(&self) {
-        if let Some(store) = &self.store
-            && let Err(err) = store.save(&self.settings)
-        {
-            eprintln!(
-                "sshexplorer: cannot save settings to {}: {err}",
-                store.path().display()
-            );
-        }
+    fn save(&mut self) {
+        self.settings_save_error = self.store.as_ref().and_then(|store| {
+            store
+                .save(&self.settings)
+                .err()
+                .map(|e| format!("Cannot save settings to {}: {e}", store.path().display()))
+        });
     }
 
     /// Draws one frame in `ui`, which covers the window.
@@ -389,6 +389,12 @@ impl App {
 
     /// The toolbar, the tab strip and the active Session; whether the gear was clicked.
     fn window(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.host_dialog.is_none() && widgets::retry_save(ui, self.host_save_error.as_deref()) {
+            self.save_hosts();
+        }
+        if self.dialog.is_none() && widgets::retry_save(ui, self.settings_save_error.as_deref()) {
+            self.save();
+        }
         let mut hosts = false;
         let mut open_settings = false;
         widgets::toolbar(
@@ -596,7 +602,8 @@ impl App {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(dialog) = &mut self.host_dialog {
-            match dialog.show(ctx, &mut self.hosts) {
+            match dialog.show_with_save_error(ctx, &mut self.hosts, self.host_save_error.as_deref())
+            {
                 Some(HostAction::Open(request)) => {
                     self.host_dialog = None;
                     let plan = request.plan(&self.read_ssh_config());
@@ -907,18 +914,22 @@ impl App {
         if page != Page::Keys {
             editor.stop();
         }
+        let mut retry = false;
         let shown = widgets::pages_dialog(id, "Changes apply at once", &PAGE_NAMES)
             .reset_label(page.reset_label())
-            .show(ctx, current, |ui, page| match Page::ALL[page] {
-                Page::Appearance => {
-                    appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
+            .show(ctx, current, |ui, page| {
+                retry = widgets::retry_save(ui, self.settings_save_error.as_deref());
+                match Page::ALL[page] {
+                    Page::Appearance => {
+                        appearance(ui, &mut settings.appearance, report, ui_fonts, mono_fonts)
+                    }
+                    Page::Browsing => browsing(ui, &mut settings.browsing),
+                    Page::Preview => preview(ui, &mut settings.preview),
+                    Page::Download => download_page(ui, settings),
+                    Page::Keys => editor.ui(ui, &mut settings.keys),
+                    Page::Connections => connections(ui, &mut settings.connections),
+                    Page::Search => search_page(ui, &mut settings.search),
                 }
-                Page::Browsing => browsing(ui, &mut settings.browsing),
-                Page::Preview => preview(ui, &mut settings.preview),
-                Page::Download => download_page(ui, settings),
-                Page::Keys => editor.ui(ui, &mut settings.keys),
-                Page::Connections => connections(ui, &mut settings.connections),
-                Page::Search => search_page(ui, &mut settings.search),
             });
         if shown.reset {
             match page {
@@ -936,6 +947,9 @@ impl App {
                     editor.stop();
                 }
             }
+        }
+        if retry {
+            self.save();
         }
         if shown.close {
             self.dialog = None;

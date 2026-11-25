@@ -68,15 +68,14 @@ impl PdfView {
     ) -> Option<String> {
         self.line = ui.tokens().row_height();
         if let State::Idle = self.state {
-            self.state = match pdf.fetched.kept.bytes() {
-                Ok(bytes) => {
-                    let max_side = ui.ctx().input(|i| i.max_texture_side) as u32;
-                    let ctx = ui.ctx().clone();
-                    let wake = move || ctx.request_repaint();
-                    State::Opening(Renderer::start(bytes.into_owned(), max_side, wake))
-                }
-                Err(e) => return Some(format!("Cannot keep the preview: {e}")),
-            };
+            let kept = pdf.fetched.kept.clone();
+            let max_side = ui.ctx().input(|i| i.max_texture_side) as u32;
+            let ctx = ui.ctx().clone();
+            self.state = State::Opening(Renderer::load(
+                move || kept.bytes().map(|bytes| bytes.into_owned()),
+                max_side,
+                move || ctx.request_repaint(),
+            ));
         }
         if let State::Opening(renderer) = &self.state {
             match renderer.try_next() {

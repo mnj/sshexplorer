@@ -394,3 +394,22 @@ fn the_preview_page_picks_the_scratch_folder() {
     l.harness.get_by_role_and_label(Role::Button, "Browse…");
     assert_eq!(l.store.load().preview.scratch, ScratchChoice::Chosen);
 }
+
+#[test]
+fn retry_saves_settings_edited_before_a_write_failure() {
+    let mut l = launch();
+    std::fs::create_dir(l.store.path()).unwrap();
+    let h = &mut l.harness;
+    open_with_gear(h);
+    h.get_by_role_and_label(Role::ListItem, "Download").click();
+    h.run();
+    h.get_by_role_and_label(Role::Switch, "Keep modification time")
+        .click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Retry");
+    std::fs::remove_dir(l.store.path()).unwrap();
+    h.get_by_role_and_label(Role::Button, "Retry").click();
+    h.run();
+    assert!(h.query_by_role_and_label(Role::Button, "Retry").is_none());
+    assert!(!l.store.load().download.keep_modified);
+}

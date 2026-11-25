@@ -387,3 +387,22 @@ fn tabs_follow_the_tab_bar_edge_and_ctrl_tab_cycles_sessions() {
     harness.run_ok();
     assert!(is_on(&harness, Role::Tab, "Fixture"));
 }
+
+#[test]
+fn a_host_save_can_be_retried_after_the_directory_becomes_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::write(&config, "blocks directory creation").unwrap();
+    let settings = Store::at(config.join("settings.toml"));
+    let hosts = HostStore::beside(settings.path());
+    let mut h = window(App::with_store(settings));
+    ctrl_o(&mut h);
+    fill(&mut h, "Address", "build-host");
+    press(&mut h, "Save");
+    assert_eq!(field(&h, "Address"), "build-host");
+    h.get_by_role_and_label(Role::Button, "Retry");
+    std::fs::remove_file(config).unwrap();
+    press(&mut h, "Retry");
+    assert!(h.query_by_role_and_label(Role::Button, "Retry").is_none());
+    assert_eq!(hosts.load()[0].address, "build-host");
+}

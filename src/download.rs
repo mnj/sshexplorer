@@ -20,7 +20,12 @@
 //! When the connection drops, a Download pauses: the file in flight is discarded, and
 //! once [`Download::resume`] hands it the new connection it fetches that file again.
 
+mod local;
+pub(crate) use local::valid_name;
+
+use cap_std::fs::Dir;
 use std::collections::{BTreeSet, VecDeque};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -81,7 +86,7 @@ pub struct Progress {
     /// `None` while counting.
     pub files_total: Option<usize>,
     pub bytes_done: u64,
-    /// `None` while counting.
+    /// Unknown while counting, or if the host omitted a size.
     pub bytes_total: Option<u64>,
     started: Instant,
     /// Time spent waiting for the operator or the connection, which the rate leaves out.
@@ -267,21 +272,41 @@ pub fn start(session: &ssh::Session, job: Job) -> Download {
 /// `name` with ` (n)` before its extension: `notes (1).txt`, `archive (2).tar.gz`. A
 /// leading dot does not start an extension.
 pub fn numbered(name: &str, n: usize) -> String {
+    let (stem, ext) = stem_and_extension(name);
+    format!("{stem} ({n}){ext}")
+}
+
+fn stem_and_extension(name: &str) -> (&str, &str) {
     let stem_end = name
         .char_indices()
         .skip(1)
         .find(|(_, c)| *c == '.')
         .map_or(name.len(), |(i, _)| i);
-    let (stem, ext) = name.split_at(stem_end);
-    format!("{stem} ({n}){ext}")
+    name.split_at(stem_end)
 }
 
 /// The first `name (n).ext` not taken in `dir`.
-fn free_name(dir: &Path, name: &str) -> String {
-    (1..)
-        .map(|n| numbered(name, n))
-        .find(|candidate| std::fs::symlink_metadata(dir.join(candidate)).is_err())
-        .unwrap_or_else(|| name.to_owned())
+fn free_name(dir: &Dir, name: &str) -> io::Result<String> {
+    let (mut stem, mut ext) = stem_and_extension(name);
+    for n in 1.. {
+        loop {
+            let candidate = format!("{stem} ({n}){ext}");
+            match dir.symlink_metadata(&candidate) {
+                Ok(_) => break,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+                // A legal filename may already fill the filesystem's component limit.
+                Err(e) if e.kind() == io::ErrorKind::InvalidFilename => {
+                    let part = if stem.is_empty() { &mut ext } else { &mut stem };
+                    let Some((end, _)) = part.char_indices().next_back() else {
+                        return Err(e);
+                    };
+                    *part = &part[..end];
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    unreachable!()
 }
 
 /// One thing to make locally, in the order made.
@@ -294,6 +319,12 @@ enum Item {
         rel: Vec<String>,
         entry: Entry,
     },
+}
+
+enum Transfer<'a> {
+    Complete(local::Partial<'a>, u64),
+    Failed,
+    Lost,
 }
 
 /// The task's state.
@@ -326,44 +357,67 @@ impl Run {
             .iter()
             .filter(|i| matches!(i, Item::File { .. }))
             .count();
-        let bytes = items
-            .iter()
-            .map(|i| match i {
-                Item::File { entry, .. } => entry.size.unwrap_or(0),
-                Item::Dir { .. } => 0,
-            })
-            .sum();
+        let bytes = items.iter().try_fold(0u64, |sum, item| match item {
+            Item::File { entry, .. } => sum.checked_add(entry.size?),
+            Item::Dir { .. } => Some(sum),
+        });
         self.update(true, |p| {
             p.files_total = Some(files);
-            p.bytes_total = Some(bytes);
+            p.bytes_total = bytes;
         });
-        for item in items {
-            if self.cancelled() {
-                self.summary.end = End::Cancelled;
-                break;
-            }
-            let result = match item {
-                Item::Dir { rel } => self.make_dir(&job.local_folder, &rel),
-                Item::File { remote, rel, entry } => {
-                    self.copy(&job.local_folder, &remote, &rel, &entry, job.options)
-                        .await
-                }
-            };
-            match result {
-                Ok(()) => {}
-                Err(Halt::Cancelled) => {
-                    self.summary.end = End::Cancelled;
-                    break;
-                }
-                Err(Halt::Local(reason)) => {
-                    self.summary.end = End::Stopped(reason);
-                    break;
-                }
-            }
-        }
+        self.summary.end = match self.copy_items(&job, items).await {
+            Ok(()) => End::Finished,
+            Err(Halt::Cancelled) => End::Cancelled,
+            Err(Halt::Local(reason)) => End::Stopped(reason),
+        };
         self.update(true, |p| p.current = None);
         let _ = self.sender.send(Event::Finished(self.summary));
         (self.wake)();
+    }
+
+    async fn copy_items(&mut self, job: &Job, items: Vec<Item>) -> Result<(), Halt> {
+        if self.cancelled() {
+            return Err(Halt::Cancelled);
+        }
+        if items.is_empty() {
+            return Ok(());
+        }
+        let root = &job.local_folder;
+        std::fs::create_dir_all(root)
+            .map_err(|e| Halt::Local(format!("Cannot create {}: {e}", root.display())))?;
+        let root_dir = Dir::open_ambient_dir(root, cap_std::ambient_authority())
+            .map_err(|e| Halt::Local(format!("Cannot open {}: {e}", root.display())))?;
+        // The walk is depth-first. A handle stays open until we leave its subtree.
+        let mut parents = vec![root_dir];
+        for item in items {
+            if self.cancelled() {
+                return Err(Halt::Cancelled);
+            }
+            let rel = match &item {
+                Item::File { rel, .. } | Item::Dir { rel } => rel,
+            };
+            let depth = rel.len();
+            parents.truncate(depth);
+            if parents.len() < depth {
+                // No destination handle exists for the blocked ancestor.
+                continue;
+            }
+            let parent = &parents[depth - 1];
+            let name = &rel[depth - 1];
+            match &item {
+                Item::Dir { .. } => match local::child(parent, name) {
+                    Ok(Some(dir)) => parents.push(dir),
+                    Ok(None) => self.fail(rel, "A local file is in the way"),
+                    Err(e) => {
+                        return Err(Halt::Local(format!("Cannot create {}: {e}", rel.join("/"))));
+                    }
+                },
+                Item::File { remote, entry, .. } => {
+                    self.copy(parent, job, remote, rel, entry).await?
+                }
+            }
+        }
+        Ok(())
     }
 
     fn cancelled(&self) -> bool {
@@ -435,11 +489,31 @@ impl Run {
             .rev()
             .map(|e| (join(&job.dir, &e.name), vec![e.name.clone()], e.clone()))
             .collect();
-        while let Some((remote, rel, entry)) = stack.pop() {
+        while let Some((remote, rel, mut entry)) = stack.pop() {
             if self.cancelled() {
                 break;
             }
+            if !local::valid_name(&entry.name) {
+                self.fail(&rel, "Invalid local filename");
+                continue;
+            }
             if !entry.is_dir {
+                if (entry.size.is_none()
+                    || (job.options.keep_modified && entry.modified.is_none())
+                    || (job.options.keep_executable && entry.permissions.is_none()))
+                    && self
+                        .remote
+                        .complete_file_metadata(&remote, &mut entry)
+                        .await
+                        .is_err()
+                    && self.remote.closed().await
+                {
+                    stack.push((remote, rel, entry));
+                    if !self.reconnect().await {
+                        break;
+                    }
+                    continue;
+                }
                 items.push(Item::File { remote, rel, entry });
                 continue;
             }
@@ -480,37 +554,19 @@ impl Run {
         items
     }
 
-    fn make_dir(&mut self, local: &Path, rel: &[String]) -> Result<(), Halt> {
-        let path = rel.iter().fold(local.to_path_buf(), |p, n| p.join(n));
-        match std::fs::symlink_metadata(&path) {
-            Ok(m) if m.is_dir() => Ok(()),
-            Ok(_) => {
-                self.fail(rel, "A local file is in the way");
-                Ok(())
-            }
-            Err(_) => std::fs::create_dir_all(&path)
-                .map_err(|e| Halt::Local(format!("Cannot create {}: {e}", path.display()))),
-        }
-    }
-
-    /// Asks about, or applies the standing answer to, the existing file `path`.
-    async fn resolve(&mut self, path: &Path) -> Choice {
-        let dir = path.parent().unwrap_or(Path::new(""));
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let suggestion = free_name(dir, &name);
+    async fn resolve(&mut self, dir: &Dir, path: &Path, name: &str) -> Result<Choice, Halt> {
+        let suggestion = free_name(dir, name)
+            .map_err(|e| Halt::Local(format!("Cannot find a free name: {e}")))?;
         match &self.policy {
-            Some(Choice::Rename(_)) => return Choice::Rename(suggestion),
-            Some(choice) => return choice.clone(),
+            Some(Choice::Rename(_)) => return Ok(Choice::Rename(suggestion)),
+            Some(choice) => return Ok(choice.clone()),
             None => {}
         }
         let (answer, reply) = oneshot::channel();
         let asked = Instant::now();
         let _ = self.sender.send(Event::Conflict(Conflict {
             path: path.to_path_buf(),
-            name,
+            name: name.to_owned(),
             suggestion: suggestion.clone(),
             answer,
         }));
@@ -521,83 +577,119 @@ impl Run {
         if all && !hand_edited && choice != Choice::Cancel {
             self.policy = Some(choice.clone());
         }
-        choice
+        Ok(choice)
     }
 
-    async fn copy(
+    /// Checks an initial name or one that another Download claimed during the read.
+    async fn target(
         &mut self,
-        local: &Path,
-        remote: &str,
+        dir: &Dir,
+        parent_path: &Path,
         rel: &[String],
-        entry: &Entry,
-        options: Options,
-    ) -> Result<(), Halt> {
-        let mut target = rel.iter().fold(local.to_path_buf(), |p, n| p.join(n));
-        let mut shown = rel.to_vec();
-        let mut overwrite = false;
+        mut name: String,
+    ) -> Result<Option<(String, bool)>, Halt> {
         loop {
-            match std::fs::symlink_metadata(&target) {
-                Err(_) => break,
+            match dir.symlink_metadata(&name) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some((name, false))),
+                Err(e) => return Err(Halt::Local(format!("Cannot inspect {name}: {e}"))),
                 Ok(m) if m.is_dir() => {
-                    self.fail(&shown, "A local directory is in the way");
-                    return Ok(());
+                    self.fail(rel, "A local directory is in the way");
+                    return Ok(None);
                 }
-                Ok(_) if overwrite => break,
-                Ok(_) => match self.resolve(&target).await {
+                Ok(_) => match self.resolve(dir, &parent_path.join(&name), &name).await? {
                     Choice::Skip => {
-                        self.skip(&shown, "Already exists");
-                        return Ok(());
+                        self.skip(rel, "Already exists");
+                        return Ok(None);
                     }
-                    Choice::Overwrite => overwrite = true,
-                    Choice::Rename(name) => {
-                        target.set_file_name(&name);
-                        if let Some(last) = shown.last_mut() {
-                            *last = name;
-                        }
+                    Choice::Overwrite => return Ok(Some((name, true))),
+                    Choice::Rename(next) if local::valid_name(&next) => name = next,
+                    Choice::Rename(_) => {
+                        self.fail(rel, "Invalid local filename");
+                        return Ok(None);
                     }
                     Choice::Cancel => return Err(Halt::Cancelled),
                 },
             }
         }
-        let shown_text = shown.join("/");
-        self.update(true, |p| p.current = Some(shown_text));
-        loop {
-            match self.fetch(remote, &target, &shown, entry, options).await {
-                Some(result) => return result,
-                None if self.reconnect().await => {}
-                None => return Err(Halt::Cancelled),
-            }
-        }
     }
 
-    /// Copies the remote file to `target` through its temp file. `None` when the
-    /// connection dropped: the temp file is gone and its bytes no longer count.
-    async fn fetch(
+    async fn copy(
+        &mut self,
+        dir: &Dir,
+        job: &Job,
+        remote: &str,
+        rel: &[String],
+        entry: &Entry,
+    ) -> Result<(), Halt> {
+        let (name, parents) = rel.split_last().expect("a selected file has a name");
+        // This full path is for display only. All writes use the directory handle.
+        let parent_path = parents
+            .iter()
+            .fold(job.local_folder.clone(), |p, n| p.join(n));
+        let Some((mut name, mut overwrite)) =
+            self.target(dir, &parent_path, rel, name.clone()).await?
+        else {
+            return Ok(());
+        };
+        let mut shown = parents.to_vec();
+        shown.push(name.clone());
+        self.update(true, |p| p.current = Some(shown.join("/")));
+        let (mut temp, written) = loop {
+            match self.fetch(remote, dir, &shown, entry, job.options).await? {
+                Transfer::Complete(temp, written) => break (temp, written),
+                Transfer::Failed => return Ok(()),
+                Transfer::Lost if self.reconnect().await => {}
+                Transfer::Lost => return Err(Halt::Cancelled),
+            }
+        };
+        let result = loop {
+            if self.cancelled() {
+                break Err(Halt::Cancelled);
+            }
+            match temp.publish(&name, overwrite) {
+                Ok(()) => {
+                    self.summary.copied += 1;
+                    self.update(true, |p| p.files_done += 1);
+                    return Ok(());
+                }
+                Err(e) if !overwrite && e.kind() == io::ErrorKind::AlreadyExists => {
+                    match self.target(dir, &parent_path, &shown, name).await {
+                        Ok(Some(target)) => {
+                            (name, overwrite) = target;
+                            *shown.last_mut().unwrap() = name.clone();
+                            self.update(true, |p| p.current = Some(shown.join("/")));
+                        }
+                        Ok(None) => break Ok(()),
+                        Err(halt) => break Err(halt),
+                    }
+                }
+                Err(e) => break Err(Halt::Local(format!("Cannot write {name}: {e}"))),
+            }
+        };
+        self.update(true, |p| p.bytes_done -= written);
+        result
+    }
+
+    async fn fetch<'a>(
         &mut self,
         remote: &str,
-        target: &Path,
+        dir: &'a Dir,
         shown: &[String],
         entry: &Entry,
         options: Options,
-    ) -> Option<Result<(), Halt>> {
+    ) -> Result<Transfer<'a>, Halt> {
         let mut file = match self.remote.open(remote.to_owned()).await {
             Ok(file) => file,
-            Err(_) if self.remote.closed().await => return None,
+            Err(_) if self.remote.closed().await => return Ok(Transfer::Lost),
             Err(reason) => {
                 self.fail(shown, reason);
-                return Some(Ok(()));
+                return Ok(Transfer::Failed);
             }
         };
-        let name = target
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let temp = target.with_file_name(format!(".{name}.sshexplorer-part"));
-        let local_error = |e: std::io::Error| Halt::Local(format!("Cannot write {name}: {e}"));
-        let mut out = match tokio::fs::File::create(&temp).await {
-            Ok(out) => out,
-            Err(e) => return Some(Err(local_error(e))),
-        };
+        let name = shown.last().unwrap();
+        let local_error = |e: io::Error| Halt::Local(format!("Cannot write {name}: {e}"));
+        let (temp, file_out) = local::Partial::create(dir).map_err(local_error)?;
+        let mut out = tokio::fs::File::from_std(file_out);
         let mut buf = vec![0; CHUNK];
         let mut written = 0u64;
         let mut lost = false;
@@ -632,28 +724,24 @@ impl Run {
             other => other,
         };
         let out = out.into_std().await;
-        let placed = match outcome {
-            Ok(true) => keep_metadata(&out, entry, options)
-                .and_then(|()| {
-                    drop(out);
-                    std::fs::rename(&temp, target)
-                })
-                .map(|()| true)
-                .map_err(local_error),
-            other => {
-                drop(out);
-                other
+        let outcome = outcome.and_then(|complete| {
+            if complete {
+                keep_metadata(&out, entry, options).map_err(local_error)?;
             }
-        };
-        if let Ok(true) = placed {
-            self.summary.copied += 1;
-            self.update(true, |p| p.files_done += 1);
-            return Some(Ok(()));
+            Ok(complete)
+        });
+        drop(out);
+        if matches!(outcome, Ok(true)) {
+            return Ok(Transfer::Complete(temp, written));
         }
-        let _ = std::fs::remove_file(&temp);
-        // The bytes of a file not kept no longer count.
-        self.update(true, |p| p.bytes_done -= written.min(p.bytes_done));
-        (!lost).then(|| placed.map(|_| ()))
+        self.update(true, |p| p.bytes_done -= written);
+        outcome.map(|_| {
+            if lost {
+                Transfer::Lost
+            } else {
+                Transfer::Failed
+            }
+        })
     }
 }
 

@@ -650,6 +650,23 @@ impl Remote {
             .map_err(|e| operator_reason(&e))
     }
 
+    /// Fills gaps in listing or Search metadata from the file's target.
+    pub(crate) async fn complete_file_metadata(
+        &self,
+        path: &str,
+        entry: &mut Entry,
+    ) -> Result<(), String> {
+        let attrs = self
+            .sftp
+            .metadata(path)
+            .await
+            .map_err(|e| operator_reason(&e))?;
+        entry.size = entry.size.or(attrs.size);
+        entry.modified = entry.modified.or(attrs.mtime);
+        entry.permissions = entry.permissions.or(attrs.permissions);
+        Ok(())
+    }
+
     /// The absolute path with every symlink resolved.
     pub async fn canonicalize(&self, path: String) -> Result<String, String> {
         self.sftp

@@ -28,8 +28,8 @@ use crate::ssh::Entry;
 
 /// How long focus rests on a file before its fetch starts, in seconds.
 pub const DELAY: f64 = 0.2;
-/// How often, in seconds, the frame looks for an archive listing being made.
-const LISTING_POLL: f64 = 0.05;
+/// How often the frame checks for local preview preparation, in seconds.
+const PREPARATION_POLL: f64 = 0.05;
 /// How many of the first bytes decide whether an unknown file is text.
 pub const SNIFF: usize = 8 * 1024;
 /// Beside the spinner while a preview loads.
@@ -84,8 +84,8 @@ pub struct Shown {
     started: bool,
     /// The load was cut short, or never started, by a dropped connection.
     lost: bool,
-    /// An archive being listed on a thread of its own; the body stays Loading.
-    listing: Option<mpsc::Receiver<Body>>,
+    /// A locally prepared body, either an archive listing or a disk-backed preview.
+    prepared: Option<mpsc::Receiver<Body>>,
 }
 
 impl Shown {
@@ -190,7 +190,7 @@ pub struct Fetch {
 
 /// The bytes fetched for a preview, kept in the Scratch folder, and the cap's result.
 pub struct Fetched {
-    pub kept: Kept,
+    pub kept: Arc<Kept>,
     /// The file's size, when the host said.
     pub total: Option<u64>,
     /// Whether the file is larger than what was fetched.
@@ -224,8 +224,7 @@ pub struct Text {
 }
 
 impl Text {
-    fn new(name: &str, fetched: Fetched, bytes: &[u8]) -> Text {
-        let text = decode(bytes, fetched.capped);
+    fn new(name: &str, fetched: Fetched, text: String) -> Text {
         let mut lines = Vec::new();
         let mut start = 0;
         for (i, b) in text.bytes().enumerate() {
@@ -330,7 +329,7 @@ impl Preview {
             fetch: None,
             started: false,
             lost: false,
-            listing: None,
+            prepared: None,
         });
         true
     }
@@ -380,8 +379,8 @@ impl Preview {
         let Some(shown) = self.shown.as_mut() else {
             return;
         };
-        // An archive being listed has all its bytes already.
-        if matches!(shown.body, Body::Loading) && shown.listing.is_none() {
+        // Local preparation already has all the remote bytes.
+        if matches!(shown.body, Body::Loading) && shown.prepared.is_none() {
             shown.body = Body::Failed(CONNECTION_LOST.to_owned());
             shown.fetch = None;
             shown.lost = true;
@@ -400,31 +399,35 @@ impl Preview {
         true
     }
 
-    /// How long until a fetch is due, or until an archive's listing is looked for
-    /// again, for the frame to wake then.
+    /// How long until the frame should check for a due fetch or a prepared preview.
     pub fn wait(&self, now: f64) -> Option<f64> {
         let shown = self.shown.as_ref()?;
-        if shown.listing.is_some() {
-            return Some(LISTING_POLL);
+        if shown.prepared.is_some() {
+            return Some(PREPARATION_POLL);
         }
         let waiting = !shown.started && matches!(shown.body, Body::Loading);
         waiting.then(|| (shown.since + DELAY - now).max(0.0))
     }
 
-    /// Takes an archive's listing once its thread has made it. Whether the body changed.
+    /// Takes a prepared body once its worker finishes. Whether the body changed.
     pub fn poll(&mut self) -> bool {
         let Some(shown) = self.shown.as_mut() else {
             return false;
         };
-        let Some(listing) = &shown.listing else {
+        let Some(prepared) = &shown.prepared else {
             return false;
         };
-        let body = match listing.try_recv() {
+        let body = match prepared.try_recv() {
             Ok(body) => body,
             Err(mpsc::TryRecvError::Empty) => return false,
-            Err(mpsc::TryRecvError::Disconnected) => Body::Failed(archive::CORRUPT.to_owned()),
+            Err(mpsc::TryRecvError::Disconnected) if shown.kind == Kind::Archive => {
+                Body::Failed(archive::CORRUPT.to_owned())
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Body::Failed(cannot_preview("preview worker stopped"))
+            }
         };
-        shown.listing = None;
+        shown.prepared = None;
         shown.body = body;
         true
     }
@@ -452,8 +455,7 @@ impl Preview {
         let total = shown.focused.entry.as_ref().and_then(|e| e.size);
         let fetched_len = bytes.len() as u64;
         let capped = total.is_some_and(|t| t > fetched_len);
-        let picture = matches!(shown.kind, Kind::Image | Kind::Pdf);
-        if let Some(total) = total.filter(|_| capped && picture) {
+        if let Some(total) = total.filter(|_| capped && whole(shown.kind)) {
             shown.body = Body::TooLarge(too_large(total));
             return;
         }
@@ -464,78 +466,67 @@ impl Preview {
             });
             return;
         }
-        if picture {
-            let pdf = shown.kind == Kind::Pdf;
-            shown.body = match place.keep(bytes) {
-                Ok(kept) => {
-                    let fetched = Fetched {
-                        kept,
-                        total,
-                        capped,
-                    };
-                    if pdf {
-                        Body::Pdf(Pdf { fetched })
-                    } else {
-                        Body::Image(Image { fetched })
-                    }
-                }
-                Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
-            };
-            return;
-        }
-        if shown.kind == Kind::Archive {
-            if let Some(total) = total.filter(|_| capped) {
-                // Sniffed after a capped fetch: only part of it is here.
-                shown.body = Body::TooLarge(too_large(total));
-                return;
-            }
-            // Unpacking may take a while: not on the frame's thread.
-            let (send, listing) = mpsc::channel();
-            let name = shown.focused.name.clone();
+        let kind = shown.kind;
+        let name = shown.focused.name.clone();
+        if kind == Kind::Archive || matches!(place, Place::Dir(_)) {
+            let place = place.clone();
+            let (send, prepared) = mpsc::channel();
             std::thread::spawn(move || {
-                let body = match archive::list(&name, &bytes) {
-                    None => Body::Unsupported,
-                    Some(Ok(listing)) => Body::Archive(listing),
-                    Some(Err(_)) => Body::Failed(archive::CORRUPT.to_owned()),
-                };
-                let _ = send.send(body);
+                let _ = send.send(prepare_body(kind, &name, bytes, &place, total, capped));
             });
-            shown.listing = Some(listing);
-            return;
+            shown.prepared = Some(prepared);
+        } else {
+            shown.body = prepare_body(kind, &name, bytes, place, total, capped);
         }
-        if !matches!(shown.kind, Kind::Text | Kind::Source | Kind::Markdown) {
-            shown.body = Body::Unsupported;
-            return;
+    }
+}
+
+/// Keeps a complete fetch and builds its preview. Disk-backed fetches and archive
+/// listings come here on a worker. A text preview decodes the bytes before storing them.
+fn prepare_body(
+    kind: Kind,
+    name: &str,
+    bytes: Vec<u8>,
+    place: &Place,
+    total: Option<u64>,
+    capped: bool,
+) -> Body {
+    let text = match kind {
+        Kind::Archive => {
+            return match archive::list(name, &bytes) {
+                None => Body::Unsupported,
+                Some(Ok(listing)) => Body::Archive(listing),
+                Some(Err(_)) => Body::Failed(archive::CORRUPT.to_owned()),
+            };
         }
-        let kept = match place.keep(bytes) {
-            Ok(kept) => kept,
-            Err(e) => {
-                shown.body = Body::Failed(format!("Cannot keep the preview: {e}"));
-                return;
+        Kind::Image | Kind::Pdf => None,
+        Kind::Text | Kind::Source | Kind::Markdown => Some(decode(&bytes, capped)),
+        _ => return Body::Unsupported,
+    };
+    let kept = match place.keep(bytes) {
+        Ok(kept) => Arc::new(kept),
+        Err(e) => return Body::Failed(format!("Cannot keep the preview: {e}")),
+    };
+    let fetched = Fetched {
+        kept,
+        total,
+        capped,
+    };
+    match text {
+        Some(text) => {
+            let text = Text::new(name, fetched, text);
+            if kind == Kind::Markdown {
+                Body::Markdown(Markdown {
+                    rendered: crate::markdown::without_images(&text.text),
+                    text,
+                    view: MarkdownView::Rendered,
+                })
+            } else {
+                Body::Text(text)
             }
-        };
-        let body = match kept.bytes() {
-            Ok(bytes) => {
-                let bytes = bytes.into_owned();
-                let fetched = Fetched {
-                    kept,
-                    total,
-                    capped,
-                };
-                let text = Text::new(&shown.focused.name, fetched, &bytes);
-                if shown.kind == Kind::Markdown {
-                    Body::Markdown(Markdown {
-                        rendered: crate::markdown::without_images(&text.text),
-                        text,
-                        view: MarkdownView::Rendered,
-                    })
-                } else {
-                    Body::Text(text)
-                }
-            }
-            Err(e) => Body::Failed(format!("Cannot keep the preview: {e}")),
-        };
-        shown.body = body;
+        }
+        None if kind == Kind::Pdf => Body::Pdf(Pdf { fetched }),
+        None => Body::Image(Image { fetched }),
     }
 }
 

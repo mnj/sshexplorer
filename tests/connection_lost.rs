@@ -101,15 +101,6 @@ fn big() -> Vec<u8> {
     (0..1024 * 1024).map(|i| (i % 251) as u8).collect()
 }
 
-fn temp_files(dir: &std::path::Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".sshexplorer-part"))
-        .collect()
-}
-
 #[test]
 fn a_download_pauses_on_a_drop_discards_its_temp_file_and_fetches_it_again_when_resumed() {
     let s = Setup::new();
@@ -130,7 +121,7 @@ fn a_download_pauses_on_a_drop_discards_its_temp_file_and_fetches_it_again_when_
 
     s.fixture.drop_connections();
     until("the pause", || running.progress().lost);
-    assert_eq!(temp_files(local.path()), Vec::<String>::new());
+    assert!(std::fs::read_dir(local.path()).unwrap().next().is_none());
     assert_eq!(running.progress().bytes_done, 0);
     assert!(running.try_next().is_none(), "paused, not finished");
 

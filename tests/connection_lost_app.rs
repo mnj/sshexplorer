@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::fixture::{self, Fixture};
@@ -140,18 +140,6 @@ fn disabled(h: &Harness<'static, App>, role: Role, label: &str) -> bool {
         .is_disabled()
 }
 
-fn part_files(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .ends_with(".sshexplorer-part")
-        })
-        .count()
-}
-
 fn big() -> Vec<u8> {
     (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect()
 }
@@ -220,11 +208,14 @@ fn a_running_download_pauses_without_its_temp_file_and_finishes_after_reconnect(
     h.key_press_modifiers(CTRL, Key::S);
     h.run_ok();
     until(h, "the current file", |h| has(h, "of 1 files"));
-    until(h, "bytes", |_| part_files(&w.local) == 1);
+    until(h, "the in-flight file", |_| {
+        std::fs::read_dir(&w.local).unwrap().next().is_some()
+    });
+    assert!(!w.local.join("big.bin").exists());
 
     drop_connection(&fixture, h);
     until(h, "the pause", |h| has(h, "Paused: connection lost"));
-    assert_eq!(part_files(&w.local), 0);
+    assert!(std::fs::read_dir(&w.local).unwrap().next().is_none());
 
     fixture.slow_reads(Duration::ZERO);
     reconnect(h);

@@ -151,8 +151,17 @@ fn hold_lock(dir: &Path) -> io::Result<()> {
 /// The pid in a scratch file's name (`<PREFIX><pid>-<n>` or `<PREFIX><pid>.lock`).
 fn pid_of(name: &str) -> Option<u32> {
     let rest = name.strip_prefix(PREFIX)?;
-    let end = rest.find(['-', '.']).unwrap_or(rest.len());
-    rest[..end].parse().ok()
+    let pid = if let Some(pid) = rest.strip_suffix(".lock") {
+        pid
+    } else {
+        let (pid, serial) = rest.split_once('-')?;
+        if serial.parse::<u64>().ok()?.to_string() != serial {
+            return None;
+        }
+        pid
+    };
+    let number = pid.parse::<u32>().ok()?;
+    (number != 0 && number.to_string() == pid).then_some(number)
 }
 
 /// Whether instance `pid` still runs: it holds its lock in `dir`.
@@ -177,11 +186,11 @@ pub fn clear_dir(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with(PREFIX) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+        let Some(pid) = pid_of(&name) else { continue };
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
             continue;
         }
-        let held =
-            pid_of(&name).is_some_and(|pid| *alive.entry(pid).or_insert_with(|| running(dir, pid)));
+        let held = *alive.entry(pid).or_insert_with(|| running(dir, pid));
         if !held {
             let _ = std::fs::remove_file(entry.path());
         }

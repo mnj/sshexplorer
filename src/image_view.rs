@@ -5,6 +5,8 @@
 //! newly focused file starts.
 
 use crate::preview::cannot_preview;
+use crate::scratch::Kept;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -56,17 +58,14 @@ impl ImageView {
         keymap: Option<&KeyMap>,
     ) -> Option<String> {
         if let State::Idle = self.state {
-            self.state = match image.fetched.kept.bytes() {
-                Ok(bytes) => State::Decoding(decode(ui.ctx(), name, bytes.into_owned())),
-                Err(e) => return Some(format!("Cannot keep the preview: {e}")),
-            };
+            self.state = State::Decoding(decode(ui.ctx(), name, image.fetched.kept.clone()));
         }
         if let State::Decoding(rx) = &self.state {
             match rx.try_recv() {
                 Ok(Ok(picture)) => self.state = State::Ready(upload(ui, name, picture)),
                 Ok(Err(reason)) => {
                     self.state = State::Done;
-                    return Some(cannot_preview(&reason));
+                    return Some(reason);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -118,7 +117,7 @@ impl Ready {
     }
 }
 
-fn decode(ctx: &egui::Context, name: &str, bytes: Vec<u8>) -> Receiver<Result<Picture, String>> {
+fn decode(ctx: &egui::Context, name: &str, kept: Arc<Kept>) -> Receiver<Result<Picture, String>> {
     let max_side = ctx.input(|i| i.max_texture_side) as u32;
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
@@ -126,7 +125,14 @@ fn decode(ctx: &egui::Context, name: &str, bytes: Vec<u8>) -> Receiver<Result<Pi
     std::thread::Builder::new()
         .name("preview-image".into())
         .spawn(move || {
-            let _ = tx.send(picture::decode(&name, &bytes, max_side));
+            let result = kept
+                .bytes()
+                .map_err(|e| format!("Cannot keep the preview: {e}"))
+                .and_then(|bytes| {
+                    picture::decode(&name, &bytes, max_side)
+                        .map_err(|reason| cannot_preview(&reason))
+                });
+            let _ = tx.send(result);
             ctx.request_repaint();
         })
         .expect("spawn the image decoder");

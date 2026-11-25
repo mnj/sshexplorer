@@ -150,6 +150,15 @@ impl Renderer {
     /// Opens `bytes` on a new thread, which renders no side longer than `max_side`
     /// pixels and calls `wake` after each event.
     pub fn start(bytes: Vec<u8>, max_side: u32, wake: impl Fn() + Send + 'static) -> Renderer {
+        Self::load(move || Ok(bytes), max_side, wake)
+    }
+
+    /// Acquires the input bytes on the renderer thread before opening the document.
+    pub(crate) fn load(
+        read: impl FnOnce() -> std::io::Result<Vec<u8>> + Send + 'static,
+        max_side: u32,
+        wake: impl Fn() + Send + 'static,
+    ) -> Renderer {
         let (wants, wanted) = mpsc::channel();
         let (send, events) = mpsc::channel();
         std::thread::Builder::new()
@@ -160,8 +169,12 @@ impl Renderer {
                 let failed = send.clone();
                 let wake = std::sync::Arc::new(wake);
                 let woken = wake.clone();
-                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(bytes, max_side, wanted, send, move || woken())
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match read() {
+                    Ok(bytes) => run(bytes, max_side, wanted, send, move || woken()),
+                    Err(e) => {
+                        let _ = send.send(Event::Failed(format!("Cannot keep the preview: {e}")));
+                        woken();
+                    }
                 }));
                 if ran.is_err() {
                     let _ = failed.send(Event::Failed(INVALID.to_owned()));

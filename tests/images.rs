@@ -72,3 +72,30 @@ fn a_file_without_a_known_extension_that_is_an_image_shows_as_one() {
         matches!(&p.shown().unwrap().body, Body::TooLarge(s) if s == "Too large to preview (40 MiB)")
     );
 }
+
+#[test]
+fn disk_backed_images_and_pdfs_are_prepared_off_the_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let place = Place::Dir(dir.path().to_owned());
+    for name in ["photo.png", "report.pdf"] {
+        let mut p = Preview::default();
+        p.focus(Some(file(name, 4)), 0.0);
+        let fetch = p.due(1.0, MIB).unwrap();
+        p.arrive(fetch.id, Ok(vec![1, 2, 3, 4]), &place);
+        assert!(matches!(p.shown().unwrap().body, Body::Loading));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !p.poll() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let fetched = match &p.shown().unwrap().body {
+            Body::Image(image) => &image.fetched,
+            Body::Pdf(pdf) => &pdf.fetched,
+            _ => panic!("expected a prepared preview"),
+        };
+        let path = fetched.kept.path().unwrap().to_owned();
+        assert_eq!(std::fs::read(&path).unwrap(), [1, 2, 3, 4]);
+        drop(p);
+        assert!(!path.exists());
+    }
+}

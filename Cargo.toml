@@ -74,6 +74,14 @@ hayro = "0.9.0"
 gstreamer = "0.25.4"
 gstreamer-app = "0.25.2"
 gstreamer-video = "0.25.4"
+# Downloads use directory handles for local writes and exclusive publication.
+fastrand = "2.5"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+
+# Atomic no-replace rename relative to the open Local folder.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
 
 # The OS reduced-motion read (theme/motion/system.rs), one platform each.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -83,6 +91,9 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# Exclusive publication uses the verbatim path of the pinned directory handle.
+renamore = "0.3.2"
+winx = "0.36.4"
 windows = { version = "0.62.2", features = ["UI_ViewManagement", "Foundation"] }
 
 [dev-dependencies]

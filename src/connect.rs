@@ -308,6 +308,15 @@ impl HostDialog {
     /// Draws the dialog for one frame. Save and Delete change `hosts` and say so with
     /// [`HostAction::Changed`].
     pub fn show(&mut self, ctx: &Context, hosts: &mut Vec<Host>) -> Option<HostAction> {
+        self.show_with_save_error(ctx, hosts, None)
+    }
+
+    pub(crate) fn show_with_save_error(
+        &mut self,
+        ctx: &Context,
+        hosts: &mut Vec<Host>,
+        save_error: Option<&str>,
+    ) -> Option<HostAction> {
         let id = Id::NULL.with("host-dialog");
         if !egui::Popup::is_any_open(ctx) {
             let (up, down) = ctx.input_mut(|i| {
@@ -373,6 +382,9 @@ impl HostDialog {
                             clicked = Some(Clicked::Delete);
                         }
                     });
+                    if widgets::retry_save(ui, save_error) {
+                        clicked = Some(Clicked::Retry);
+                    }
                     if let Some(notice) = &self.notice {
                         ui.add(widgets::warning_message(notice.as_str()));
                     }
@@ -389,6 +401,7 @@ impl HostDialog {
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
         match clicked {
             Some(Clicked::Open) => return Some(HostAction::Open(Box::new(self.request(hosts)))),
+            Some(Clicked::Retry) => return Some(HostAction::Changed),
             Some(Clicked::Save) => {
                 if self.fields.id.is_empty() {
                     self.fields.id = hosts::new_id();
@@ -575,6 +588,7 @@ impl HostDialog {
 
 /// A button of the Host dialog that was clicked.
 enum Clicked {
+    Retry,
     Open,
     Save,
     Delete,
