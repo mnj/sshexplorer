@@ -1,4 +1,4 @@
-//! Launch: the window opens in the Paper look with the toolbar and no Session.
+//! Launch: the window opens in the Paper look with the status bar and no Session.
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
@@ -15,13 +15,15 @@ fn launch() -> Harness<'static, App> {
 }
 
 #[test]
-fn launch_shows_the_toolbar_with_hosts_and_the_settings_gear() {
+fn launch_places_hosts_and_settings_at_the_bottom_right() {
     let harness = launch();
     let hosts = harness.get_by_role_and_label(Role::Button, "Hosts");
     let gear = harness.get_by_role_and_label(Role::Button, "Settings");
     // The gear sits at the right end, past Hosts.
     assert!(gear.rect().min.x > hosts.rect().max.x);
     assert!(gear.rect().max.x > 900.0);
+    assert!(gear.rect().min.y > 650.0);
+    assert_eq!(gear.rect().center().y, hosts.rect().center().y);
 }
 
 #[test]

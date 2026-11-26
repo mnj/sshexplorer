@@ -411,7 +411,7 @@ impl App {
         }
     }
 
-    /// The toolbar, the tab strip and the active Session; whether the gear was clicked.
+    /// The status bar, tab strip and active Session; whether Settings was clicked.
     fn window(&mut self, ui: &mut egui::Ui) -> bool {
         if self.host_dialog.is_none() && widgets::retry_save(ui, self.host_save_error.as_deref()) {
             self.persist_hosts(ui.ctx(), false);
@@ -421,26 +421,51 @@ impl App {
         }
         let mut hosts = false;
         let mut open_settings = false;
-        widgets::toolbar(
-            ui,
-            "app-toolbar",
-            |_| {},
-            |ui| {
-                open_settings = ui
-                    .add(widgets::glyph_button(Glyph::Gear).name("Settings"))
-                    .tooltip("Settings")
-                    .clicked();
-                let hosts_button = ui.add(widgets::glyph_button(Glyph::HostPlus).name("Hosts"));
-                let tip = "Open or manage hosts";
-                hosts = match self.settings.keys.binding(Action::HostDialog) {
-                    Some(key) => {
-                        hosts_button.tooltip_key(tip, key.label(cfg!(target_os = "macos")))
-                    }
-                    None => hosts_button.tooltip(tip),
-                }
-                .clicked();
-            },
-        );
+        let t = ui.tokens();
+        let side = t.status_bar_height();
+        egui::Panel::bottom("app-status")
+            .frame(egui::Frame::NONE)
+            .exact_size(side)
+            .resizable(false)
+            .show(ui, |ui| {
+                widgets::status_bar(ui, |ui| {
+                    // Reserve the controls first so a long endpoint cannot push them off screen.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        open_settings = ui
+                            .add(
+                                widgets::glyph_button(Glyph::Gear)
+                                    .side(side)
+                                    .name("Settings"),
+                            )
+                            .tooltip("Settings")
+                            .clicked();
+                        ui.add_space(t.space.gap);
+                        let button = ui.add(
+                            widgets::glyph_button(Glyph::HostPlus)
+                                .side(side)
+                                .name("Hosts"),
+                        );
+                        let tip = "Open or manage hosts";
+                        hosts = match self.settings.keys.binding(Action::HostDialog) {
+                            Some(key) => {
+                                button.tooltip_key(tip, key.label(cfg!(target_os = "macos")))
+                            }
+                            None => button.tooltip(tip),
+                        }
+                        .clicked();
+                        if let Some(session) = self.sessions.get_mut(self.active) {
+                            ui.add_space(t.space.gap);
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.shrink_clip_rect(ui.max_rect());
+                                    session.host_status(ui);
+                                },
+                            );
+                        }
+                    });
+                });
+            });
         if hosts {
             self.open_host_dialog();
         }

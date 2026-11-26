@@ -159,6 +159,29 @@ fn the_preview_shows_contents_and_properties_describes_the_clicked_entry() {
         n.label().as_deref() == Some("Modified") && n.value().is_some_and(|v| !v.is_empty())
     };
     assert!(harness.query_by(modified).is_some());
+    let header = harness.get_by_role_and_label(Role::Button, "Close").rect();
+    let filename = harness
+        .get_by(|n| {
+            n.label().as_deref() == Some("Name") && n.value().as_deref() == Some("todo.txt")
+        })
+        .rect();
+    assert!(header.bottom() <= filename.top());
+    for (column, permission) in [
+        ("Read", "Owner · Read: yes"),
+        ("Write", "Owner · Write: yes"),
+        ("Exec", "Owner · Execute: no"),
+    ] {
+        let title = harness.get_by_label(column).rect();
+        let cell = harness.get_by_label(permission).rect();
+        assert!((title.center().x - cell.center().x).abs() < 2.0);
+    }
+    harness
+        .get_by_role_and_label(Role::Button, "Copy path")
+        .click();
+    harness.step();
+    assert!(harness.output().platform_output.commands.iter().any(
+        |c| matches!(c, egui::OutputCommand::CopyText(path) if path == "/home/tester/todo.txt")
+    ));
     close_properties(&mut harness);
 
     properties(&mut harness, "docs");
@@ -176,6 +199,46 @@ fn the_preview_shows_contents_and_properties_describes_the_clicked_entry() {
     properties(&mut harness, "..");
     assert!(detail(&harness, "Name", ".."));
     assert!(detail(&harness, "Kind", "Directory"));
+}
+
+#[test]
+fn long_paths_wrap_and_access_remains_reachable_in_a_short_window() {
+    let fixture = Fixture::start();
+    let name = format!("{}.txt", "x".repeat(150));
+    std::fs::write(fixture.root().join(HOME).join(&name), "test").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = browsing(&fixture, &dir, AppSettings::default());
+    properties(&mut h, &name);
+    h.set_size(egui::vec2(480.0, 420.0));
+    h.run_ok();
+    let path = format!("/home/tester/{name}");
+    let path_rect = h
+        .get_by(|n| n.label().as_deref() == Some("Path") && n.value().as_deref() == Some(&path))
+        .rect();
+    assert!(path_rect.left() >= 0.0 && path_rect.right() <= 480.0);
+    assert!(
+        path_rect.height() > 30.0,
+        "long path should wrap: {path_rect:?}"
+    );
+    let last = "Others · Execute: no";
+    let before = h.get_by_label(last).rect();
+    let point = egui::pos2(path_rect.center().x, 210.0);
+    h.hover_at(point);
+    h.run_ok();
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Page,
+        delta: egui::vec2(0.0, -3.0),
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(20);
+    let bottom_row = h.get_by_label(last).rect();
+    assert!(
+        bottom_row.top() > 0.0 && bottom_row.bottom() < 420.0,
+        "path {path_rect:?}, last row {before:?} → {bottom_row:?}, wheel at {point:?}"
+    );
+    close_properties(&mut h);
 }
 
 #[cfg(unix)]

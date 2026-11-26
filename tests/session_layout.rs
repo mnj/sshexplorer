@@ -202,21 +202,25 @@ fn one_click_on_a_chevron_opens_and_closes_its_directory() {
 }
 
 #[test]
-fn the_session_bar_sits_under_its_tab_and_the_app_toolbar_above() {
+fn the_session_tab_is_at_the_top_and_global_actions_share_the_status_bar() {
     let fixture = Fixture::start();
     let dir = tempfile::tempdir().unwrap();
     let harness = browsing(&fixture, &dir);
     let tab = harness.get_by_role(Role::Tab).rect();
     let hosts = harness.get_by_role_and_label(Role::Button, "Hosts").rect();
     assert!(
-        hosts.bottom() <= tab.top(),
-        "Hosts {hosts:?} is not above the tab {tab:?}"
+        tab.top() < tab.height() && hosts.top() > tab.bottom(),
+        "tab {tab:?}, Hosts {hosts:?}"
     );
     let gear = harness
         .get_by_role_and_label(Role::Button, "Settings")
         .rect();
     assert!(hosts.right() <= gear.left() && gear.left() - hosts.right() < hosts.width());
     assert_eq!(hosts.center().y, gear.center().y);
+    let downloads = harness
+        .get_by_role_and_label(Role::Button, "Downloads")
+        .rect();
+    assert!((hosts.center().y - downloads.center().y).abs() < 2.0);
     assert!(hosts.left() > WIDTH * 0.75);
     assert!(
         harness

@@ -111,7 +111,7 @@ impl Widget for EntryName<'_> {
 }
 
 /// A folder for a directory, a sheet with a folded corner for anything else.
-fn paint_kind(ui: &Ui, t: &Tokens, center: Pos2, side: f32, kind: Kind, ink: Color32) {
+pub(super) fn paint_kind(ui: &Ui, t: &Tokens, center: Pos2, side: f32, kind: Kind, ink: Color32) {
     let painter = ui.painter();
     let stroke = Stroke::new(t.stroke.accent_line.max(1.0), ink);
     if kind == Kind::Directory {
@@ -131,6 +131,23 @@ fn paint_kind(ui: &Ui, t: &Tokens, center: Pos2, side: f32, kind: Kind, ink: Col
         sheet.left_bottom(),
     ];
     painter.add(Shape::convex_polygon(points, Color32::TRANSPARENT, stroke));
+    if side > t.icon.small {
+        // The larger Properties icon has room for the fold and interior detail.
+        let corner = sheet.right_top() + vec2(-fold, fold);
+        painter.add(Shape::line(
+            vec![corner - vec2(0.0, fold), corner, corner + vec2(fold, 0.0)],
+            stroke,
+        ));
+        let left = sheet.left() + side * 0.12;
+        for (y, fraction) in [(0.55, 0.72), (0.72, 0.54)] {
+            painter.hline(
+                left..=sheet.left() + sheet.width() * fraction,
+                sheet.top() + sheet.height() * y,
+                stroke,
+            );
+        }
+        return;
+    }
     let band = Rect::from_min_max(
         pos2(sheet.left(), sheet.bottom() - side * 0.3),
         sheet.right_bottom(),
@@ -140,7 +157,7 @@ fn paint_kind(ui: &Ui, t: &Tokens, center: Pos2, side: f32, kind: Kind, ink: Col
 
 /// The symlink arrow: a small curved-in arrow on a disc of the row's ground, at the
 /// icon's bottom-left corner.
-fn paint_link_arrow(ui: &Ui, t: &Tokens, center: Pos2, side: f32) {
+pub(super) fn paint_link_arrow(ui: &Ui, t: &Tokens, center: Pos2, side: f32) {
     let painter = ui.painter();
     let at = center + Vec2::splat(side * 0.5) * vec2(-0.55, 0.55);
     let r = side * 0.28;

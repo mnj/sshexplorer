@@ -485,7 +485,6 @@ impl Session {
         let area = ui.available_rect_before_wrap();
         let keys = frame.keys;
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            self.host_status(ui);
             if strip && download_ui::strip(ui, &mut self.downloads, &mut self.downloads_panel) {
                 self.downloads.retry_failed(&self.connection);
             }
@@ -524,7 +523,7 @@ impl Session {
         );
     }
 
-    fn host_status(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn host_status(&mut self, ui: &mut egui::Ui) {
         if let Some(info) = self.info_request.as_ref().and_then(Request::try_take) {
             self.host_info = info.unwrap_or_default();
             self.info_request = None;
@@ -558,24 +557,22 @@ impl Session {
             );
             Some(format!("{os} · {uptime}"))
         };
-        widgets::status_bar(ui, |ui| {
-            if ui.add(widgets::status_item("Downloads")).clicked() {
-                self.downloads_panel.queue_open = true;
+        if ui.add(widgets::status_item("Downloads")).clicked() {
+            self.downloads_panel.queue_open = true;
+        }
+        ui.add(widgets::muted(state));
+        ui.add_space(ui.tokens().space.gap);
+        ui.scope(|ui| {
+            if info.is_some() {
+                ui.set_max_width(ui.available_width() * 0.5);
             }
-            ui.add(widgets::muted(state));
-            ui.add_space(ui.tokens().space.gap);
-            ui.scope(|ui| {
-                if info.is_some() {
-                    ui.set_max_width(ui.available_width() * 0.5);
-                }
-                ui.add(egui::Label::new(&endpoint).truncate())
-                    .tooltip(&endpoint);
-            });
-            if let Some(text) = info {
-                ui.add_space(ui.tokens().space.gap);
-                ui.add(egui::Label::new(&text).truncate()).tooltip(&text);
-            }
+            ui.add(egui::Label::new(&endpoint).truncate())
+                .tooltip(&endpoint);
         });
+        if let Some(text) = info {
+            ui.add_space(ui.tokens().space.gap);
+            ui.add(egui::Label::new(&text).truncate()).tooltip(&text);
+        }
     }
 
     /// The listing in the Session's view.

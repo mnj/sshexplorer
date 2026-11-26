@@ -33,6 +33,7 @@ mod code;
 mod dialog;
 mod dropdown;
 mod field;
+mod file_properties;
 mod form;
 pub mod glyph;
 mod key_list;
@@ -79,6 +80,7 @@ pub use field::{
     InvalidMessage, TextField, WarningMessage, invalid_message, number_field, retry_save,
     text_field, warning_message,
 };
+pub(crate) use file_properties::file_properties;
 pub use form::{Form, FormName, FormText, form, form_group, form_hint, form_name, form_row};
 pub use glyph::{Glyph, GlyphMark, glyph};
 pub use key_list::{KeyChipButton, key_chip_button, key_list};

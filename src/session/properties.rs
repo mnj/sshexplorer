@@ -169,59 +169,32 @@ impl Session {
             }
         }
         let mut open = true;
+        let t = ctx.tokens();
+        let margin = 2.0 * (t.space.dialog + t.space.panel);
+        let available = ctx.content_rect().size();
+        let width = (available.x - margin).clamp(1.0, 456.0);
+        let height = (available.y - margin - t.ty.title.line - t.space.stack).max(t.row_height());
         widgets::window(self.id.with("properties"), "Properties")
             .open(&mut open)
             .centred()
+            .size(egui::vec2(width, height + t.ty.title.line + t.space.stack))
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    details(ui, &props.entry, props.kind, &self.zone);
-                    if let Some(reason) = &props.error {
-                        ui.add(widgets::warning_message(reason));
-                    }
-                });
+                ui.set_width(width);
+                egui::ScrollArea::vertical()
+                    .id_salt(&props.entry.path)
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        widgets::file_properties(ui, &props.entry, props.kind, &self.zone);
+                        if props.listing.is_some() {
+                            ui.add(widgets::loading_line("Loading file details…"));
+                        }
+                        if let Some(reason) = &props.error {
+                            ui.add(widgets::warning_message(reason));
+                        }
+                    });
             });
         if !open {
             self.properties = None;
         }
     }
-}
-
-/// The metadata available for this entry.
-fn details(
-    ui: &mut egui::Ui,
-    focused: &Focused,
-    kind: crate::kind::Kind,
-    zone: &jiff::tz::TimeZone,
-) {
-    let mut rows = vec![
-        ("Name", focused.name.clone()),
-        ("Path", focused.path.clone()),
-        ("Kind", crate::preview::kind_name(kind).to_owned()),
-    ];
-    if let Some(e) = &focused.entry {
-        if let Some(size) = e.size.filter(|_| !e.is_dir) {
-            rows.push(("Size", size_text(size)));
-        }
-        if let Some(at) = e.modified {
-            rows.push(("Modified", modified_text(at, zone)));
-        }
-        if let Some(mode) = e.permissions {
-            rows.push(("Permissions", permissions_text(mode)));
-        }
-        // The names when the host gave them, else the ids.
-        if let Some(owner) = e.owner.clone().or_else(|| e.uid.map(|id| id.to_string())) {
-            rows.push(("Owner", owner));
-        }
-        if let Some(group) = e.group.clone().or_else(|| e.gid.map(|id| id.to_string())) {
-            rows.push(("Group", group));
-        }
-        if let Some(target) = &e.link {
-            rows.push(("Link to", target.clone()));
-        }
-    }
-    widgets::form(ui.scope_id().with("details")).show(ui, |ui| {
-        for (name, value) in rows {
-            widgets::form_row(ui, name, |ui| ui.add(widgets::detail_value(name, value)));
-        }
-    });
 }
