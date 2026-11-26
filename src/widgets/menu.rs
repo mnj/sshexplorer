@@ -242,10 +242,15 @@ pub fn menu_item(text: impl Into<String>) -> MenuItem<'static> {
     }
 }
 
+enum MenuIcon<'a> {
+    Image(&'a str),
+    Glyph(Glyph),
+}
+
 #[must_use = "add it with ui.add"]
 pub struct MenuItem<'a> {
     text: String,
-    icon: Option<&'a str>,
+    icon: Option<MenuIcon<'a>>,
     checked: Option<bool>,
     trailing: String,
     /// The trailing text is a shortcut, which is read out after the label.
@@ -259,15 +264,15 @@ impl<'a> MenuItem<'a> {
     /// The Icon with this key in the leading column. A key that names no Icon shows none.
     pub fn icon(self, key: &str) -> MenuItem<'_> {
         MenuItem {
-            icon: Some(key),
-            text: self.text,
-            checked: self.checked,
-            trailing: self.trailing,
-            keyed: self.keyed,
-            arrow: self.arrow,
-            lit: self.lit,
-            state: self.state,
+            icon: Some(MenuIcon::Image(key)),
+            ..self
         }
+    }
+
+    /// Paint a theme-colored glyph in the same leading column as image icons.
+    pub fn glyph(mut self, glyph: Glyph) -> Self {
+        self.icon = Some(MenuIcon::Glyph(glyph));
+        self
     }
 
     /// An item that is a choice in force or a toggle: checked, it shows a tick in the
@@ -364,11 +369,21 @@ impl Widget for MenuItem<'_> {
             let at = pos2(inner.left() + t.icon.small / 2.0, rect.center().y);
             if self.checked == Some(true) {
                 Glyph::Tick.paint(ui.painter(), at, c.text.primary);
-            } else if let Some(key) = self.icon
-                && let Some(image) =
-                    crate::icons::image(key, t.icon.small, ui.ctx().theme(), enabled)
-            {
-                image.paint_at(ui, Rect::from_center_size(at, Vec2::splat(t.icon.small)));
+            } else {
+                match self.icon {
+                    Some(MenuIcon::Glyph(glyph)) => glyph.paint(ui.painter(), at, c.text.primary),
+                    Some(MenuIcon::Image(key)) => {
+                        if let Some(image) =
+                            crate::icons::image(key, t.icon.small, ui.ctx().theme(), enabled)
+                        {
+                            image.paint_at(
+                                ui,
+                                Rect::from_center_size(at, Vec2::splat(t.icon.small)),
+                            );
+                        }
+                    }
+                    None => {}
+                }
             }
             let label = inner.with_min_x(inner.left() + lead);
             let ink = c.text.primary;

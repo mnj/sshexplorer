@@ -1,5 +1,6 @@
 //! File actions shared by Tree view, Folder view and Search matches.
 use super::*;
+use crate::widgets::Glyph;
 
 pub(super) enum RowAction {
     Open,
@@ -8,27 +9,80 @@ pub(super) enum RowAction {
     Properties,
 }
 
-impl RowAction {
-    pub(super) fn menu(
+impl Session {
+    /// Zero when a context download would first select this row.
+    fn row_selection_size(&self, i: usize) -> usize {
+        let (selected, count) = match &self.search {
+            Some(searching) => (
+                searching.matches.is_selected(i),
+                searching.matches.selected_count(),
+            ),
+            None => (self.rows().is_selected(i), self.rows().selected_count()),
+        };
+        if selected { count } else { 0 }
+    }
+
+    pub(super) fn row_menu(
+        &self,
+        i: usize,
         response: &egui::Response,
-        online: bool,
         downloadable: bool,
         expanded: bool,
-    ) -> Option<Self> {
+        frame: &Frame<'_>,
+    ) -> Option<RowAction> {
         widgets::row_context_menu(response, |ui| {
+            let keys = frame.keymap;
+            let online = !self.is_disconnected();
+            let count = self.row_selection_size(i);
             let mut picked = None;
-            for (label, action, enabled) in [
+            let (open, glyph) = if expanded {
+                ("Collapse", Glyph::ChevronUp)
+            } else {
+                ("Open", Glyph::Open)
+            };
+            let download = if count > 1 {
+                format!("Download {count} items")
+            } else {
+                "Download".into()
+            };
+            for (label, glyph, action, shortcut, enabled) in [
+                (open, glyph, RowAction::Open, Some(Action::Open), online),
                 (
-                    if expanded { "Collapse" } else { "Open" },
-                    Self::Open,
-                    online,
+                    download.as_str(),
+                    Glyph::Download,
+                    RowAction::Download,
+                    Some(Action::Download),
+                    online && downloadable,
                 ),
-                ("Download", Self::Download, online && downloadable),
-                ("Copy path", Self::CopyPath, true),
-                ("Properties", Self::Properties, true),
+                ("Copy path", Glyph::Copy, RowAction::CopyPath, None, true),
+                ("Properties", Glyph::Info, RowAction::Properties, None, true),
             ] {
-                if ui.add_enabled(enabled, widgets::menu_item(label)).clicked() {
+                if matches!(action, RowAction::Properties) {
+                    widgets::menu_separator(ui);
+                }
+                let mut item = widgets::menu_item(label).glyph(glyph);
+                if let Some(binding) = shortcut.and_then(|action| keys.binding(action)) {
+                    item = item.shortcut(binding.label(cfg!(target_os = "macos")));
+                }
+                if ui.add_enabled(enabled, item).clicked() {
                     picked = Some(action);
+                }
+            }
+            // The popup owns the shortcut target, even if another row was selected.
+            // Enter on a focused menu item is handled by that button.
+            if frame.keys && ui.is_enabled() && picked.is_none() {
+                let shortcut = ui.input_mut(|input| {
+                    if keys.take(input, Action::Download) {
+                        (online && downloadable).then_some(RowAction::Download)
+                    } else if keys.take(input, Action::Open) {
+                        online.then_some(RowAction::Open)
+                    } else {
+                        None
+                    }
+                });
+                if shortcut.is_some() {
+                    ui.close();
+                    picked = shortcut;
                 }
             }
             picked
@@ -56,11 +110,7 @@ impl Session {
         match action {
             RowAction::Open => self.apply(Command::DoubleClick(i), now),
             RowAction::Download => {
-                let selected = self
-                    .search
-                    .as_ref()
-                    .map_or_else(|| self.rows().is_selected(i), |s| s.matches.is_selected(i));
-                if !selected {
+                if self.row_selection_size(i) == 0 {
                     self.apply(Command::Click(i), now);
                 }
                 self.download(self.download_options(settings));

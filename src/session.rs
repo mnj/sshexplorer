@@ -60,7 +60,7 @@ use crate::widgets::{self, RowLook, Tooltip as _};
 
 mod navigation;
 mod properties;
-use properties::{Properties, RowAction};
+use properties::Properties;
 mod reconnecting;
 mod searching;
 
@@ -102,8 +102,11 @@ impl Rows<'_> {
         }
     }
 
-    fn any_selected(self) -> bool {
-        (0..self.len()).any(|i| self.is_selected(i))
+    fn selected_count(self) -> usize {
+        match self {
+            Rows::Tree(tree) => tree.selected_count(),
+            Rows::Folder(folder) => folder.selected_count(),
+        }
     }
 
     /// The Current directory.
@@ -297,9 +300,9 @@ impl Session {
             return false;
         }
         if let Some(searching) = &self.search {
-            return searching.matches.selection().is_some();
+            return searching.matches.selected_count() > 0;
         }
-        self.rows().any_selected()
+        self.rows().selected_count() > 0
     }
 
     fn rows(&self) -> Rows<'_> {
@@ -590,6 +593,7 @@ impl Session {
         }
 
         let t = ui.tokens();
+        let listing_keys = frame.keys && !egui::Popup::is_any_open(ui.ctx());
         let focused_entry = self.focused();
         // Preview starts at half the Session's width.
         let half = ui.available_width() / 2.0;
@@ -610,7 +614,7 @@ impl Session {
                             focused: focused_entry,
                             keymap: frame.keymap,
                             settings: frame.settings,
-                            keys: frame.keys,
+                            keys: listing_keys,
                             zone: &self.zone,
                             audio: frame.audio,
                         },
@@ -650,7 +654,7 @@ impl Session {
             .max(1);
         let nothing_focused = ui.memory(|m| m.focused().is_none());
         let in_search = ui.memory(|m| m.has_focus(self.search_id()));
-        if frame.keys && self.search.is_some() && (focused || nothing_focused || in_search) {
+        if listing_keys && self.search.is_some() && (focused || nothing_focused || in_search) {
             // Escape stops a running Search, and clears one that has ended.
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 if self.is_searching() {
@@ -660,7 +664,7 @@ impl Session {
                 }
             }
         }
-        if frame.keys && (focused || nothing_focused) {
+        if listing_keys && (focused || nothing_focused) {
             let (next, back) = ui.input_mut(|i| {
                 let next = frame.keymap.take(i, Action::CycleFocus);
                 (next, frame.keymap.take(i, Action::CycleFocusBack))
@@ -671,8 +675,7 @@ impl Session {
         }
         if self.search.is_some() {
             let reveal = std::mem::take(&mut self.reveal);
-            let show_icons = frame.settings.appearance.show_icons;
-            self.matches_view(ui, focused, reveal, show_icons, frame.settings);
+            self.matches_view(ui, focused, reveal, &frame);
             if std::mem::take(&mut self.focus_preview) {
                 ui.memory_mut(|m| m.request_focus(self.preview.id));
             }
@@ -742,14 +745,15 @@ impl Session {
                             chevron = self.cells(row, &shown, show_icons);
                         });
                         if !shown.status
-                            && let Some(action) = RowAction::menu(
+                            && let Some(action) = self.row_menu(
+                                i,
                                 &response,
-                                !self.is_disconnected(),
                                 match self.view {
                                     View::Tree => self.tree.path(i).is_some_and(|p| p != "/"),
                                     View::Folder => shown.entry.is_some(),
                                 },
                                 shown.expanded == Some(true),
+                                &frame,
                             )
                         {
                             menu_action = Some((action, i));

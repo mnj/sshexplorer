@@ -62,13 +62,17 @@ pub enum Glyph {
     /// A group of Tools behind one Active Bar button: a small filled triangle in the
     /// bottom-right corner of the box, painted over the button's corner.
     Corner,
+    Open,
+    Download,
+    Info,
+    HostPlus,
     /// The Settings gear at the toolbar's right end.
     Gear,
 }
 
 impl Glyph {
     /// Every Glyph with its name, in the order the gallery shows them.
-    pub const ALL: [(Glyph, &'static str); 24] = [
+    pub const ALL: [(Glyph, &'static str); 28] = [
         (Glyph::ChevronDown, "chevron down"),
         (Glyph::ChevronUp, "chevron up"),
         (Glyph::ChevronRight, "chevron right"),
@@ -92,6 +96,10 @@ impl Glyph {
         (Glyph::Snap, "snap"),
         (Glyph::Copy, "copy"),
         (Glyph::Corner, "group corner"),
+        (Glyph::Open, "open"),
+        (Glyph::Download, "download"),
+        (Glyph::Info, "information"),
+        (Glyph::HostPlus, "open hosts"),
         (Glyph::Gear, "settings gear"),
     ];
 
@@ -196,6 +204,43 @@ impl Glyph {
             Glyph::Corner => {
                 let points = [(13.0, 13.0), (13.0, 7.0), (7.0, 13.0)].map(at).to_vec();
                 painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
+            }
+            Glyph::Open => {
+                open(&[
+                    (7.0, 3.5),
+                    (2.5, 3.5),
+                    (2.5, 13.5),
+                    (12.5, 13.5),
+                    (12.5, 9.0),
+                ]);
+                open(&[(7.0, 9.0), (13.0, 3.0)]);
+                open(&[(9.0, 3.0), (13.0, 3.0), (13.0, 7.0)]);
+            }
+            Glyph::Download => {
+                open(&[(8.0, 2.5), (8.0, 9.5)]);
+                open(&[(4.75, 6.5), (8.0, 9.75), (11.25, 6.5)]);
+                open(&[(2.5, 10.5), (2.5, 13.5), (13.5, 13.5), (13.5, 10.5)]);
+            }
+            Glyph::Info => {
+                painter.circle_stroke(at((8.0, 8.0)), 5.75, pen);
+                painter.circle_filled(at((8.0, 5.25)), STROKE / 2.0, color);
+                open(&[(8.0, 8.0), (8.0, 10.75)]);
+            }
+            Glyph::HostPlus => {
+                // Two server bays, with room at the lower right for the add mark.
+                open(&[
+                    (13.5, 7.5),
+                    (2.0, 7.5),
+                    (2.0, 2.5),
+                    (13.5, 2.5),
+                    (13.5, 7.5),
+                ]);
+                open(&[(2.0, 7.5), (2.0, 12.5), (7.0, 12.5)]);
+                for y in [5.0, 10.0] {
+                    painter.circle_filled(at((4.5, y)), STROKE / 2.0, color);
+                }
+                open(&[(11.75, 9.25), (11.75, 14.25)]);
+                open(&[(9.25, 11.75), (14.25, 11.75)]);
             }
             Glyph::Gear => {
                 painter.circle_stroke(at((8.0, 8.0)), GEAR_HUB, pen);

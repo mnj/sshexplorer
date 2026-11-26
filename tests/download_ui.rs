@@ -1,4 +1,4 @@
-//! Download from the window: Ctrl+S and the toolbar button, the strip, the conflict
+//! Download from the window: Ctrl+S and the file context menu, the strip, the conflict
 //! prompt that is modal to its Session only, Details, and closing during a Download.
 
 mod common;
@@ -13,7 +13,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use sshexplorer::app::{self, App};
 use sshexplorer::hosts::{Host, HostStore};
-use sshexplorer::settings::Store;
+use sshexplorer::keymap::{Action, Binding};
+use sshexplorer::settings::{AppSettings, Store};
 
 const CTRL: Modifiers = Modifiers::COMMAND;
 
@@ -37,10 +38,15 @@ fn host(fixture: &Fixture, name: &str, local: &Path) -> Host {
 /// The window with the fixture saved as the Hosts `names`, all downloading to one
 /// Local folder.
 fn window(fixture: &Fixture, names: &[&str]) -> Window {
+    configured_window(fixture, names, AppSettings::default())
+}
+
+fn configured_window(fixture: &Fixture, names: &[&str], settings: AppSettings) -> Window {
     let dir = tempfile::tempdir().unwrap();
     let local = dir.path().join("downloads");
     std::fs::create_dir_all(&local).unwrap();
     let store = Store::at(dir.path().join("settings.toml"));
+    store.save(&settings).unwrap();
     let hosts: Vec<Host> = names.iter().map(|n| host(fixture, n, &local)).collect();
     HostStore::beside(store.path()).save(&hosts).unwrap();
     let known_hosts = dir.path().join("known_hosts");
@@ -116,24 +122,27 @@ fn select(h: &mut Harness<'static, App>, name: &str) {
     h.run_ok();
 }
 
+fn download_from_menu(h: &mut Harness<'static, App>, row: &str, action: &str) {
+    h.get_by_role_and_label(Role::Row, row).click_secondary();
+    h.run_ok();
+    let shortcut = if cfg!(target_os = "macos") {
+        "⌘S"
+    } else {
+        "Ctrl+S"
+    };
+    h.get_by_role_and_label(Role::Button, &format!("{action} {shortcut}"))
+        .click();
+    h.run_ok();
+}
+
 #[test]
 fn a_context_download_uses_the_clicked_item_or_its_selection() {
     let fixture = Fixture::start();
     let mut w = window(&fixture, &["Fixture"]);
     let h = &mut w.harness;
     open(h, "Fixture");
-    let from_menu = |h: &mut Harness<'static, App>, name| {
-        h.get_by_role_and_label(Role::Row, name).click_secondary();
-        h.run_ok();
-        // The popup's Download is below the session toolbar's.
-        h.get_all_by_role_and_label(Role::Button, "Download")
-            .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
-            .unwrap()
-            .click();
-        h.run_ok();
-    };
     select(h, "notes.txt");
-    from_menu(h, "readme.md");
+    download_from_menu(h, "readme.md", "Download");
     until(h, "one context download", |h| has(h, "Downloaded 1 file"));
     assert_eq!(
         std::fs::read(w.local.join("readme.md")).unwrap(),
@@ -144,7 +153,7 @@ fn a_context_download_uses_the_clicked_item_or_its_selection() {
     h.get_by_role_and_label(Role::Row, "notes.txt")
         .click_modifiers(CTRL);
     h.run_ok();
-    from_menu(h, "readme.md");
+    download_from_menu(h, "readme.md", "Download 2 items");
     until(h, "the selected downloads", |h| {
         has(h, "Downloaded 2 files")
     });
@@ -159,16 +168,40 @@ fn a_context_download_uses_the_clicked_item_or_its_selection() {
 }
 
 #[test]
+fn the_menu_displays_and_uses_the_rebound_shortcut_for_the_clicked_file() {
+    let fixture = Fixture::start();
+    let mut settings = AppSettings::default();
+    let binding = Binding::new(CTRL, Key::J);
+    settings.keys.set(Action::Download, binding);
+    let mut w = configured_window(&fixture, &["Fixture"], settings);
+    let h = &mut w.harness;
+    open(h, "Fixture");
+    select(h, "notes.txt");
+    h.get_by_role_and_label(Role::Row, "readme.md")
+        .click_secondary();
+    h.run_ok();
+    let label = format!("Download {}", binding.label(cfg!(target_os = "macos")));
+    assert!(h.query_by_role_and_label(Role::Button, &label).is_some());
+    h.key_press_modifiers(CTRL, Key::J);
+    h.run_ok();
+    until(h, "the context download", |h| has(h, "Downloaded 1 file"));
+    assert_eq!(
+        std::fs::read(w.local.join("readme.md")).unwrap(),
+        b"# readme\n"
+    );
+    assert!(!w.local.join("notes.txt").exists());
+    assert!(h.query_by_role_and_label(Role::Button, &label).is_none());
+}
+
+#[test]
 fn ctrl_s_downloads_the_selection_and_a_clean_finish_clears_the_strip() {
     let fixture = Fixture::start();
     let mut w = window(&fixture, &["Fixture"]);
     let h = &mut w.harness;
     open(h, "Fixture");
-    // A new listing is focused on `.`, which is never selected: nothing to download.
     assert!(
-        h.get_by_role_and_label(Role::Button, "Download")
-            .accesskit_node()
-            .is_disabled()
+        h.query_by_role_and_label(Role::Button, "Download")
+            .is_none()
     );
     select(h, "notes.txt");
     h.key_press_modifiers(CTRL, Key::S);
@@ -182,10 +215,7 @@ fn ctrl_s_downloads_the_selection_and_a_clean_finish_clears_the_strip() {
     assert!(h.query_by_role_and_label(Role::Button, "Details").is_none());
     until(h, "the strip to clear", |h| !has(h, "Downloaded 1 file"));
 
-    // The toolbar button does the same.
-    select(h, "docs");
-    h.get_by_role_and_label(Role::Button, "Download").click();
-    h.run_ok();
+    download_from_menu(h, "docs", "Download");
     until(h, "the second finish", |h| has(h, "Downloaded 0 files"));
     assert!(w.local.join("docs").is_dir());
 }

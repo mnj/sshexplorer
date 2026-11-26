@@ -409,6 +409,10 @@ impl Tree {
         self.focus().is_some_and(|i| self.is_dir(i))
     }
 
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
     pub fn is_selected(&self, i: usize) -> bool {
         self.path(i).is_some_and(|p| self.selected.contains(p))
     }

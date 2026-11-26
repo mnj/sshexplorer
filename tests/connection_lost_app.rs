@@ -142,6 +142,19 @@ fn disabled(h: &Harness<'static, App>, role: Role, label: &str) -> bool {
         .is_disabled()
 }
 
+fn context_download_disabled(h: &mut Harness<'static, App>) -> bool {
+    h.get_by_role_and_label(Role::Row, "notes.txt")
+        .click_secondary();
+    h.run_ok();
+    let disabled = h
+        .get_by_label_contains("Download ")
+        .accesskit_node()
+        .is_disabled();
+    h.key_press(Key::Escape);
+    h.run_ok();
+    disabled
+}
+
 fn big() -> Vec<u8> {
     (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect()
 }
@@ -153,11 +166,11 @@ fn while_disconnected_search_and_download_are_off_and_their_keys_do_nothing() {
     let h = &mut w.harness;
     h.get_by_role_and_label(Role::Row, "notes.txt").click();
     h.run_ok();
-    assert!(!disabled(h, Role::Button, "Download"));
+    assert!(!context_download_disabled(h));
     assert!(!disabled(h, Role::TextInput, "Search"));
 
     drop_connection(&fixture, h);
-    assert!(disabled(h, Role::Button, "Download"));
+    assert!(context_download_disabled(h));
     assert!(disabled(h, Role::TextInput, "Search"));
     h.key_press_modifiers(CTRL, Key::S);
     h.run_ok();
@@ -172,7 +185,7 @@ fn while_disconnected_search_and_download_are_off_and_their_keys_do_nothing() {
     assert_eq!(std::fs::read_dir(&w.local).unwrap().count(), 0);
 
     reconnect(h);
-    assert!(!disabled(h, Role::Button, "Download"));
+    assert!(!context_download_disabled(h));
     assert!(!disabled(h, Role::TextInput, "Search"));
 }
 

@@ -197,12 +197,13 @@ impl Session {
         ui: &mut egui::Ui,
         focused: bool,
         reveal: bool,
-        show_icons: bool,
-        settings: &AppSettings,
+        frame: &Frame<'_>,
     ) {
         let Some(searching) = &self.search else {
             return;
         };
+        let settings = frame.settings;
+        let show_icons = settings.appearance.show_icons;
         let matches = &searching.matches;
         let count = matches.len();
         let counted = if count == 1 {
@@ -281,9 +282,7 @@ impl Session {
                                     row.muted(if m.is_dir { "Directory" } else { "File" });
                                 },
                             );
-                            if let Some(action) =
-                                RowAction::menu(&response, !self.is_disconnected(), true, false)
-                            {
+                            if let Some(action) = self.row_menu(i, &response, true, false, frame) {
                                 menu_action = Some((action, i));
                             }
                             let label = m.path.clone();

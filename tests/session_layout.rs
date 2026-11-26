@@ -212,8 +212,18 @@ fn the_session_bar_sits_under_its_tab_and_the_app_toolbar_above() {
         hosts.bottom() <= tab.top(),
         "Hosts {hosts:?} is not above the tab {tab:?}"
     );
+    let gear = harness
+        .get_by_role_and_label(Role::Button, "Settings")
+        .rect();
+    assert!(hosts.right() <= gear.left() && gear.left() - hosts.right() < hosts.width());
+    assert_eq!(hosts.center().y, gear.center().y);
+    assert!(hosts.left() > WIDTH * 0.75);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Download")
+            .is_none()
+    );
     for (role, label) in [
-        (Role::Button, "Download"),
         (Role::Button, "Refresh"),
         (Role::RadioButton, "Tree"),
         (Role::RadioButton, "Folder"),
@@ -238,10 +248,7 @@ fn the_tree_context_menu_copies_the_clicked_path() {
     let mut h = browsing(&fixture, &dir);
     h.get_by_role_and_label(Role::Row, "/").click_secondary();
     h.run_ok();
-    let download = h
-        .get_all_by_role_and_label(Role::Button, "Download")
-        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
-        .unwrap();
+    let download = h.get_by_label_contains("Download ");
     assert!(download.accesskit_node().is_disabled());
     h.get_by_role_and_label(Role::Button, "Copy path").click();
     h.step();

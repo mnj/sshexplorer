@@ -25,12 +25,17 @@ pub const BAR_SEPARATOR: f32 = 7.0;
 /// The toolbar along the top of the window: the base surface with a hairline under it,
 /// `toolbar_height` tall, its controls `gap` apart and vertically centred. `leading` lays
 /// out from the left end and `trailing` from the right end (the Settings gear).
-pub fn toolbar(ui: &mut Ui, leading: impl FnOnce(&mut Ui), trailing: impl FnOnce(&mut Ui)) {
+pub fn toolbar(
+    ui: &mut Ui,
+    id_salt: impl egui::AsIdSalt,
+    leading: impl FnOnce(&mut Ui),
+    trailing: impl FnOnce(&mut Ui),
+) {
     let t = ui.tokens();
     let frame = Frame::NONE
         .fill(t.color.surface.base)
         .inner_margin(Margin::symmetric(t.space.panel as i8, t.space.bar_y as i8));
-    Panel::top("toolbar")
+    Panel::top(id_salt)
         .frame(frame)
         .resizable(false)
         .exact_size(t.toolbar_height())

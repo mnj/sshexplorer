@@ -162,7 +162,7 @@ fn match_properties_load_metadata_from_its_parent_and_open_reveals_the_file() {
     );
     h.get_by_role_and_label(Role::Button, "Close").click();
     h.run_ok();
-    menu(&mut h, "Open");
+    menu(&mut h, "Open Enter");
     until(&mut h, "the file in its parent", |h| {
         selected_rows(h) == ["needle"]
     });

@@ -423,14 +423,22 @@ impl App {
         let mut open_settings = false;
         widgets::toolbar(
             ui,
-            |ui| {
-                hosts = ui.add(widgets::button("Hosts").flat()).clicked();
-            },
+            "app-toolbar",
+            |_| {},
             |ui| {
                 open_settings = ui
                     .add(widgets::glyph_button(Glyph::Gear).name("Settings"))
                     .tooltip("Settings")
                     .clicked();
+                let hosts_button = ui.add(widgets::glyph_button(Glyph::HostPlus).name("Hosts"));
+                let tip = "Open or manage hosts";
+                hosts = match self.settings.keys.binding(Action::HostDialog) {
+                    Some(key) => {
+                        hosts_button.tooltip_key(tip, key.label(cfg!(target_os = "macos")))
+                    }
+                    None => hosts_button.tooltip(tip),
+                }
+                .clicked();
             },
         );
         if hosts {
@@ -522,20 +530,13 @@ impl App {
         }
     }
 
-    /// The active Session's own bar, under its tab: Download, the view switch, Refresh,
+    /// The active Session's own bar, under its tab: the view switch, Refresh,
     /// the place, Search, and the Session's notes.
     fn session_bar(&mut self, ui: &mut egui::Ui) {
-        let mut download = false;
         let mut dismiss = false;
         let Some(session) = self.sessions.get(self.active) else {
             return;
         };
-        let can_download = session.can_download();
-        let download_key = self
-            .settings
-            .keys
-            .binding(Action::Download)
-            .map(|b| b.label(cfg!(target_os = "macos")));
         let details = session.details.clone();
         let host = self
             .hosts
@@ -549,14 +550,6 @@ impl App {
         let mut refresh = false;
         let compact = ui.available_width() < 875.;
         let actions = |ui: &mut egui::Ui| {
-            let tip = match &download_key {
-                Some(key) => format!("Download the Selection ({key})"),
-                None => "Download the Selection".to_owned(),
-            };
-            download = ui
-                .add_enabled(can_download, widgets::button("Download").flat())
-                .tooltip(&tip)
-                .clicked();
             let mut choice = view;
             let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
             if ui.add(widgets::segmented(&mut choice, &views)).changed() {
@@ -648,7 +641,7 @@ impl App {
         if ui.available_width() < 460. {
             ui.horizontal_wrapped(actions);
         } else {
-            widgets::toolbar(ui, actions, |_| {});
+            widgets::toolbar(ui, "session-toolbar", actions, |_| {});
         }
         if let Some(session) = sessions.get_mut(index) {
             if compact {
@@ -681,9 +674,6 @@ impl App {
         }
         if dismiss && let Some(session) = self.sessions.get_mut(self.active) {
             session.details.dismissible = None;
-        }
-        if download {
-            self.download();
         }
         if let (Some(view), Some(session)) = (picked, self.sessions.get_mut(self.active)) {
             session.set_view(view);
@@ -930,6 +920,7 @@ impl App {
     fn keys(&mut self, ui: &mut egui::Ui, modal: bool) {
         let map = &self.settings.keys;
         let free = !modal && self.dialog.is_none();
+        let popup_open = egui::Popup::is_any_open(ui.ctx());
         let sessions = [
             Action::CloseSession,
             Action::NextSession,
@@ -974,7 +965,11 @@ impl App {
                 Action::Refresh,
                 Action::Search,
             ]
-            .map(|action| (free || !sessions.contains(&action)) && map.take(i, action))
+            .map(|action| {
+                (free || !sessions.contains(&action))
+                    && !(popup_open && action == Action::Download)
+                    && map.take(i, action)
+            })
         });
         if free && let Some(session) = self.sessions.get_mut(self.active) {
             ui.input_mut(|i| {

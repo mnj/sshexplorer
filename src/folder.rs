@@ -306,6 +306,10 @@ impl Folder {
         self.focus
     }
 
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
     pub fn is_selected(&self, i: usize) -> bool {
         self.entry(i)
             .is_some_and(|e| self.selected.contains(&e.name))
