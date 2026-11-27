@@ -30,6 +30,7 @@ mod bar;
 mod button;
 mod check;
 mod code;
+mod crumbs;
 mod dialog;
 mod dropdown;
 mod field;
@@ -54,6 +55,7 @@ mod tab;
 mod table;
 mod text_view;
 mod tooltip;
+mod welcome;
 mod zoom;
 
 pub use badge::{BADGE_PAD_X, BADGE_PAD_Y, Badge, BadgeTone, badge, count_pill};
@@ -71,6 +73,7 @@ pub use code::{
     CodeLine, CodeView, DetailValue, LoadingLine, Muted, Spinner, code_view, detail_value,
     loading_line, muted, spinner,
 };
+pub use crumbs::crumbs;
 pub use dialog::{Shown, Window, button_row, dialog_frame, scrim, title_row, window, window_frame};
 pub use dropdown::{
     Choice, ChoiceRow, Dropdown, FilterDropdown, Picked, choice, choice_value, dropdown,
@@ -104,7 +107,8 @@ pub use status::{
 };
 pub use stepper::{STEPPER_WIDTH, StepperField, stepper_field};
 pub use surface::{
-    CARD_GAP, card_frame, floating_frame, flyout_frame, flyout_title, mask_card_corners, paint_card,
+    CARD_GAP, PANE_PAD, card_frame, floating_frame, flyout_frame, flyout_title, mask_card_corners,
+    paint_card, pane,
 };
 pub use tab::{
     TAB_INSET, Tab, TabKind, TabResponse, accent_line, dock_strip, join_tab, tab, tab_strip,
@@ -114,4 +118,5 @@ pub use text_view::{TextView, text_view};
 pub use tooltip::{
     KeyChip, TOOLTIP_WIDTH, Tooltip, TooltipText, key_chip, tooltip_contents, tooltip_frame,
 };
+pub use welcome::{HostTile, WELCOME_WIDTH, empty_state, host_tile, tiles, welcome, welcome_title};
 pub use zoom::{ZoomShown, ZoomView, paint_page, paint_texture, zoom_bar, zoom_menu, zoom_view};

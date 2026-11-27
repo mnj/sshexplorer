@@ -557,10 +557,13 @@ impl Session {
             );
             Some(format!("{os} · {uptime}"))
         };
-        if ui.add(widgets::status_item("Downloads")).clicked() {
-            self.downloads_panel.queue_open = true;
-        }
-        ui.add(widgets::muted(state));
+        let mark = match state {
+            "Connected" => widgets::Status::Success,
+            "Reconnecting" => widgets::Status::Warning,
+            _ => widgets::Status::Error,
+        };
+        ui.add(widgets::status_mark(mark));
+        ui.add(egui::Label::new(state));
         ui.add_space(ui.tokens().space.gap);
         ui.scope(|ui| {
             if info.is_some() {
@@ -572,6 +575,10 @@ impl Session {
         if let Some(text) = info {
             ui.add_space(ui.tokens().space.gap);
             ui.add(egui::Label::new(&text).truncate()).tooltip(&text);
+        }
+        ui.add_space(ui.tokens().space.gap);
+        if ui.add(widgets::status_item("Downloads")).clicked() {
+            self.downloads_panel.queue_open = true;
         }
     }
 
@@ -594,17 +601,24 @@ impl Session {
         let focused_entry = self.focused();
         // Preview starts at half the Session's width.
         let half = ui.available_width() / 2.0;
-        let leave = widgets::splitter(ui, t.space.gap, |ui| {
+        let leave = widgets::splitter(ui, widgets::CARD_GAP, |ui| {
             egui::Panel::right(self.id.with("preview-panel"))
                 .resizable(true)
+                .show_separator_line(false)
                 .default_size(half)
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
                     // egui keeps a panel as wide as its contents, so they fill it: otherwise
                     // the panel shrinks to them and a drag of its edge springs back.
                     ui.set_min_width(ui.available_width());
-                    self.preview.ui(
+                    let mut pane = widgets::pane(
                         ui,
+                        widgets::CARD_GAP / 2.0,
+                        widgets::CARD_GAP,
+                        t.space.panel,
+                    );
+                    self.preview.ui(
+                        &mut pane,
                         PanelFrame {
                             connection: &self.connection,
                             disconnected: self.lost.is_some(),
@@ -626,6 +640,13 @@ impl Session {
             Leave::Back | Leave::Next => ui.memory_mut(|m| m.request_focus(self.id)),
         }
 
+        let mut pane = widgets::pane(
+            ui,
+            widgets::CARD_GAP,
+            widgets::CARD_GAP / 2.0,
+            widgets::PANE_PAD,
+        );
+        let ui = &mut pane;
         // The listing's focus target sits under the rows, so they still take the pointer.
         let area = ui.available_rect_before_wrap();
         ui.interact(area, self.id, Sense::focusable_noninteractive());

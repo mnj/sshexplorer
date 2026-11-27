@@ -15,6 +15,28 @@ use crate::theme::{Tokens, TokensExt as _};
 /// strip and from the window's edges.
 pub const CARD_GAP: f32 = 6.0;
 
+/// The least between a pane's rim and what it holds: enough that square content stays
+/// clear of the card's round corners. A listing's pane takes it.
+pub const PANE_PAD: f32 = 6.0;
+
+/// A pane of the Session: a card that fills the room left in `ui`, standing `left` and
+/// `right` in from its sides and [`CARD_GAP`] up from its bottom. Gives the `Ui` inside
+/// the card, `pad` in from its rim and clipped to it. The room is taken from `ui`.
+pub fn pane(ui: &mut Ui, left: f32, right: f32, pad: f32) -> Ui {
+    let t = ui.tokens();
+    let outer = ui.available_rect_before_wrap();
+    let card = Rect::from_min_max(
+        pos2(outer.left() + left, outer.top()),
+        pos2(outer.right() - right, outer.bottom() - CARD_GAP),
+    );
+    paint_card(ui, &t, card);
+    ui.advance_cursor_after_rect(outer);
+    let inner = card.shrink(pad);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+    child.set_clip_rect(card.shrink(t.stroke.hairline).intersect(ui.clip_rect()));
+    child
+}
+
 fn rim(t: &Tokens) -> Stroke {
     Stroke::new(t.stroke.hairline, t.color.stroke.hairline)
 }

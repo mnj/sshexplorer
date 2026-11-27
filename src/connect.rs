@@ -172,6 +172,17 @@ pub struct OpenRequest {
     remember: Option<String>,
 }
 
+impl OpenRequest {
+    /// The request to open a Session of the saved `host` as it is, with no Host dialog.
+    pub fn saved(host: &Host) -> OpenRequest {
+        OpenRequest {
+            host: Fields::of(host).host(),
+            named: true,
+            remember: (host.remember && !host.id.is_empty()).then(|| host.id.clone()),
+        }
+    }
+}
+
 /// A Session to open, once the OpenSSH config is applied to its request.
 pub struct Plan {
     /// Where and how to connect, or why the Session cannot.

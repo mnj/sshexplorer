@@ -73,6 +73,12 @@ pub struct PreviewPanel {
 }
 
 /// Under "Too large to preview (…)".
+/// What Preview says while no entry is focused.
+const NOTHING: &str = "Nothing to preview";
+const NOTHING_HINT: &str = "Focus a file in the listing to see it here";
+/// What Preview says for an entry it shows no contents of, such as a directory.
+const NO_PREVIEW: &str = "No preview";
+const NO_PREVIEW_HINT: &str = "Properties, in the entry's context menu, has its details";
 pub const TOO_LARGE_HINT: &str = "Download it to open it locally.";
 /// An archive with no members.
 pub const EMPTY_ARCHIVE: &str = "The archive is empty.";
@@ -203,6 +209,7 @@ impl PreviewPanel {
             focused && frame.keys && ui.input_mut(|i| frame.keymap.take(i, Action::PlayPause));
 
         let Some(shown) = self.preview.shown_mut() else {
+            widgets::empty_state(ui, widgets::Glyph::Info, NOTHING, NOTHING_HINT);
             return leave;
         };
         // Keep wide preview content inside the user-sized pane.
@@ -259,7 +266,9 @@ impl PreviewPanel {
             }
         }
         match &mut shown.body {
-            Body::Header => {}
+            Body::Header => {
+                widgets::empty_state(ui, widgets::Glyph::Info, NO_PREVIEW, NO_PREVIEW_HINT);
+            }
             Body::Loading => {
                 ui.add(widgets::loading_line(crate::preview::LOADING));
             }

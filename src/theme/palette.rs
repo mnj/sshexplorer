@@ -1,7 +1,8 @@
 //! The palette: the raw values of the Paper look, private to `theme`. Nothing outside this
 //! module's parent names a value; [`Tokens`](super::Tokens) gives each one its job.
 //!
-//! The values start from REDA's Paper palette.
+//! The values started from REDA's Paper palette and were since made neutral: a near-white
+//! window under white cards in light, a near-black one under raised cards in dark.
 
 /// A colour laid over what is underneath: a hex at an opacity in percent.
 #[derive(Clone, Copy)]
@@ -80,14 +81,14 @@ const fn soft(y: i8, blur: u8, alpha: u8) -> Soft {
 }
 
 pub(super) const LIGHT: Palette = Palette {
-    paper: [0xf0eee6, 0xfaf9f5, 0xfdfcfa],
+    paper: [0xf3f3f1, 0xffffff, 0xffffff],
     well: 0xffffff,
-    scrim_alpha: 90,
-    ink: 0x1f1e1c,
-    ink_soft: 0x59574f,
-    line: 0xdedbd0,
-    line_strong: 0xc4c0b3,
-    ink_fills: [7.0, 5.5, 11.0, 8.0],
+    scrim_alpha: 96,
+    ink: 0x18181b,
+    ink_soft: 0x5a5a62,
+    line: 0xdfdfdb,
+    line_strong: 0xc6c6c2,
+    ink_fills: [6.0, 5.0, 10.0, 7.0],
     // In light, the ring is the solid; in dark, the text strength.
     accents: [
         accent(0x4b505a, tint(0x5f6673, 14.0), 0x4b505a, 0x4b505a),
@@ -116,17 +117,17 @@ pub(super) const LIGHT: Palette = Palette {
         solid: 0x26734a,
         on_solid: WHITE,
     },
-    shadows: [soft(1, 4, 22), soft(6, 24, 26), soft(12, 40, 30)],
+    shadows: [soft(1, 3, 14), soft(8, 28, 30), soft(16, 48, 40)],
 };
 
 pub(super) const DARK: Palette = Palette {
-    paper: [0x1f1e1d, 0x262624, 0x2c2b29],
-    well: 0x1a1918,
-    scrim_alpha: 140,
-    ink: 0xf3f1ea,
-    ink_soft: 0xc2c0b7,
-    line: 0x3b3a37,
-    line_strong: 0x55534e,
+    paper: [0x111113, 0x1a1a1d, 0x26262b],
+    well: 0x0e0e10,
+    scrim_alpha: 150,
+    ink: 0xf2f2f3,
+    ink_soft: 0xbcbcc3,
+    line: 0x38383e,
+    line_strong: 0x4c4c54,
     ink_fills: [8.0, 7.0, 13.0, 10.0],
     accents: [
         accent(0xb9c0cc, tint(0x8a94a6, 22.0), 0x4f5765, 0xb9c0cc),

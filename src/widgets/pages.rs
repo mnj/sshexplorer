@@ -4,7 +4,7 @@
 //! applies at once. The Settings dialog is one.
 //!
 //! ```ignore
-//! let shown = widgets::pages_dialog(id, "Changes apply at once", &PAGES)
+//! let shown = widgets::pages_dialog(id, "Settings", &PAGES)
 //!     .reset_label("Reset Appearance to defaults")
 //!     .show(ctx, &mut page, |ui, page| { .. });
 //! if shown.close { .. }

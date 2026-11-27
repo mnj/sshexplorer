@@ -22,11 +22,11 @@ fn a_row_is_30_px_comfortable_and_26_px_compact() {
 fn colours_and_shadows_follow_light_and_dark_and_nothing_else() {
     let dark = tokens(Theme::Dark, Density::Comfortable);
     let light = tokens(Theme::Light, Density::Comfortable);
-    // Paper's warm neutral window in each.
-    assert_eq!(dark.color.surface.base, Color32::from_rgb(0x1f, 0x1e, 0x1d));
+    // The neutral window in each.
+    assert_eq!(dark.color.surface.base, Color32::from_rgb(0x11, 0x11, 0x13));
     assert_eq!(
         light.color.surface.base,
-        Color32::from_rgb(0xf0, 0xee, 0xe6)
+        Color32::from_rgb(0xf3, 0xf3, 0xf1)
     );
     assert_ne!(dark.elevation, light.elevation);
     assert_eq!(dark.space, light.space);
