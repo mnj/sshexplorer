@@ -86,7 +86,7 @@ fn browsing(fixture: &Fixture, dir: &tempfile::TempDir) -> Harness<'static, App>
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
     harness.run_ok();
     until(&mut harness, "the listing", |h| {
-        h.query_by_role_and_label(Role::Row, "README.md").is_some()
+        h.query_by_role_and_label(Role::Row, "GUIDE.md").is_some()
     });
     harness
 }
@@ -113,14 +113,14 @@ fn opened(harness: &Harness<'static, App>) -> Vec<String> {
         .collect()
 }
 
+/// The file is not named `README.md`: the fixture's home already holds `readme.md`, and
+/// the two are one file on a case-insensitive disk (macOS, Windows).
 fn with_readme() -> (Fixture, tempfile::TempDir, Harness<'static, App>) {
     let fixture = Fixture::start();
-    std::fs::write(fixture.root().join(HOME).join("README.md"), README).unwrap();
+    std::fs::write(fixture.root().join(HOME).join("GUIDE.md"), README).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut harness = browsing(&fixture, &dir);
-    harness
-        .get_by_role_and_label(Role::Row, "README.md")
-        .click();
+    harness.get_by_role_and_label(Role::Row, "GUIDE.md").click();
     harness.run_ok();
     until(&mut harness, "the rendered Markdown", |h| {
         has_label(h, "Project title")
@@ -179,7 +179,7 @@ fn a_web_link_opens_in_the_browser_and_a_relative_link_does_nothing() {
 fn the_move_keys_scroll_the_rendered_view() {
     let fixture = Fixture::start();
     let home = fixture.root().join(HOME);
-    std::fs::write(home.join("README.md"), README).unwrap();
+    std::fs::write(home.join("GUIDE.md"), README).unwrap();
     let long: String = (1..=200).map(|i| format!("Paragraph {i}\n\n")).collect();
     std::fs::write(home.join("long.md"), long).unwrap();
     let dir = tempfile::tempdir().unwrap();
