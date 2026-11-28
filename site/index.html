@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sshexplorer: browse a remote server's files over SSH</title>
+<meta name="description" content="A desktop app for browsing a remote server's files over SSH and reading them without downloading them first. Linux, macOS and Windows.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="bar">
+  <nav class="crumbs" aria-label="Site">
+    <a href="https://github.com/mnj">mnj</a>
+    <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4.5 10 8l-3.5 3.5"/></svg>
+    <a href="./" aria-current="page">sshexplorer</a>
+  </nav>
+  <nav class="links" aria-label="Project">
+    <a href="#build">Build it</a>
+    <a href="https://github.com/mnj/sshexplorer">Source on GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="intro">
+  <h1>Read what is on the server before you download any of it.</h1>
+  <p class="lede">sshexplorer is a desktop app that opens a remote filesystem over SSH and shows each file beside the listing: source, Markdown, images, PDFs, archives, logs as they grow. It uses the keys, agent and <code>~/.ssh/config</code> you already have, and installs nothing on the host.</p>
+  <p class="actions">
+    <a class="button primary" href="#build">Build from source</a>
+    <a class="button" href="https://github.com/mnj/sshexplorer">View the code</a>
+  </p>
+</section>
+
+<figure class="window">
+  <picture>
+    <source srcset="screenshots/tree-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="screenshots/tree-light.png" width="2560" height="1600" alt="A Session named Billing: the remote filesystem as a tree on the left with README.md focused, and that file rendered as Markdown on the right.">
+  </picture>
+</figure>
+
+<section class="listing" aria-labelledby="what">
+  <h2 id="what">What is in it</h2>
+  <table>
+    <thead>
+      <tr><th scope="col">Name</th><th scope="col">What it does</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row"><svg class="kind dir" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3.6l1.4 1.5h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>Tree view</th>
+        <td>The whole filesystem from <code>/</code> down, opened a directory at a time. A Session starts here.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind dir" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3.6l1.4 1.5h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>Folder view</th>
+        <td>One directory's entries, sortable by name, size, time or permissions. Breadcrumbs take you back up.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind md" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M3.5 9.5h9v5h-9z"/></svg>Preview</th>
+        <td>The focused file, shown beside the listing. Text, highlighted source, rendered Markdown, images, PDF, archive listings, audio and video.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind text" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M3.5 9.5h9v5h-9z"/></svg>Follow</th>
+        <td>Keeps a log file's latest lines on screen as the host writes them.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind src" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M3.5 9.5h9v5h-9z"/></svg>Search</th>
+        <td>Finds files and directories by name. It runs on the host, from the directory you are in.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind arc" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M3.5 9.5h9v5h-9z"/></svg>Download</th>
+        <td>Copies what you selected, directories included, to a local folder. Four files at a time, with optional <code>zstd</code> for large text.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind text" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M3.5 9.5h9v5h-9z"/></svg>Readonly</th>
+        <td>On for every new Host. Its Sessions cannot change the remote filesystem.</td>
+      </tr>
+      <tr>
+        <th scope="row"><svg class="kind text" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M3.5 9.5h9v5h-9z"/></svg>Reconnect</th>
+        <td>A dropped connection keeps its tab and listings, and comes back by itself.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="pair">
+  <figure class="window">
+    <picture>
+      <source srcset="screenshots/source-dark.png" media="(prefers-color-scheme: dark)">
+      <img src="screenshots/source-light.png" width="2560" height="1600" loading="lazy" alt="The same Session with main.rs focused: its Rust source, highlighted, with line numbers.">
+    </picture>
+    <figcaption>Source is highlighted where it sits. Nothing is copied to your disk unless you ask.</figcaption>
+  </figure>
+  <figure class="window">
+    <picture>
+      <source srcset="screenshots/welcome-dark.png" media="(prefers-color-scheme: dark)">
+      <img src="screenshots/welcome-light.png" width="2560" height="1600" loading="lazy" alt="The window at launch: three saved Hosts, each a row to click, and an Add a Host button.">
+    </picture>
+    <figcaption>Saved Hosts open with one click. Passwords can stay in the OS credential store.</figcaption>
+  </figure>
+</section>
+
+<section class="build" id="build" aria-labelledby="build-title">
+  <h2 id="build-title">Build it</h2>
+  <p>There are no packaged releases yet. sshexplorer is a Rust crate; audio and video Preview link against GStreamer, so install that first.</p>
+  <div class="steps">
+    <div>
+      <h3>macOS</h3>
+      <pre><code>brew install gstreamer pkgconf
+git clone https://github.com/mnj/sshexplorer
+cd sshexplorer
+cargo run --release</code></pre>
+    </div>
+    <div>
+      <h3>Debian and Ubuntu</h3>
+      <pre><code>sudo apt-get install pkg-config \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good gstreamer1.0-libav
+git clone https://github.com/mnj/sshexplorer
+cd sshexplorer
+cargo run --release</code></pre>
+    </div>
+  </div>
+  <p>Fedora, Arch and Windows are in <a href="https://github.com/mnj/sshexplorer/blob/main/docs/building.md">the build notes</a>.</p>
+  <h3>What it does not do yet</h3>
+  <ul>
+    <li>Open a Session that needs <code>ProxyJump</code> or <code>ProxyCommand</code>.</li>
+    <li>Upload, rename or delete. Sessions browse and download.</li>
+    <li>Search inside files. Search matches names.</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  <p>MIT licensed. Set in Inter and JetBrains Mono, the faces the app bundles, under the SIL Open Font License.</p>
+</footer>
+
+</body>
+</html>
