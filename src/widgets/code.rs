@@ -62,30 +62,38 @@ impl CodeView<'_> {
         let gap = t.space.gap;
         let page = ((ui.available_height() / row).floor() as usize).max(1);
         let scroll = self.scroll_rows * row;
-        egui::ScrollArea::both()
-            .id_salt(self.id_salt)
-            .auto_shrink(false)
-            .show_rows(ui, row, self.count, |ui, rows| {
-                if scroll != 0.0 {
-                    ui.scroll_with_delta(vec2(0.0, -scroll));
-                }
-                for i in rows {
-                    let line = (self.line)(i);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-                        let number = (i + 1).to_string();
-                        let (rect, _) = ui.allocate_exact_size(vec2(gutter, row), Sense::hover());
-                        let galley = ui.painter().layout_job(style.job(&number, muted));
-                        let at = rect.right_top() - vec2(galley.size().x, 0.0);
-                        ui.painter().galley(at, galley, muted);
-                        ui.add(
-                            Label::new(job(style, line, plain))
-                                .selectable(true)
-                                .wrap_mode(TextWrapMode::Extend),
-                        );
-                    });
-                }
-            });
+        // A row is one line of text: no gap between rows, and no control's height under
+        // them, or `show_rows` and the rows disagree on where a line is.
+        ui.scope(|ui| {
+            let spacing = ui.spacing_mut();
+            spacing.item_spacing.y = 0.0;
+            spacing.interact_size.y = row;
+            egui::ScrollArea::both()
+                .id_salt(self.id_salt)
+                .auto_shrink(false)
+                .show_rows(ui, row, self.count, |ui, rows| {
+                    if scroll != 0.0 {
+                        ui.scroll_with_delta(vec2(0.0, -scroll));
+                    }
+                    for i in rows {
+                        let line = (self.line)(i);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            let number = (i + 1).to_string();
+                            let (rect, _) =
+                                ui.allocate_exact_size(vec2(gutter, row), Sense::hover());
+                            let galley = ui.painter().layout_job(style.job(&number, muted));
+                            let at = rect.right_top() - vec2(galley.size().x, 0.0);
+                            ui.painter().galley(at, galley, muted);
+                            ui.add(
+                                Label::new(job(style, line, plain))
+                                    .selectable(true)
+                                    .wrap_mode(TextWrapMode::Extend),
+                            );
+                        });
+                    }
+                });
+        });
         page
     }
 }
