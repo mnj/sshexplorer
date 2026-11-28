@@ -1,14 +1,17 @@
 //! The main window: the toolbar along the top and, once one is open, the Sessions as tabs;
 //! and the Settings dialog over it.
 //!
-//! Launch opens no Session and lists no Hosts. Hosts, or Ctrl+O, opens the Host dialog;
-//! saved Hosts are kept in `hosts.toml` beside the settings. The tabs run along the
-//! Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle them. Under its tab, the active
-//! Session has its own bar: Download, the view switch, Refresh (also F5), the place,
-//! Search, the Readonly indicator and the Local folder. The Settings gear, and Ctrl+, from
-//! anywhere, opens the Settings dialog. Every change there applies
-//! on the next frame and is saved at once. The SSH stack starts with the first Session
-//! opened, and every network step runs on it, off this frame thread.
+//! Launch opens no Session: the window shows the welcome column, which lists the saved
+//! Hosts (a click opens a Session of one) and Add a Host. Hosts in the status bar, or
+//! Ctrl+O, opens the Host dialog; saved Hosts are kept in `hosts.toml` beside the
+//! settings. The tabs run along the Tab bar edge, and Ctrl+Tab and Ctrl+Shift+Tab cycle
+//! them. Under its tab, the active Session has its own bar: Back, Forward and Refresh
+//! (also F5), the place as breadcrumbs, the Location menu, Search and the view switch.
+//! The status bar shows the Session's connection, Downloads, the Readonly indicator and
+//! the Local folder. The Settings gear, and Ctrl+, from anywhere, opens the Settings
+//! dialog. Every change there applies on the next frame and is saved at once. The SSH
+//! stack starts with the first Session opened, and every network step runs on it, off
+//! this frame thread.
 
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -16,7 +19,7 @@ use std::sync::{Arc, mpsc};
 use egui::{Id, LayerId, Order, ViewportCommand};
 
 use crate::binding_editor::BindingEditor;
-use crate::connect::{HostAction, HostDialog, Outcome, Pending};
+use crate::connect::{HostAction, HostDialog, OpenRequest, Outcome, Pending};
 use crate::credentials;
 use crate::hosts::{Host, HostStore};
 use crate::keymap::{Action, KeyMap};
@@ -455,6 +458,19 @@ impl App {
                         .clicked();
                         if let Some(session) = self.sessions.get_mut(self.active) {
                             ui.add_space(t.space.gap);
+                            let details = &session.details;
+                            let folder = details.local_folder.display().to_string();
+                            ui.scope(|ui| {
+                                ui.set_max_width(ui.available_width() / 3.0);
+                                ui.add(egui::Label::new(folder).truncate())
+                                    .tooltip("Local folder: where Downloads are written");
+                            });
+                            if details.readonly {
+                                ui.add_space(t.space.gap);
+                                ui.add(widgets::badge("Readonly"))
+                                    .tooltip("This Session cannot change the remote filesystem");
+                            }
+                            ui.add_space(t.space.gap);
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
@@ -471,6 +487,9 @@ impl App {
         }
         self.pending.retain_mut(|opening| !opening.progress(ui));
         if self.sessions.is_empty() {
+            if self.pending.is_empty() {
+                self.welcome(ui);
+            }
             return open_settings;
         }
         let edge = self.settings.appearance.tab_bar_edge;
@@ -570,42 +589,54 @@ impl App {
         let mut toggle_pin = false;
         let busy = session.is_searching() || session.is_disconnected();
         let (view, place, refreshing) = (session.view(), session.place(), session.is_refreshing());
+        let online = !session.is_disconnected();
+        let moves = [session.can_move(-1), session.can_move(1)];
         let (sessions, index, settings) = (&mut self.sessions, self.active, &self.settings);
         let mut picked = None;
         let mut refresh = false;
-        let compact = ui.available_width() < 875.;
-        let actions = |ui: &mut egui::Ui| {
-            let mut choice = view;
-            let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
-            if ui.add(widgets::segmented(&mut choice, &views)).changed() {
-                picked = Some(choice);
+        let compact = ui.available_width() < 720.;
+        let mut go = None;
+        let mut step = None;
+        // Where the operator is, and the ways to move: at the leading end.
+        let leading = |ui: &mut egui::Ui| {
+            for (glyph, name, by, enabled) in [
+                (Glyph::ChevronLeft, "Back", -1, moves[0]),
+                (Glyph::ChevronRight, "Forward", 1, moves[1]),
+            ] {
+                let button = widgets::glyph_button(glyph).name(name);
+                if ui.add_enabled(enabled, button).tooltip(name).clicked() {
+                    step = Some(by);
+                }
             }
+            let button = widgets::glyph_button(Glyph::Refresh).name("Refresh");
             refresh = ui
-                .add_enabled(!refreshing && !busy, widgets::button("Refresh").flat())
+                .add_enabled(!refreshing && !busy, button)
                 .tooltip("Fetch the listing again")
                 .clicked();
             if refreshing {
                 ui.add(widgets::spinner());
             }
+        };
+        // The view, Search and the Location menu at the trailing end; the place between.
+        let trailing = |ui: &mut egui::Ui| {
+            let mut choice = view;
+            let views = [(View::Tree, "Tree"), (View::Folder, "Folder")];
+            if ui.add(widgets::segmented(&mut choice, &views)).changed() {
+                picked = Some(choice);
+            }
             if let Some(session) = sessions.get_mut(index) {
+                if !compact {
+                    session.search_field(ui, &settings.keys, settings);
+                }
                 widgets::menu_button("Location").show(ui, |ui| {
-                    ui.label(&place);
                     if ui.add(widgets::menu_item("Copy path")).clicked() {
                         ui.ctx().copy_text(place.clone());
                     }
                     if ui
-                        .add_enabled(!session.is_disconnected(), widgets::menu_item("Go to path"))
+                        .add_enabled(online, widgets::menu_item("Go to path"))
                         .clicked()
                     {
                         session.edit_path();
-                    }
-                    for (label, step) in [("Back", -1), ("Forward", 1)] {
-                        if ui
-                            .add_enabled(session.can_move(step), widgets::menu_item(label))
-                            .clicked()
-                        {
-                            session.move_in_history(step);
-                        }
                     }
                     if let Some(host) = host {
                         let pinned = host.bookmarks.contains(&place);
@@ -617,16 +648,13 @@ impl App {
                         toggle_pin = ui.add(widgets::menu_item(action)).clicked();
                         if !host.bookmarks.is_empty() {
                             widgets::menu_separator(ui);
-                            ui.label("Pinned folders");
+                            ui.add(widgets::muted("Pinned folders"));
                             egui::ScrollArea::vertical()
                                 .max_height(ui.available_height())
                                 .show(ui, |ui| {
                                     for path in &host.bookmarks {
                                         if ui
-                                            .add_enabled(
-                                                !session.is_disconnected(),
-                                                widgets::menu_item(path),
-                                            )
+                                            .add_enabled(online, widgets::menu_item(path))
                                             .clicked()
                                         {
                                             session.open_bookmark(path);
@@ -635,42 +663,28 @@ impl App {
                                 });
                         }
                     }
-                    if compact {
-                        if details.readonly {
-                            ui.add(widgets::badge("Readonly"));
-                        }
-                        ui.label(details.local_folder.display().to_string())
-                            .tooltip("Local folder");
-                    }
                 });
-                if !compact {
-                    let width = (ui.available_width() - 420.).clamp(45., 180.);
-                    ui.add_sized(
-                        [width, ui.tokens().control_height()],
-                        egui::Label::new(&place).truncate(),
-                    )
-                    .tooltip(place.as_str());
-                    session.search_field(ui, &settings.keys, settings);
-                }
             }
-            if !compact {
-                if details.readonly {
-                    ui.add(widgets::badge("Readonly"))
-                        .tooltip("This Session cannot change the remote filesystem");
-                }
-                let folder = details.local_folder.display().to_string();
-                ui.add(egui::Label::new(folder).truncate())
-                    .tooltip("Local folder");
-            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.shrink_clip_rect(ui.max_rect());
+                go = widgets::crumbs(ui, &place, online);
+            });
         };
-        if ui.available_width() < 460. {
-            ui.horizontal_wrapped(actions);
-        } else {
-            widgets::toolbar(ui, "session-toolbar", actions, |_| {});
-        }
+        widgets::toolbar(ui, "session-toolbar", leading, trailing);
         if let Some(session) = sessions.get_mut(index) {
+            if let Some(by) = step {
+                session.move_in_history(by);
+            }
+            if let Some(path) = go.filter(|path| *path != place) {
+                session.open_bookmark(&path);
+            }
             if compact {
-                ui.horizontal(|ui| session.search_field(ui, &settings.keys, settings));
+                let t = ui.tokens();
+                ui.horizontal(|ui| {
+                    ui.add_space(t.space.panel);
+                    session.search_field(ui, &settings.keys, settings);
+                });
+                ui.add_space(t.space.bar_y);
             }
             session.path_bar(ui);
         }
@@ -740,6 +754,94 @@ impl App {
         }
     }
 
+    /// Starts opening the Session `request` asks for.
+    fn open_session(&mut self, ctx: &egui::Context, request: OpenRequest) {
+        let plan = request.plan(&self.read_ssh_config());
+        let opening = match plan.resolved {
+            Ok(resolved) => {
+                let options = Options {
+                    known_hosts: self.known_hosts.clone(),
+                    also_known_hosts: resolved.known_hosts,
+                    connect_timeout: resolved.connect_timeout,
+                    keepalive: resolved.server_alive_interval,
+                    auth: plan.auth,
+                    key_files: resolved.key_files,
+                    identities_only: resolved.identities_only,
+                    agent: match resolved.identity_agent {
+                        IdentityAgent::Default => self.agent.clone(),
+                        IdentityAgent::Off => None,
+                        IdentityAgent::Socket(path) => Some(path),
+                    },
+                    remember: plan.remember.map(|host| ssh::Remember {
+                        store: self.credentials.clone(),
+                        host,
+                    }),
+                };
+                let ssh = self.ssh.get_or_insert_with(|| {
+                    let ctx = ctx.clone();
+                    Ssh::new(move || ctx.request_repaint())
+                });
+                ssh.connect(resolved.target, options, &plan.folder)
+            }
+            Err(proxy) => Opening::failed(Failure::Unsupported(proxy.to_string())),
+        };
+        self.next_id += 1;
+        let id = Id::NULL.with("opening").with(self.next_id);
+        self.pending.push(Pending::new(id, plan.details, opening));
+    }
+
+    /// The window with no Session: the saved Hosts to open, and the way to add one.
+    fn welcome(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        let mut add = false;
+        let key = self.settings.keys.binding(Action::HostDialog);
+        let text = "Browse remote filesystems over SSH";
+        widgets::welcome(ui, "sshexplorer", text, |ui| {
+            let t = ui.tokens();
+            if !self.hosts.is_empty() {
+                widgets::welcome_title(ui, "Saved Hosts");
+                let room = (ui.available_height() - 4.0 * t.control_height()).max(0.0);
+                egui::ScrollArea::vertical()
+                    .max_height(room)
+                    .show(ui, |ui| {
+                        widgets::tiles(ui, |ui| {
+                            for (i, host) in self.hosts.iter().enumerate() {
+                                let name = if host.display_name.is_empty() {
+                                    host.address.as_str()
+                                } else {
+                                    host.display_name.as_str()
+                                };
+                                let detail = host_detail(host);
+                                if ui.add(widgets::host_tile(name, &detail)).clicked() {
+                                    open = Some(i);
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(t.space.section);
+            }
+            ui.horizontal(|ui| {
+                let button = widgets::button("Add a Host");
+                let button = if self.hosts.is_empty() {
+                    button.primary()
+                } else {
+                    button
+                };
+                add = ui.add(button).clicked();
+                if let Some(key) = key {
+                    ui.add(widgets::key_chip(key.label(cfg!(target_os = "macos"))));
+                }
+            });
+        });
+        if add {
+            self.open_host_dialog();
+        }
+        if let Some(host) = open.and_then(|i| self.hosts.get(i)) {
+            let request = OpenRequest::saved(host);
+            self.open_session(ui.ctx(), request);
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(dialog) = &mut self.host_dialog {
             match dialog.show_with_save_error(
@@ -750,38 +852,7 @@ impl App {
             ) {
                 Some(HostAction::Open(request)) => {
                     self.host_dialog = None;
-                    let plan = request.plan(&self.read_ssh_config());
-                    let opening = match plan.resolved {
-                        Ok(resolved) => {
-                            let options = Options {
-                                known_hosts: self.known_hosts.clone(),
-                                also_known_hosts: resolved.known_hosts,
-                                connect_timeout: resolved.connect_timeout,
-                                keepalive: resolved.server_alive_interval,
-                                auth: plan.auth,
-                                key_files: resolved.key_files,
-                                identities_only: resolved.identities_only,
-                                agent: match resolved.identity_agent {
-                                    IdentityAgent::Default => self.agent.clone(),
-                                    IdentityAgent::Off => None,
-                                    IdentityAgent::Socket(path) => Some(path),
-                                },
-                                remember: plan.remember.map(|host| ssh::Remember {
-                                    store: self.credentials.clone(),
-                                    host,
-                                }),
-                            };
-                            let ssh = self.ssh.get_or_insert_with(|| {
-                                let ctx = ctx.clone();
-                                Ssh::new(move || ctx.request_repaint())
-                            });
-                            ssh.connect(resolved.target, options, &plan.folder)
-                        }
-                        Err(proxy) => Opening::failed(Failure::Unsupported(proxy.to_string())),
-                    };
-                    self.next_id += 1;
-                    let id = Id::NULL.with("opening").with(self.next_id);
-                    self.pending.push(Pending::new(id, plan.details, opening));
+                    self.open_session(ctx, *request);
                 }
                 Some(HostAction::Reload) => {
                     match self.host_store.as_ref().unwrap().load_identified() {
@@ -1086,7 +1157,7 @@ impl App {
             editor.stop();
         }
         let mut retry = false;
-        let shown = widgets::pages_dialog(id, "Changes apply at once", &PAGE_NAMES)
+        let shown = widgets::pages_dialog(id, "Settings", &PAGE_NAMES)
             .reset_label(page.reset_label())
             .show(ctx, current, |ui, page| {
                 retry = widgets::retry_save(ui, self.settings_save_error.as_deref());
@@ -1126,6 +1197,21 @@ impl App {
             self.dialog = None;
         }
     }
+}
+
+/// Where a saved Host connects, as its welcome tile says it: `account@address:port`,
+/// leaving out what the Host leaves to the OpenSSH config.
+fn host_detail(host: &Host) -> String {
+    let mut text = String::new();
+    if !host.account.is_empty() {
+        text.push_str(&host.account);
+        text.push('@');
+    }
+    text.push_str(&host.address);
+    if let Some(port) = host.port {
+        text.push_str(&format!(":{port}"));
+    }
+    text
 }
 
 /// The tooltip line of a Session tab whose Download waits for an answer.

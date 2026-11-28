@@ -1,16 +1,16 @@
 //! A tab on a tab group's strip (REDA docs/spec/v0.1/design-language.md#tabs).
 //!
-//! The front tab of a group is a card joined to the panel below it: the card's surface
-//! with no line between tab and panel. The active Document's tab adds the 2 px accent
-//! line along its top edge and the `body_strong` style. Back tabs sit on the base in
-//! muted text, with the hover fill as a rounded pill. Each tab shows its 16 px Icon, its
-//! title, the out-of-sync badge, and a modified dot that gives way to the close × on
-//! hover; the front or hovered tab shows the close ×.
+//! The front tab of a strip is a raised pill: the card's surface with its rim and soft
+//! shadow. The active Session's tab adds the 2 px accent line along the pill's bottom
+//! edge and the `body_strong` style. Back tabs sit on the base in muted text, with the
+//! hover fill as a rounded pill. Each tab shows its 16 px Icon, its title, the
+//! out-of-sync badge, and a modified dot that gives way to the close × on hover; the
+//! front or hovered tab shows the close ×.
 
 use egui::emath::GuiRounding as _;
 use egui::{
-    Align2, Color32, CornerRadius, Rect, Response, Role, Sense, Shape, Stroke, StrokeKind, Ui,
-    Vec2, WidgetInfo, pos2, vec2,
+    Align2, Color32, Rect, Response, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
+    pos2, vec2,
 };
 
 use super::button::{ICON_GAP, paint_icon};
@@ -20,11 +20,9 @@ use crate::theme::{Tokens, TokensExt as _, motion};
 
 /// How far the first tab of a strip stands in from its card's edge.
 pub const TAB_INSET: f32 = 6.0;
-/// How much smaller than the card's radius the top corners of a front tab are.
-const CORNER_LESS: f32 = 2.0;
 /// Between a tab's title and what follows it.
 const PART_GAP: f32 = 6.0;
-/// How far a back tab's hover pill stands in from the tab's edges.
+/// How far a tab's pill stands in from the tab's edges.
 const PILL_INSET: Vec2 = vec2(2.0, 3.0);
 /// How far the focus ring stands in from the tab's edges, so it stays on the strip.
 const RING_INSET: f32 = 2.0;
@@ -183,17 +181,6 @@ impl<'a> Tab<'a> {
         2.0 * t.space.tab_x + icon_width + title + PART_GAP + badge_width + glyph::BOX
     }
 
-    /// The top corners of a front tab.
-    fn corners(t: &Tokens) -> CornerRadius {
-        let r = (t.radius.card - CORNER_LESS) as u8;
-        CornerRadius {
-            nw: r,
-            ne: r,
-            sw: 0,
-            se: 0,
-        }
-    }
-
     pub fn show(self, ui: &mut Ui) -> TabResponse {
         let t = ui.tokens();
         paint::stated(ui, self.state, |ui| self.show_stated(ui, &t))
@@ -237,15 +224,17 @@ impl<'a> Tab<'a> {
 
         let p = ui.painter();
         if front {
-            let top = Self::corners(t);
-            p.rect_filled(rect, top, c.surface.card);
-            // The rim runs up one side, over the top and down the other. Below, the tab
-            // is open: it covers the rim of the card it is joined to.
+            // A raised pill on the strip: the card's surface, its rim and its soft shadow.
+            let pill = rect.shrink2(PILL_INSET);
+            p.add(t.elevation.card.as_shape(pill, t.radius.control));
             let rim = Stroke::new(t.stroke.hairline, c.stroke.hairline);
-            let open = rect.with_max_y(rect.bottom() + t.radius.card);
-            p.with_clip_rect(rect.with_max_y(rect.bottom() + t.stroke.hairline))
-                .rect_stroke(open, top, rim, StrokeKind::Inside);
-            join_tab(ui, t, rect);
+            p.rect(
+                pill,
+                t.radius.control,
+                c.surface.card,
+                rim,
+                StrokeKind::Inside,
+            );
             // The accent line fades in on the tab that becomes active, and leaves the
             // last one at once. What the tab holds swaps at once.
             let active = self.kind == TabKind::Active;
@@ -266,7 +255,7 @@ impl<'a> Tab<'a> {
                 };
                 p.rect_filled(
                     accent_line(t, rect),
-                    under_corners(t),
+                    t.stroke.accent_line / 2.0,
                     ink.gamma_multiply(line),
                 );
             }
@@ -338,25 +327,15 @@ pub fn join_tab(ui: &Ui, t: &Tokens, tab: Rect) {
     );
 }
 
-/// Where the accent line of the active Document's tab is: along the top edge, between
-/// the rounded corners.
+/// Where the accent line of the active tab is: along the bottom edge of its pill,
+/// between the rounded corners.
 pub fn accent_line(t: &Tokens, tab: Rect) -> Rect {
-    let inset = t.radius.card - CORNER_LESS;
+    let pill = tab.shrink2(PILL_INSET);
+    let inset = t.radius.control + t.space.tab_x / 2.0;
     Rect::from_min_max(
-        pos2(tab.left() + inset, tab.top()),
-        pos2(tab.right() - inset, tab.top() + t.stroke.accent_line),
+        pos2(pill.left() + inset, pill.bottom() - t.stroke.accent_line),
+        pos2(pill.right() - inset, pill.bottom()),
     )
-}
-
-/// The accent line's lower corners are rounded by its own width.
-fn under_corners(t: &Tokens) -> CornerRadius {
-    let r = t.stroke.accent_line as u8;
-    CornerRadius {
-        nw: 0,
-        ne: 0,
-        sw: r,
-        se: r,
-    }
 }
 
 /// The disconnected badge centred on `at`: a disc in the error solid crossed by a

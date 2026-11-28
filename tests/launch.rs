@@ -62,3 +62,17 @@ fn launch_draws_in_the_paper_look_in_light_and_dark() {
         assert_eq!(ctx.global_style().visuals.panel_fill, t.color.surface.base);
     }
 }
+
+#[test]
+fn launch_offers_add_a_host_which_opens_the_host_dialog() {
+    let mut harness = launch();
+    harness
+        .get_by_role_and_label(Role::Button, "Add a Host")
+        .click();
+    harness.run_ok();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Open Session")
+            .is_some()
+    );
+}

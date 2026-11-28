@@ -56,7 +56,7 @@ fn open_with_gear(h: &mut Harness<'static, App>) {
 }
 
 fn is_open(h: &Harness<'static, App>) -> bool {
-    h.query_by_role_and_label(Role::Dialog, "Changes apply at once")
+    h.query_by_role_and_label(Role::Dialog, "Settings")
         .is_some()
 }
 

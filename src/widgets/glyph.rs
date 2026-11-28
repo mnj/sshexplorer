@@ -68,11 +68,15 @@ pub enum Glyph {
     HostPlus,
     /// The Settings gear at the toolbar's right end.
     Gear,
+    /// Fetch again: an open ring that ends in an arrow head.
+    Refresh,
+    /// Add: a plus.
+    Plus,
 }
 
 impl Glyph {
     /// Every Glyph with its name, in the order the gallery shows them.
-    pub const ALL: [(Glyph, &'static str); 28] = [
+    pub const ALL: [(Glyph, &'static str); 30] = [
         (Glyph::ChevronDown, "chevron down"),
         (Glyph::ChevronUp, "chevron up"),
         (Glyph::ChevronRight, "chevron right"),
@@ -101,6 +105,8 @@ impl Glyph {
         (Glyph::Info, "information"),
         (Glyph::HostPlus, "open hosts"),
         (Glyph::Gear, "settings gear"),
+        (Glyph::Refresh, "refresh"),
+        (Glyph::Plus, "plus"),
     ];
 
     /// Paints the Glyph with its box centred on `center`, in `color`.
@@ -253,6 +259,20 @@ impl Glyph {
                     open(&[point(GEAR_RIM), point(GEAR_TIP)]);
                 }
             }
+            Glyph::Refresh => {
+                // From the arrow head round to the gap at the right.
+                let mut ring = Vec::new();
+                for step in 0..=20 {
+                    let a = (330.0 - 300.0 * step as f32 / 20.0).to_radians();
+                    ring.push((8.0 + REFRESH_RING * a.cos(), 8.0 + REFRESH_RING * a.sin()));
+                }
+                open(&ring);
+                open(&[(12.5, 2.25), (12.5, 5.5), (9.25, 5.5)]);
+            }
+            Glyph::Plus => {
+                open(&[(8.0, 3.5), (8.0, 12.5)]);
+                open(&[(3.5, 8.0), (12.5, 8.0)]);
+            }
             Glyph::Snap => {
                 for x in [2.5, 8.0, 13.5] {
                     for y in [2.5, 8.0, 13.5] {
@@ -265,6 +285,8 @@ impl Glyph {
     }
 }
 
+/// The refresh Glyph's ring.
+const REFRESH_RING: f32 = 5.0;
 /// The corner of the copy Glyph's sheet.
 const SHEET_CORNER: f32 = 1.0;
 /// The ring on the snap Glyph's middle dot.

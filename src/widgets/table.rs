@@ -203,8 +203,20 @@ impl Table {
         }
         let mut widths = resolve(&t, &columns, known.as_deref(), available, measuring);
         if self.resizable && !measuring {
-            for width in &mut widths {
-                *width = width.max(MIN_COLUMN_WIDTH);
+            // What the least width adds to the other columns comes off the fill columns,
+            // so the table stays as wide as the room it has.
+            let mut added = 0.0;
+            for (width, column) in widths.iter_mut().zip(&columns) {
+                if column.width != Width::Fill && *width < MIN_COLUMN_WIDTH {
+                    added += MIN_COLUMN_WIDTH - *width;
+                    *width = MIN_COLUMN_WIDTH;
+                }
+            }
+            let fills = columns.iter().filter(|c| c.width == Width::Fill).count();
+            for (width, column) in widths.iter_mut().zip(&columns) {
+                if column.width == Width::Fill {
+                    *width = (*width - added / fills as f32).max(MIN_COLUMN_WIDTH);
+                }
             }
         }
         let gaps = COLUMN_GAP * columns.len().saturating_sub(1) as f32;
