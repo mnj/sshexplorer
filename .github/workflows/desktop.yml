@@ -15,7 +15,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav libxkbcommon-dev xvfb xdotool
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav libxkbcommon-dev libxkbcommon-x11-dev xvfb xdotool
       - if: runner.os == 'macOS'
         run: brew install gstreamer pkgconf
       - if: runner.os == 'Windows'
